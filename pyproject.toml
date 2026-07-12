@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobfitr"
+version = "0.1.0"
+description = "Answer a few questions, get a personalized, fit-scored list of clickable job links. The consumer web app on top of the job-radar engine."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Justin Hawkes" }]
+dependencies = [
+    "job-radar",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+dev = [
+    "pytest>=7.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+jobfitr-snapshot = "jobfitr.snapshot:main"
+jobfitr-serve = "jobfitr.server:main"
+
+[project.urls]
+Homepage = "https://github.com/hawkesj12/jobfitr"
+
+[tool.setuptools]
+packages = ["jobfitr"]
+
+# job-radar is not on PyPI yet — depend on the local repo as an editable path.
+[tool.uv.sources]
+job-radar = { path = "../job-radar", editable = true }

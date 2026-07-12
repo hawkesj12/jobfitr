@@ -1,0 +1,91 @@
+# jobfitr — WIDE harvest config (the scheduled snapshot build)
+#
+# This is deliberately permissive: it pulls the BROAD job universe into
+# jobs.json. Each user's NARROW lens (their titles, boosts, excludes, min_score)
+# is applied later at request time in the API — never here. Copy to
+# web-harvest.yaml to tune without touching the committed example.
+#
+# NOTE: job_radar still runs its relevance gate during harvest, so `signal_titles`
+# must be a broad catch-all (a union of common role words across sectors) or most
+# postings get dropped before they reach the cache. Keep it wide on purpose.
+#
+# Reality check: the free, no-key boards (remotive/jobicy/remoteok/himalayas/…)
+# skew remote-tech. A broad non-tech harvest stays thin until Adzuna/USAJOBS keys
+# are added — those two self-skip with no creds, so leaving them listed is safe.
+
+profile:
+  title_queries: # what we SEARCH the boards for (broad net)
+    - software engineer
+    - developer
+    - data
+    - product manager
+    - designer
+    - marketing
+    - sales
+    - operations
+    - customer success
+    - project manager
+    - analyst
+    - writer
+    - support
+    - finance
+    - human resources
+  signal_titles: # relevance gate — broad union so most real roles pass
+    - engineer
+    - developer
+    - programmer
+    - manager
+    - analyst
+    - designer
+    - specialist
+    - coordinator
+    - director
+    - lead
+    - consultant
+    - scientist
+    - writer
+    - editor
+    - marketer
+    - accountant
+    - technician
+    - associate
+    - representative
+    - administrator
+    - strategist
+    - architect
+    - officer
+    - agent
+    - planner
+    - nurse
+    - teacher
+    - recruiter
+    - success
+    - support
+    - operations
+    - product
+    - designer
+
+filters:
+  remote_only: false # keep on-site + hybrid too; the user narrows later
+  location: remote
+  exclude_titles: [] # no exclusions at harvest — the user excludes at request time
+  max_age_days: 90 # generous; per-user freshness is applied at request time
+  min_score: 0 # harvest keeps everything; scoring/threshold happens per-request
+
+sources:
+  # Breadth (market-wide boards). The no-key ones run today; adzuna/usajobs
+  # self-skip until their keys are set, so listing them here is harmless.
+  boards:
+    - remotive
+    - jobicy
+    - arbeitnow
+    - remoteok
+    - himalayas
+    - hn
+    - braintrust
+    - techtree
+    - adzuna
+    - usajobs
+  # Depth (per-company ATS) only runs when --watchlist is passed; defaults are fine.
+  funnel:
+    auto_grow: false # a read-only harvest never mutates a watchlist file
