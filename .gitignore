@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Env / secrets — never commit keys (Adzuna / USAJOBS / OpenRouter)
+.env
+*.env
+secrets/
+
+# Runtime data (harvest cache, local shortlist)
+jobs.json
+shortlist.csv
+
+# Local session-workflow file (not part of the product)
+KICKOFF-PROMPT.md
+
+# OS
+.DS_Store
