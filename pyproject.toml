@@ -10,6 +10,19 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Justin Hawkes" }]
+keywords = ["job-search", "job-board", "fastapi", "cli", "self-hosted", "cached-harvest"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "job-radar",
     "pyyaml>=6.0",
@@ -31,6 +44,8 @@ jobfitr-serve = "jobfitr.server:main"
 
 [project.urls]
 Homepage = "https://github.com/hawkesj12/jobfitr"
+Repository = "https://github.com/hawkesj12/jobfitr"
+Issues = "https://github.com/hawkesj12/jobfitr/issues"
 
 [tool.setuptools]
 packages = ["jobfitr"]
