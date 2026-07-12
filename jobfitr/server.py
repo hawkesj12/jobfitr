@@ -13,8 +13,10 @@ shared state (a race). Only the single-threaded snapshot builder uses set_active
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import Body, FastAPI
+from fastapi.staticfiles import StaticFiles
 from job_radar.scoring import is_remote, relevant, score, top_signals
 from job_radar.util import age_int
 
@@ -95,6 +97,21 @@ def meta() -> dict:
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
+
+
+def _web_dir() -> Path:
+    """The static front end lives in ./web at the repo root; overridable for deploy."""
+    override = os.environ.get("JOBFITR_WEB_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / "web"
+
+
+# Serve the front end at / — mounted LAST so the /api/* routes above still win.
+# Guarded so the API still boots headless (e.g. before the front end exists).
+_WEB = _web_dir()
+if _WEB.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB), html=True), name="web")
 
 
 def main(argv=None) -> int:  # pragma: no cover — exercised via jobfitr-serve

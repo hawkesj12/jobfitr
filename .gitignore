@@ -20,5 +20,9 @@ shortlist.csv
 # Local session-workflow file (not part of the product)
 KICKOFF-PROMPT.md
 
+# Editors / IDEs
+.idea/
+.vscode/
+
 # OS
 .DS_Store

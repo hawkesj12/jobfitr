@@ -229,3 +229,14 @@ def test_zero_network_on_request(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["count"] >= 1
+
+
+# ── Step 1: the front end is served same-origin ───────────────────────────────
+def test_static_front_end_is_served():
+    client = TestClient(server.app)
+    root = client.get("/")
+    assert root.status_code == 200
+    assert "text/html" in root.headers["content-type"]
+    assert "jobfitr" in root.text
+    # the API still resolves — the static mount didn't shadow it
+    assert client.get("/api/health").json() == {"ok": True}

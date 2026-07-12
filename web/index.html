@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>jobfitr — jobs that actually fit you</title>
+    <meta
+      name="description"
+      content="Answer a few questions, get a ranked list of jobs that fit you — with a direct link to apply."
+    />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#results">Skip to results</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">🎯</span>
+          <span class="brand-name">jobfitr</span>
+        </div>
+        <p class="tagline">Answer a few questions. Get jobs that actually fit — with a link straight to apply.</p>
+        <p class="freshness" id="freshness" aria-live="polite"></p>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <!-- ── The 5-question form ─────────────────────────────────────────── -->
+      <form id="search-form" class="search-form" novalidate>
+        <div class="field">
+          <label for="q-titles">1. What jobs do you want?</label>
+          <small class="hint">The titles or kind of work. The more specific, the better the search.</small>
+          <input
+            type="text"
+            id="q-titles"
+            name="titles"
+            autocomplete="off"
+            placeholder="zookeeper, animal keeper, wildlife technician"
+          />
+        </div>
+
+        <div class="field">
+          <label for="q-boosts">2. What should make a job rank higher?</label>
+          <small class="hint"
+            >Anything true for you you'd want at the top — skills, tools, industry, and a city if you want nearby jobs
+            to rank up. Each becomes a scoring keyword, so only list what's genuinely you.</small
+          >
+          <input
+            type="text"
+            id="q-boosts"
+            name="boosts"
+            autocomplete="off"
+            placeholder="animal husbandry, reptiles, biology degree, Louisville"
+          />
+        </div>
+
+        <fieldset class="field field-split">
+          <legend>3. What should rank lower, or disappear?</legend>
+          <div class="split">
+            <div>
+              <label for="q-exclude" class="sub">Never show these <span class="tag tag-out">hidden</span></label>
+              <input
+                type="text"
+                id="q-exclude"
+                name="exclude"
+                autocomplete="off"
+                placeholder="intern, volunteer, recruiter"
+              />
+            </div>
+            <div>
+              <label for="q-rankdown" class="sub">Rank these down <span class="tag tag-down">sunk</span></label>
+              <input
+                type="text"
+                id="q-rankdown"
+                name="rank_down"
+                autocomplete="off"
+                placeholder="staffing, agency"
+              />
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset class="field field-split">
+          <legend>4. Where, and how fresh?</legend>
+          <div class="split">
+            <div>
+              <label for="q-location" class="sub">Where</label>
+              <input
+                type="text"
+                id="q-location"
+                name="location"
+                autocomplete="off"
+                placeholder="remote, anywhere, or a city"
+              />
+            </div>
+            <div>
+              <label for="q-maxage" class="sub">Skip anything older than</label>
+              <div class="with-suffix">
+                <input type="number" id="q-maxage" name="max_age_days" min="1" max="365" placeholder="60" />
+                <span class="suffix">days</span>
+              </div>
+            </div>
+          </div>
+        </fieldset>
+
+        <div class="field">
+          <span class="label" id="picky-label">5. How picky?</span>
+          <small class="hint">See lots of roles, or only the strong matches?</small>
+          <div class="segmented" role="radiogroup" aria-labelledby="picky-label">
+            <input type="radio" name="min_score" id="picky-plenty" value="plenty" />
+            <label for="picky-plenty">Show me plenty</label>
+            <input type="radio" name="min_score" id="picky-balanced" value="balanced" checked />
+            <label for="picky-balanced">Balanced</label>
+            <input type="radio" name="min_score" id="picky-strong" value="strong" />
+            <label for="picky-strong">Only the strong ones</label>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="submit-btn">Find my jobs</button>
+          <button type="button" class="btn btn-ghost" id="share-btn" hidden>Copy shareable link</button>
+        </div>
+      </form>
+
+      <!-- ── States + results ────────────────────────────────────────────── -->
+      <p class="notice" id="notice" hidden></p>
+
+      <section id="results-section" hidden>
+        <p class="result-summary" id="result-summary" aria-live="polite"></p>
+        <div class="cards" id="results"></div>
+      </section>
+
+      <div class="state" id="loading" hidden>
+        <span class="spinner" aria-hidden="true"></span> Scoring the latest jobs…
+      </div>
+      <div class="state" id="empty" hidden>
+        <p><strong>No matches yet.</strong></p>
+        <p class="muted">Try loosening question 5, widening your titles, or clearing an exclusion.</p>
+      </div>
+      <div class="state state-error" id="error" hidden>
+        <p><strong>Couldn't reach the job service.</strong></p>
+        <p class="muted">The server may be starting up. Give it a moment and try again.</p>
+      </div>
+    </main>
+
+    <!-- ── The applied rail (persists in localStorage) ─────────────────────── -->
+    <aside class="rail" id="rail" aria-label="Jobs you've applied to" hidden>
+      <button class="rail-toggle" id="rail-toggle" aria-expanded="false">
+        <span class="rail-count" id="rail-count">0</span>
+        <span class="rail-word">applied</span>
+      </button>
+      <div class="rail-body" id="rail-body">
+        <p class="rail-head">Applied</p>
+        <ul class="rail-list" id="rail-list"></ul>
+      </div>
+    </aside>
+
+    <!-- ── Card template ──────────────────────────────────────────────────── -->
+    <template id="card-template">
+      <article class="card">
+        <div class="card-fit">
+          <svg class="ring" viewBox="0 0 44 44" aria-hidden="true">
+            <circle class="ring-track" cx="22" cy="22" r="19" />
+            <circle class="ring-fill" cx="22" cy="22" r="19" />
+          </svg>
+          <span class="ring-score">0</span>
+          <span class="tier">Fair</span>
+        </div>
+        <div class="card-body">
+          <h3 class="card-title"><a href="#" target="_blank" rel="noopener noreferrer"></a></h3>
+          <p class="card-org"><span class="org"></span> · <span class="loc"></span></p>
+          <ul class="chips" aria-label="Why it fits"></ul>
+          <p class="snippet"></p>
+          <p class="card-meta">
+            <span class="posted"></span><span class="salary"></span><span class="source"></span>
+          </p>
+        </div>
+        <div class="card-actions">
+          <a class="btn btn-primary btn-apply" href="#" target="_blank" rel="noopener noreferrer">Apply →</a>
+          <button class="btn btn-ghost btn-dismiss" type="button">Not for me</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
