@@ -1,0 +1,25 @@
+# jobfitr web API — uvicorn serving jobfitr.server:app on loopback.
+# Caddy is the only thing that talks to it; it is never exposed publicly.
+# Install: /etc/systemd/system/jobfitr-web.service (done by bootstrap.sh).
+
+[Unit]
+Description=jobfitr web API (uvicorn)
+After=network.target
+
+[Service]
+User=jobfitr
+Group=jobfitr
+WorkingDirectory=/opt/jobfitr/jobfitr
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-serve --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+# Hardening — the web process only ever reads the cached snapshot.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

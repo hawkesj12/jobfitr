@@ -1,0 +1,14 @@
+# Fire the jobfitr harvest every 6 hours (and shortly after boot).
+# Persistent=true runs a missed harvest after downtime instead of skipping it.
+# Install: /etc/systemd/system/jobfitr-harvest.timer (done by bootstrap.sh).
+
+[Unit]
+Description=Run the jobfitr harvest every 6h
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

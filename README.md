@@ -100,7 +100,7 @@ ruff check      # lint
 
 ## Deploy
 
-Production runs both the front end and the API on one small server behind [Caddy](https://caddyserver.com/) (auto-HTTPS, same-origin), with the harvest on a scheduled timer. That deploy is tracked separately and isn't covered here.
+Production runs both the front end and the API on one small server behind [Caddy](https://caddyserver.com/) (auto-HTTPS, same-origin), with the harvest on a scheduled timer. The `deploy/` directory has everything: the Caddyfile, systemd units, and an idempotent `bootstrap.sh` that provisions a fresh Ubuntu box. See **[`deploy/README.md`](deploy/README.md)** for the full runbook.
 
 ## License
 

@@ -1,0 +1,24 @@
+# jobfitr harvest — build the jobs.json snapshot the web API serves.
+# Oneshot; fired on a schedule by jobfitr-harvest.timer. This is the ONLY thing
+# that reaches out to the job sources — user requests never do.
+# Install: /etc/systemd/system/jobfitr-harvest.service (done by bootstrap.sh).
+
+[Unit]
+Description=jobfitr harvest (build the jobs.json snapshot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+WorkingDirectory=/opt/jobfitr/jobfitr
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-snapshot --out /opt/jobfitr/data/jobs.json
+
+# Hardening — may write only the snapshot directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/data
