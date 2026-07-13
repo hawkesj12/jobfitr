@@ -1,13 +1,14 @@
-"""The web API. Serves the cached snapshot; scores it against each user's config.
+"""The web API — a live-fetch-on-search hybrid over a SQLite/FTS5 store.
 
-The one hard invariant: a request NEVER calls an external job API. It reads the
-pre-harvested jobs.json and applies the user's lens with job_radar's pure scoring
-functions. That's what decouples user count from job-API traffic (no IP bans, no
-shared-key quota burn) — and it's asserted by test_zero_network_on_request.
+A search either serves a FRESH cache (a title|location fetched < TTL ago → zero API
+calls) or does a bounded LIVE fetch (Adzuna + USAJOBS, ~1-2s, single-flighted so
+concurrent identical searches share one upstream call), then ranks the store with
+FTS5 BM25 + a personalized rerank. The daily-fetch ceiling load-sheds to the cache
+with a `degraded` banner, so the free quota can never run away.
 
-Scoring functions are passed an explicit `cfg` per request; we never call
-config.set_active() here, because the server is concurrent and that global is
-shared state (a race). Only the single-threaded snapshot builder uses set_active.
+score_jobs is a sync def so FastAPI runs it in a threadpool — the blocking live
+fetch never stalls the event loop, and live.coalesced_fetch (threading) coalesces.
+The only metered LLM path is /api/chat.
 """
 
 from __future__ import annotations
@@ -15,9 +16,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from job_radar.scoring import is_remote, relevant, score, top_signals
 from job_radar.util import age_int
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -25,27 +28,68 @@ from slowapi.util import get_remote_address
 from sse_starlette.sse import EventSourceResponse
 
 from . import chat as chatmod
-from .config_builder import config_from_dict
-from .snapshot import DEFAULT_JOBS_PATH, load_snapshot
+from . import live, store
+from .config_builder import _clean_list, config_from_dict, search_inputs
+from .snapshot import load_dotenv
 
-# Where the harvest cache lives. Overridable for tests / deployment.
-JOBS_PATH = os.environ.get("JOBFITR_JOBS_PATH", DEFAULT_JOBS_PATH)
+_ET = ZoneInfo("America/New_York")
+
+# Local dev: pull ./.env into os.environ so OPENROUTER_API_KEY (and the harvest keys)
+# are present when the server is started directly (python -m jobfitr.server). In
+# production these come from systemd's EnvironmentFile; load_dotenv only fills vars
+# NOT already set, so it never overrides the deployed secrets — a safe no-op there.
+load_dotenv()
+
+# Build the SQLite store schema + one-time import of any legacy jobs.json.
+store.init()
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
 SNIPPET_CHARS = 240
 DESC_CHARS = 1200
-# A genuinely strong fit_score. fit_pct scales against max(FIT_REF, the top result's
-# score) — so a strong pool reads near-full while a weak pool honestly reads low.
-FIT_REF = 25
+CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized rerank
+
+# Rerank weights (in BM25 units, ~0-5): a boost match nudges up, a rank_down sinks.
+BOOST_W = 2.0
+PENALTY_W = 3.0
+# min_score keyword → keep candidates scoring >= frac × the top result's score.
+MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
+
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
+SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
+# Daily cap on live Adzuna/USAJOBS fetches — the actuator saturation. When tripped,
+# we serve the cache with a `degraded` banner instead of burning the free quota.
+ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "800"))
 
 app = FastAPI(title="jobfitr", version="0.1.0")
 
-# Per-IP rate limiting, applied only to the metered /api/chat endpoint.
+# Per-IP rate limiting.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── daily live-fetch ceiling (the load-shed) ──────────────────────────────────
+_fetch_usage = {"date": "", "count": 0}
+_last_fetch_ok = {"at": None}
+
+
+def _today() -> str:
+    return datetime.now(_ET).date().isoformat()
+
+
+def _fetch_ceiling_reached() -> bool:
+    if _fetch_usage["date"] != _today():
+        _fetch_usage["date"] = _today()
+        _fetch_usage["count"] = 0
+    return _fetch_usage["count"] >= ADZUNA_DAILY_CEILING
+
+
+def _note_fetch() -> None:
+    if _fetch_usage["date"] != _today():
+        _fetch_usage["date"] = _today()
+        _fetch_usage["count"] = 0
+    _fetch_usage["count"] += 1
+    _last_fetch_ok["at"] = datetime.now(_ET).isoformat(timespec="seconds")
 
 
 def _snippet(text) -> str:
@@ -66,39 +110,94 @@ def _description(text) -> str:
     return " ".join(text.split())[:DESC_CHARS]
 
 
-def _fit_pct(fit_score: int, ref: int) -> int:
-    """Normalize a raw fit_score to a 0-100 gauge value (absolute-hybrid).
-
-    ref = max(FIT_REF, best score in the result set): a strong pool scales to its
-    own top (~full), a weak pool stays honestly low against the FIT_REF floor.
-    """
+def _fit_pct(fit_score: float, ref: float) -> int:
+    """Normalize the reranked score to a 0-100 gauge value, relative to the top match."""
     if ref <= 0:
-        return 0
+        return 3
     return max(3, min(100, round(100 * fit_score / ref)))
 
 
-def _shape(job: dict, fit_score: int, why: str, fit_pct: int) -> dict:
-    """The lean per-card payload the front end renders (no full JD body)."""
+def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
+    """The lean per-card payload the front end renders (store row → card)."""
+    body = c.get("body") or c.get("text") or ""
+    # the derived facet tags (real facets category/employment_type sit in their own keys)
+    tags = [t for t in (c.get("remote"), c.get("seniority"), c.get("salary_band")) if t]
     return {
-        "title": job.get("title", ""),
-        "company": job.get("company", ""),
-        "location": job.get("location", ""),
-        "url": job.get("url", ""),
-        "posted": job.get("posted", ""),
-        "source": job.get("source", "") or (job.get("sources") or [None])[0],
-        "salary": job.get("salary", ""),
-        "fit_score": fit_score,  # the raw engine score — canonical, unmodified
+        "title": c.get("title", ""),
+        "company": c.get("company", ""),
+        "location": c.get("location", ""),
+        "url": c.get("url", ""),
+        "posted": c.get("posted", ""),
+        "source": c.get("source", ""),
+        "salary": c.get("salary", ""),
+        "category": c.get("category", ""),
+        "employment_type": c.get("employment_type", ""),
+        "tags": tags,
+        "fit_score": fit_score,  # the reranked score (canonical)
         "fit_pct": fit_pct,  # derived gauge value (presentation only)
-        "why": why,  # the top fit-signal keywords that matched
-        "snippet": _snippet(job.get("text")),
-        "description": _description(job.get("text")),
+        "why": why,  # the title/boost signals that matched
+        "snippet": _snippet(body),
+        "description": _description(body),
     }
 
 
+def _rank(
+    candidates,
+    titles,
+    boosts,
+    penalties,
+    exclude,
+    min_score_key,
+    remote_only,
+    max_age_days,
+    limit,
+):
+    """Personalized rerank over BM25 candidates: relevance + boosts − penalties,
+    hard-filtered by exclude/remote/age, cut relative to the top score by pickiness."""
+    scored = []
+    why_terms = [t for t in (titles + boosts) if t]
+    for c in candidates:
+        title = (c.get("title") or "").lower()
+        if any(x in title for x in exclude):
+            continue
+        if remote_only and c.get("remote") != "remote":
+            continue
+        age = age_int(c.get("posted", ""))
+        if age is not None and age > max_age_days:
+            continue
+        blob = f"{title} {(c.get('body') or '').lower()}"
+        bonus = sum(BOOST_W for x in boosts if x and x in blob)
+        pen = sum(PENALTY_W for x in penalties if x and x in blob)
+        final = float(c.get("bm25", 0.0)) + bonus - pen
+        why = ", ".join([t for t in why_terms if t in blob][:4])
+        scored.append((c, final, why))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    top = scored[0][1] if scored else 0.0
+    floor = top * MIN_SCORE_FRAC.get(min_score_key, 0.35) if top > 0 else -1e18
+    return [x for x in scored if x[1] >= floor][:limit], top
+
+
 @app.post("/api/score")
-def score_jobs(payload: dict = Body(...)) -> dict:
-    """Rank the cached job universe against the posted 5-answer config."""
+@limiter.limit(SCORE_RATE_LIMIT)
+def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
+    """Live-fetch (or serve the fresh cache) → BM25 candidates → personalized rerank.
+
+    Runs as a sync def, so FastAPI executes it in a threadpool — the blocking live
+    fetch never stalls the event loop, and live.coalesced_fetch (threading) coalesces
+    concurrent identical searches. Degrades to the cache when the daily ceiling trips.
+    """
     cfg = config_from_dict(payload)
+    titles, location = search_inputs(payload)
+    boosts = _clean_list(payload.get("boosts"))
+    penalties = list(
+        cfg.agency_penalty.keys()
+    )  # user rank_down or the generic staffing terms
+    exclude = list(cfg.exclude_titles)
+    min_key = (
+        payload.get("min_score")
+        if isinstance(payload.get("min_score"), str)
+        else "balanced"
+    )
     limit = payload.get("limit")
     limit = (
         DEFAULT_LIMIT
@@ -106,31 +205,49 @@ def score_jobs(payload: dict = Body(...)) -> dict:
         else min(limit, MAX_LIMIT)
     )
 
-    snap = load_snapshot(JOBS_PATH)
-    scored = []
-    for job in snap.get("jobs", []):
-        title = job.get("title", "")
-        if not relevant(title, cfg):
-            continue
-        if not is_remote(job, cfg):
-            continue
-        age = age_int(job.get("posted", ""))
-        if age is not None and age > cfg.max_age_days:
-            continue
-        s = score(job, cfg)
-        if s < cfg.min_score:
-            continue
-        scored.append((job, s))
+    degraded = None
+    if titles:
+        key = store.search_key(titles, location)
+        if store.search_fresh(key):
+            pass  # the cache is fresh (< TTL) — no API call
+        elif _fetch_ceiling_reached():
+            degraded = "adzuna_daily_limit"  # load-shed: serve the cache
+        else:
+            try:
+                rows = live.coalesced_fetch(
+                    titles, location
+                )  # blocking (in threadpool), single-flight
+                if rows:
+                    store.upsert_jobs(rows)
+                store.mark_fetched(key)
+                _note_fetch()
+            except Exception:  # noqa: BLE001
+                degraded = "fetch_error"  # serve whatever's cached
 
-    scored.sort(key=lambda t: t[1], reverse=True)
-    scored = scored[:limit]
-    # fit_pct is relative to the strongest match in THIS result set (floored at
-    # FIT_REF), so it needs the whole set first — hence the second pass.
-    ref = max(FIT_REF, max((s for _, s in scored), default=0))
+    candidates = store.bm25_candidates(titles, limit=CANDIDATE_LIMIT) if titles else []
+    kept, top = _rank(
+        candidates,
+        titles,
+        boosts,
+        penalties,
+        exclude,
+        min_key,
+        cfg.remote_only,
+        cfg.max_age_days,
+        limit,
+    )
+    ref = max(top, 0.1)
     results = [
-        _shape(job, s, top_signals(job, cfg=cfg), _fit_pct(s, ref)) for job, s in scored
+        _shape(c, round(final), why, _fit_pct(final, ref)) for c, final, why in kept
     ]
-    return {"count": len(results), "meta": snap.get("meta", {}), "jobs": results}
+    facets = store.facet_counts([c for c, _, _ in kept])
+    return {
+        "count": len(results),
+        "degraded": degraded,
+        "facets": facets,
+        "pool": store.pool_size(),
+        "jobs": results,
+    }
 
 
 @app.post("/api/chat")
@@ -159,13 +276,26 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)):
 
 @app.get("/api/meta")
 def meta() -> dict:
-    """Harvest freshness for the UI (when the cache was built, how many jobs)."""
-    return load_snapshot(JOBS_PATH).get("meta", {})
+    """Pool freshness for the UI (how many jobs, newest posting)."""
+    return {"count": store.pool_size(), "harvested_at": store.newest_posted()}
 
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    """Status for you + an uptime monitor: which feeds are live, budget used, freshness."""
+    return {
+        "ok": True,
+        "adzuna_ok": bool(
+            os.environ.get("ADZUNA_APP_ID") and os.environ.get("ADZUNA_APP_KEY")
+        ),
+        "openrouter_ok": chatmod.chat_available(),
+        "daily_fetches_used": _fetch_usage["count"]
+        if _fetch_usage["date"] == _today()
+        else 0,
+        "daily_fetch_ceiling": ADZUNA_DAILY_CEILING,
+        "pool_size": store.pool_size(),
+        "last_successful_fetch": _last_fetch_ok["at"],
+    }
 
 
 def _web_dir() -> Path:

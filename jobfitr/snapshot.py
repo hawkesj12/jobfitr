@@ -76,6 +76,19 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
     }
     snapshot = {"meta": meta, "jobs": jobs}
 
+    # Feed the SQLite store — this is the demoted baseline inflow to the pool (the
+    # per-search live fetch owns freshness now). upsert_jobs dedups by url and
+    # refreshes last_seen, so a re-harvest keeps existing jobs alive rather than
+    # thrashing them. Best-effort: a store hiccup must not fail the harvest.
+    try:
+        from . import store
+
+        store.upsert_jobs(jobs)
+    except Exception:  # noqa: BLE001 — the jobs.json write below is the source of truth
+        pass
+
+    # Keep writing jobs.json too: it's the rollback artifact (old code reads it) and
+    # the store's one-time import seed on a fresh box.
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out) + ".tmp")

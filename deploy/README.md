@@ -1,17 +1,20 @@
 # Deploying jobfitr to the VPS
 
-The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger VPS. The app's front end and API run same-origin behind Caddy; a systemd timer refreshes the job cache every few hours.
+The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger VPS. The app's front end and API run same-origin behind Caddy. jobfitr is a **live-fetch-on-search hybrid**: a search serves a fresh SQLite cache when it has one, or fetches Adzuna + USAJOBS live (single-flighted, ~1–2s) and ranks with FTS5 BM25 + a personalized rerank. A daily baseline harvest keeps a broad floor; a nightly eviction garbage-collects; a daily fetch ceiling load-sheds to the cache.
 
 > **This is the irreversible half of the build.** It wipes/changes a live server and live DNS. Do it deliberately, in order. Every step here is reversible _except_ an SSH lockdown done wrong — which is why hardening is last and guarded.
 
 ## What gets set up
 
-| Piece         | Where                                                                                 |
-| ------------- | ------------------------------------------------------------------------------------- |
-| App (uvicorn) | `jobfitr-web.service` → `127.0.0.1:8000`, non-root `jobfitr` user                     |
-| Job cache     | `jobfitr-harvest.timer` → `jobfitr-snapshot` every 6h → `/opt/jobfitr/data/jobs.json` |
-| TLS + routing | Caddy: serves `web/`, proxies `/api/*`, auto-HTTPS                                    |
-| Secrets       | `/etc/jobfitr/jobfitr.env` (`chmod 640`, root:jobfitr) — **never in git**             |
+| Piece          | Where                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| App (uvicorn)  | `jobfitr-web.service` → `127.0.0.1:8000`, non-root `jobfitr` user; reads/writes the store |
+| Job store      | SQLite/FTS5 at `/opt/jobfitr/data/jobs.db` (`JOBFITR_DB_PATH`) — the pool the app ranks   |
+| Baseline floor | `jobfitr-harvest.timer` → `jobfitr-snapshot` **daily** → jobs.json + upserts the store    |
+| Pool eviction  | `jobfitr-evict.timer` → `jobfitr-evict` nightly 03:30 — deletes unseen>14d / posted>60d   |
+| Load-shed      | `ADZUNA_DAILY_CEILING` (env, default 200) → past it, a search degrades to the cache       |
+| TLS + routing  | Caddy: serves `web/`, proxies `/api/*`, auto-HTTPS                                        |
+| Secrets        | `/etc/jobfitr/jobfitr.env` (`chmod 640`, root:jobfitr) — **never in git**                 |
 
 ## Prerequisites
 
@@ -42,7 +45,7 @@ Copy this repo's `deploy/bootstrap.sh` to the box (or let it clone the repo itse
 sudo bash bootstrap.sh
 ```
 
-It's idempotent: installs Caddy + uv, clones `job-radar` + `jobfitr`, builds the venv, installs the units + Caddyfile, enables the web service + harvest timer, and runs a first harvest. It does **not** touch SSH or the firewall yet.
+It's idempotent: installs Caddy + uv, clones `job-radar` + `jobfitr`, builds the venv, installs the units + Caddyfile, enables the web service + harvest timer + **evict timer**, and runs a first harvest. On first request the app **auto-imports any existing `jobs.json` into the new SQLite store once** (the migration is seamless — no manual step). It does **not** touch SSH or the firewall yet.
 
 ### 3. Add the real keys
 
@@ -74,13 +77,13 @@ Hostinger keeps zone snapshots, so a bad edit rolls back. Once DNS resolves to t
 ### 5. Verify
 
 ```bash
-curl -s https://jobfitr.app/api/health           # {"ok":true}
-curl -s https://jobfitr.app/api/meta | jq .count # nonzero
-systemctl list-timers | grep jobfitr             # harvest scheduled
-ss -tlnp | grep -E ':(80|443|22|8000)'           # 8000 is 127.0.0.1 only
+curl -s https://jobfitr.app/api/health | jq .    # ok + adzuna_ok/openrouter_ok/pool_size/daily_fetches_used
+curl -s https://jobfitr.app/api/meta | jq .count  # pool size, nonzero after first harvest
+systemctl list-timers | grep jobfitr              # harvest (daily) + evict (nightly) scheduled
+ss -tlnp | grep -E ':(80|443|22|8000)'            # 8000 is 127.0.0.1 only
 ```
 
-Open `https://jobfitr.app` — the form should return cards with a padlock.
+Open `https://jobfitr.app` — a non-tech search (e.g. "grocery store manager") should fetch live in ~2–4s and return ranked cards with a padlock. A repeat of the same search is instant (served from the fresh cache).
 
 ### 6. Harden — LAST, and only after confirming key login works
 
@@ -92,14 +95,37 @@ sudo HARDEN=1 SSH_USER=<your-sudo-user> bash bootstrap.sh
 
 This enables ufw (22/80/443) + fail2ban and disables SSH password auth — but **only if `<your-sudo-user>` already has an `authorized_keys`**; otherwise it refuses, so it can't lock you out.
 
+## Upgrading a live box to the live-fetch hybrid (zero-downtime cutover)
+
+For a box already running the old pure-cache build:
+
+```bash
+# 1. add the new env vars (JOBFITR_DB_PATH already defaulted by a fresh bootstrap;
+#    on an existing box add them by hand)
+sudo nano /etc/jobfitr/jobfitr.env        # + JOBFITR_DB_PATH=/opt/jobfitr/data/jobs.db
+                                          # + ADZUNA_DAILY_CEILING=200
+# 2. pull the new code + reinstall (sqlite3+fts5 are stdlib — no new deps)
+sudo -u jobfitr sh -c "cd /opt/jobfitr/jobfitr && git pull && .venv/bin/uv pip install -e '.[web]'"
+# 3. install the new/updated units
+sudo install -m 644 /opt/jobfitr/jobfitr/deploy/jobfitr-*.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now jobfitr-evict.timer
+# 4. restart the web service — it auto-imports the existing jobs.json into jobs.db on
+#    the first request (seamless), then live-fetches on misses
+sudo systemctl restart jobfitr-web
+```
+
+On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json` **once**, so the pool is never empty during the cutover.
+
 ## Rollback
 
-- App: `systemctl stop jobfitr-web jobfitr-harvest.timer`.
+- **To the pre-hybrid build:** `git checkout <prev-commit>` + reinstall + `systemctl restart jobfitr-web`. The old code reads `jobs.json`, which is left untouched (the harvest still writes it), so a rollback needs nothing else. Optionally `systemctl disable --now jobfitr-evict.timer`.
+- App: `systemctl stop jobfitr-web jobfitr-harvest.timer jobfitr-evict.timer`.
 - DNS: re-PUT the previous record (or restore the Hostinger zone snapshot).
 - The box is provision-in-place; nothing here is destroyed that a re-run of `bootstrap.sh` won't rebuild.
 
 ## Never
 
-- Commit `/etc/jobfitr/jobfitr.env`, any key, or the Hostinger token.
+- Commit `/etc/jobfitr/jobfitr.env`, any key, the Hostinger token, or the box's `jobs.json` / `jobs.db`.
 - Disable SSH password auth before a second session proves your key works.
 - Upgrade the VPS plan — KVM 2 is plenty; this deploy costs nothing new.

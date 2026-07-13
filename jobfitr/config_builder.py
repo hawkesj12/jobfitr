@@ -61,6 +61,19 @@ def _clean_list(value) -> list[str]:
     return out
 
 
+def search_inputs(doc: dict) -> tuple[list[str], str]:
+    """The SEARCH half of the config — what to send to the live APIs.
+
+    titles + location define what jobs to fetch; the RANKING half (boosts, exclude,
+    rank_down, min_score) is applied later at scoring. Splitting them lets the fetch
+    start from just the first answers.
+    """
+    doc = doc or {}
+    titles = _clean_list(doc.get("titles"))
+    loc = doc.get("location")
+    return titles, (loc.strip() if isinstance(loc, str) else "")
+
+
 def _resolve_min_score(value, default: int = _DEFAULT_PICKINESS) -> int:
     """A pickiness keyword or an explicit integer → a min_score int."""
     if value is None:
@@ -116,7 +129,9 @@ def config_from_dict(doc: dict) -> Config:
     # technical-staff) — meaningless for a general audience and unfair to those roles.
     cfg.title_penalty = {}
 
-    # Location / remote.
+    # Location / remote. Default to SHOW ALL (not job_radar's remote_only=True) — a
+    # general-audience user who names no location wants every job, not remote-only.
+    cfg.remote_only = False
     location = doc.get("location")
     remote_only = doc.get("remote_only")
     if isinstance(location, str) and location.strip():

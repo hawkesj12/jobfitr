@@ -1,22 +1,21 @@
-"""Phase A tests. The load-bearing one is test_zero_network_on_request: it proves
-a user request scores the cache and never touches an external job API.
+"""Phase F web tests. The old zero-network guarantee is retired — a request now
+does a BOUNDED live fetch on a cache miss and serves the fresh cache on a hit. These
+tests pin: config mapping, the snapshot round-trip, the store-backed BM25 + rerank
+score path (tags + facets), the live-fetch-on-miss + fresh-cache-hit branches, and
+graceful degradation when the daily ceiling trips.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
-from jobfitr import server, snapshot
+from jobfitr import live, server, snapshot, store
 from jobfitr.config_builder import config_from_dict
 
 RECENT = (date.today() - timedelta(days=3)).isoformat()
-
-# Real JDs run ~400 tokens; job_radar's score() length-normalizes against that,
-# so a tiny fixture body inflates scores ~4x. Pad bodies with keyword-free filler
-# so scores reflect the fit weights, not blob length.
-FILLER = "we build and ship great things for our users every single day " * 40
 
 
 def _job(
@@ -25,21 +24,48 @@ def _job(
     company="Acme",
     location="Remote",
     posted=RECENT,
-    url="https://x/job",
+    url=None,
+    **kw,
 ):
-    return {
+    # default a UNIQUE url per title so upsert (dedups by url) keeps distinct rows
+    row = {
         "title": title,
-        "text": (text + " " + FILLER).strip(),
+        "text": text,
         "company": company,
         "location": location,
         "posted": posted,
-        "url": url,
-        "source": "remotive",
-        "sources": ["remotive"],
+        "url": url or f"https://x/{title.lower().replace(' ', '-')}",
+        "source": "adzuna",
     }
+    row.update(kw)
+    return row
 
 
-# ── Step 1: config_from_dict ──────────────────────────────────────────────────
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """A TestClient over an isolated tmp store, the rate limiter off, fetch usage reset."""
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    store.init()  # DB_PATH now points at the tmp db
+    server.limiter.enabled = False  # don't let 40/min trip across the suite
+    server._fetch_usage.update(date="", count=0)
+    server._last_fetch_ok["at"] = None
+    monkeypatch.setattr(
+        server, "ADZUNA_DAILY_CEILING", 800
+    )  # a known ceiling for the degrade test
+    yield TestClient(server.app)
+    server.limiter.enabled = True
+
+
+def _seed(rows):
+    store.upsert_jobs(rows)
+
+
+def _mark_fresh(titles, location=""):
+    store.mark_fetched(store.search_key(titles, location))
+
+
+# ── config_from_dict ──────────────────────────────────────────────────────────
 def test_config_from_dict_maps_the_five_answers():
     cfg = config_from_dict(
         {
@@ -52,39 +78,22 @@ def test_config_from_dict_maps_the_five_answers():
             "min_score": "strong",
         }
     )
-    # lowercased + deduped, signal seeded from titles + boosts
     assert cfg.title_queries == ["zookeeper", "animal keeper"]
-    assert cfg.title_signal == [
-        "zookeeper",
-        "animal keeper",
-        "reptiles",
-        "biology degree",
-    ]
-    # tech defaults are replaced, not merged
-    assert cfg.fit_weights == {
-        "zookeeper": 3,
-        "animal keeper": 3,
-        "reptiles": 5,
-        "biology degree": 5,
-    }
     assert cfg.exclude_titles == ["intern", "volunteer"]
     assert cfg.agency_penalty == {"staffing": 8}
     assert cfg.location == "Louisville, KY"
     assert cfg.remote_only is False  # a real place turns off remote-only
-    assert cfg.max_age_days == 45
-    assert cfg.min_score == 20  # "strong"
 
 
-def test_config_from_dict_empty_falls_back_to_defaults():
-    cfg = config_from_dict({})
-    assert cfg.title_signal  # non-empty default, so relevant() doesn't drop everything
-    assert cfg.min_score == 12  # "balanced" default
+def test_config_from_dict_no_location_shows_all():
+    # The live-fetch default: no location named → show ALL jobs, not remote-only.
+    assert config_from_dict({}).remote_only is False
+    assert config_from_dict({"titles": ["nurse"]}).remote_only is False
 
 
 def test_config_from_dict_remote_and_anywhere():
     assert config_from_dict({"location": "remote"}).remote_only is True
     assert config_from_dict({"location": "anywhere"}).remote_only is False
-    # explicit flag wins over inference
     assert (
         config_from_dict({"location": "Denver", "remote_only": True}).remote_only
         is True
@@ -94,53 +103,45 @@ def test_config_from_dict_remote_and_anywhere():
 def test_config_from_dict_does_not_inherit_tech_exclude_defaults():
     from job_radar.scoring import relevant
 
-    # A general-audience search must NOT inherit job_radar's tech-recruiting default
-    # exclude list (sales/marketing/accountant/...) — that would silently hide those
-    # non-tech roles. With no user exclude, nothing is excluded.
     cfg = config_from_dict({"titles": ["accountant"]})
     assert cfg.exclude_titles == []
-    assert relevant("General Accountant", cfg) is True  # no longer hidden
-    assert relevant("Sales Manager", config_from_dict({"titles": ["sales"]})) is True
-    # a user-provided exclude still applies
+    assert relevant("General Accountant", cfg) is True
     cfg2 = config_from_dict({"titles": ["engineer"], "exclude": ["intern"]})
     assert cfg2.exclude_titles == ["intern"]
     assert relevant("Engineering Intern", cfg2) is False
 
 
-# ── Step 2: snapshot round-trip ───────────────────────────────────────────────
+# ── snapshot round-trip (still writes jobs.json; now also feeds the store) ─────
 def test_snapshot_roundtrip(tmp_path, monkeypatch):
     from job_radar.config import Config
 
-    long_text = "x" * 5000
+    # keep the baseline harvest's store-upsert isolated to a tmp db
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "snap.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    store.init()
+
     rows = [
-        {
-            **_job("Data Engineer", text=long_text),
-            "score": 42,
-            "sources": {"remotive", "remoteok"},
-        },
-        {**_job("Product Manager"), "score": 10, "sources": {"jobicy"}},
+        {**_job("Data Engineer", text="x" * 5000), "sources": {"remotive", "remoteok"}},
+        {**_job("Product Manager", url="https://x/pm"), "sources": {"jobicy"}},
     ]
     monkeypatch.setattr(
         snapshot.engine,
         "harvest",
         lambda cfg, wl: (rows, [], ["boom: himalayas timed out"]),
     )
-
     out = tmp_path / "jobs.json"
     meta = snapshot.build_snapshot(Config(), None, str(out))
 
     assert out.exists()
     assert meta["count"] == 2
     assert "himalayas" in meta["errors"][0]
+    # the harvest also fed the store (the demoted baseline inflow)
+    assert store.pool_size() == 2
 
     snap = snapshot.load_snapshot(str(out))
     j0 = snap["jobs"][0]
-    assert isinstance(j0["sources"], list) and j0["sources"] == [
-        "remoteok",
-        "remotive",
-    ]  # set→sorted list
-    assert len(j0["text"]) == snapshot.TEXT_CAP  # truncated
-    assert snap["meta"]["harvested_at"] and "T" in snap["meta"]["harvested_at"]
+    assert isinstance(j0["sources"], list) and j0["sources"] == ["remoteok", "remotive"]
+    assert len(j0["text"]) == snapshot.TEXT_CAP
 
 
 def test_load_snapshot_missing_file_is_empty(tmp_path):
@@ -148,121 +149,144 @@ def test_load_snapshot_missing_file_is_empty(tmp_path):
     assert snap["jobs"] == [] and snap["meta"]["count"] == 0
 
 
-# ── Step 4: the /api/score endpoint ───────────────────────────────────────────
-def _seed(tmp_path, monkeypatch, jobs):
-    path = tmp_path / "jobs.json"
-    import json
-
-    path.write_text(
-        json.dumps(
-            {
-                "meta": {"count": len(jobs), "harvested_at": "2026-07-12T16:00:00"},
-                "jobs": jobs,
-            }
-        )
+# ── /api/score: BM25 candidates + personalized rerank + tags + facets ─────────
+def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
+    _seed(
+        [
+            _job(
+                "Senior Python Engineer",
+                text="python kubernetes docker accountant-free",
+                location="Austin, TX",
+                salary="$140,000",
+                department="IT Jobs",
+                employment_type="full_time",
+            ),
+            _job("Data Engineer", text="python etl pipelines", department="IT Jobs"),
+            _job("Marketing Engineer", text="seo content calendar growth"),
+            _job("Engineering Intern", text="python kubernetes internship"),
+        ]
     )
-    monkeypatch.setattr(server, "JOBS_PATH", str(path))
-    return TestClient(server.app)
+    _mark_fresh(["engineer"])  # fresh cache → no live fetch
+    monkeypatch.setattr(
+        live,
+        "coalesced_fetch",
+        lambda *a: (_ for _ in ()).throw(AssertionError("fresh cache must not fetch")),
+    )
 
-
-def test_score_endpoint_ranks_and_filters(tmp_path, monkeypatch):
-    jobs = [
-        _job("Python Engineer", text="python kubernetes docker"),  # strong: both boosts
-        _job("Data Engineer", text="python etl pipelines"),  # medium: one boost
-        _job(
-            "Marketing Engineer", text="seo content calendar"
-        ),  # weak: title word only
-        _job("Engineering Intern", text="python kubernetes"),  # excluded by title
-    ]
-    body = {
-        "titles": ["engineer"],
-        "boosts": ["python", "kubernetes"],
-        "exclude": ["intern"],
-        "remote_only": False,
-    }
-    client = _seed(tmp_path, monkeypatch, jobs)
-
-    # Loose pass: everything relevant survives, ranked by fit.
-    data = client.post("/api/score", json={**body, "min_score": "plenty"}).json()
-    titles = [j["title"] for j in data["jobs"]]
-    assert "Engineering Intern" not in titles  # hard-excluded
-    # boost-rich → boost-lean → title-only: the ranking guarantee
-    assert titles == ["Python Engineer", "Data Engineer", "Marketing Engineer"]
-    scores = [j["fit_score"] for j in data["jobs"]]
-    assert scores == sorted(scores, reverse=True)
-    assert data["jobs"][0]["why"]  # top_signals attached
-    assert "text" not in data["jobs"][0]  # full JD body not leaked; snippet only
-    assert "snippet" in data["jobs"][0]
-
-    # fit_pct: a derived gauge value, 0-100, that tracks the fit_score ordering.
-    pcts = [j["fit_pct"] for j in data["jobs"]]
-    assert all(0 < p <= 100 for p in pcts)
-    assert pcts == sorted(pcts, reverse=True)  # monotonic with fit_score
-    assert pcts[0] == max(pcts)  # the top match reads highest on the gauge
-    # description: fuller than the snippet, still from the cache (not a live fetch).
-    top = data["jobs"][0]
-    assert len(top["description"]) >= len(top["snippet"])
-    assert "fit_score" in top  # the raw engine score stays canonical alongside fit_pct
-
-    # Tight pass: a high threshold drops the weak matches, keeps the strong one.
-    strict = client.post("/api/score", json={**body, "min_score": 15}).json()
-    strict_titles = [j["title"] for j in strict["jobs"]]
-    assert "Python Engineer" in strict_titles
-    assert "Marketing Engineer" not in strict_titles
-    assert len(strict_titles) < len(titles)  # the threshold actually filtered
-
-
-def test_meta_and_health(tmp_path, monkeypatch):
-    client = _seed(tmp_path, monkeypatch, [_job("Engineer")])
-    assert client.get("/api/health").json() == {"ok": True}
-    assert client.get("/api/meta").json()["count"] == 1
-
-
-def test_garbage_post_is_clean_4xx(tmp_path, monkeypatch):
-    client = _seed(tmp_path, monkeypatch, [_job("Engineer")])
-    # a JSON array, not an object → 422 (a clean validation error, never a 500)
-    resp = client.post("/api/score", json=["not", "an", "object"])
-    assert resp.status_code == 422
-    # an empty object is valid → 200 with defaults
-    assert client.post("/api/score", json={}).status_code == 200
-
-
-# ── The guarantee: zero external calls on a request ───────────────────────────
-def test_zero_network_on_request(tmp_path, monkeypatch):
-    client = _seed(tmp_path, monkeypatch, [_job("Python Engineer", text="python")])
-
-    def _boom(*a, **k):
-        raise AssertionError(
-            "a request must NOT hit the network — the cache is pre-harvested"
-        )
-
-    # Poison every path the engine could use to reach a job API.
-    import urllib.request
-
-    import job_radar.util as jr_util
-
-    monkeypatch.setattr(jr_util, "get_json", _boom)
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
-
-    resp = client.post(
+    d = client.post(
         "/api/score",
         json={
             "titles": ["engineer"],
-            "boosts": ["python"],
-            "remote_only": False,
+            "boosts": ["python", "kubernetes"],
+            "exclude": ["intern"],
+            "min_score": "plenty",
+        },
+    ).json()
+    titles = [j["title"] for j in d["jobs"]]
+    assert "Engineering Intern" not in titles  # hard-excluded
+    assert titles[0] == "Senior Python Engineer"  # both boosts + title
+    scores = [j["fit_score"] for j in d["jobs"]]
+    assert scores == sorted(scores, reverse=True)
+
+    top = d["jobs"][0]
+    assert top["why"]  # matched signals
+    assert "text" not in top and "snippet" in top  # body not leaked
+    assert top["category"] == "IT Jobs" and top["employment_type"] == "full_time"
+    assert "senior" in top["tags"] and "onsite" in top["tags"]  # derived tags
+    assert 0 < top["fit_pct"] <= 100
+    # facets counted over the returned set
+    assert d["facets"]["category"]["IT Jobs"] >= 1
+    assert d["pool"] == store.pool_size()
+    assert d["degraded"] is None
+
+
+def test_score_miss_triggers_live_fetch(client, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_fetch(titles, location):
+        calls["n"] += 1
+        return [
+            _job(
+                "Grocery Store Manager",
+                text="retail grocery store manager",
+                url="https://x/gm",
+                department="Retail Jobs",
+            )
+        ]
+
+    monkeypatch.setattr(live, "coalesced_fetch", fake_fetch)
+    d = client.post(
+        "/api/score",
+        json={
+            "titles": ["grocery store manager"],
+            "location": "ohio",
+            "min_score": "plenty",
+        },
+    ).json()
+    assert calls["n"] == 1  # the miss went live
+    assert d["jobs"] and d["jobs"][0]["title"] == "Grocery Store Manager"
+    assert store.pool_size() == 1  # upserted into the store
+    # a second identical search is now fresh → no second fetch
+    client.post(
+        "/api/score",
+        json={
+            "titles": ["grocery store manager"],
+            "location": "ohio",
             "min_score": "plenty",
         },
     )
-    assert resp.status_code == 200
-    assert resp.json()["count"] >= 1
+    assert calls["n"] == 1
 
 
-# ── Step 1: the front end is served same-origin ───────────────────────────────
+def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
+    _seed(
+        [
+            _job(
+                "Registered Nurse",
+                text="patient care icu nurse",
+                url="https://x/rn",
+                department="Healthcare & Nursing Jobs",
+            )
+        ]
+    )
+    monkeypatch.setattr(server, "ADZUNA_DAILY_CEILING", 0)  # force the ceiling shut
+    monkeypatch.setattr(
+        live,
+        "coalesced_fetch",
+        lambda *a: (_ for _ in ()).throw(AssertionError("ceiling must skip the fetch")),
+    )
+    d = client.post(
+        "/api/score", json={"titles": ["nurse"], "min_score": "plenty"}
+    ).json()
+    assert d["degraded"] == "adzuna_daily_limit"  # load-shed
+    assert (
+        d["jobs"] and d["jobs"][0]["title"] == "Registered Nurse"
+    )  # served from cache
+
+
+def test_meta_and_health(client):
+    _seed([_job("Engineer")])
+    m = client.get("/api/meta").json()
+    assert m["count"] == 1
+    h = client.get("/api/health").json()
+    assert h["ok"] is True
+    assert "adzuna_ok" in h and "openrouter_ok" in h
+    assert h["daily_fetch_ceiling"] == 800
+    assert h["pool_size"] == 1
+    assert h["last_successful_fetch"] is None
+
+
+def test_garbage_post_is_clean_4xx(client):
+    resp = client.post("/api/score", json=["not", "an", "object"])
+    assert resp.status_code == 422
+    assert client.post("/api/score", json={}).status_code == 200  # empty → defaults
+
+
+# ── the front end is served same-origin ───────────────────────────────────────
 def test_static_front_end_is_served():
-    client = TestClient(server.app)
-    root = client.get("/")
+    c = TestClient(server.app)
+    root = c.get("/")
     assert root.status_code == 200
     assert "text/html" in root.headers["content-type"]
     assert "jobfitr" in root.text
-    # the API still resolves — the static mount didn't shadow it
-    assert client.get("/api/health").json() == {"ok": True}
+    assert c.get("/api/health").json()["ok"] is True

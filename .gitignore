@@ -13,8 +13,13 @@ venv/
 *.env
 secrets/
 
-# Runtime data (harvest cache, local shortlist)
+# Runtime data (harvest cache, SQLite store, local shortlist) — never commit the
+# box's job data. The *.db-wal / *.db-shm are SQLite's WAL sidecar files.
 jobs.json
+jobs.db
+*.db
+*.db-wal
+*.db-shm
 shortlist.csv
 
 # Local session-workflow file (not part of the product)

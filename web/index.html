@@ -9,7 +9,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=11" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -23,29 +23,24 @@
     <main id="stage" class="stage">
       <!-- ── the chat front door ──────────────────────────────────────────────── -->
       <section id="chat-view" class="chat-view" aria-label="Describe your search">
-        <div class="echo" id="echo" aria-hidden="true"></div>
-        <div class="chatwrap">
+        <div class="transcript">
+          <div class="echo" id="echo" aria-hidden="true"></div>
+          <p class="chat-say" id="chat-say" aria-live="polite"></p>
+        </div>
+        <div class="barwrap">
           <div class="halo" aria-hidden="true"></div>
-          <div class="glass chat">
-            <p class="chat-say" id="chat-say" aria-live="polite"></p>
-            <form id="chat-form" class="chat-field" autocomplete="off">
+          <div class="pulse" id="pulse" aria-hidden="true"></div>
+          <form id="chat-form" class="chat-field" autocomplete="off">
               <input
                 id="chat-input"
                 name="message"
                 type="text"
-                placeholder="What job are you chasing?"
+                placeholder=""
                 aria-label="Tell jobfitr what job you're chasing"
               />
               <button type="submit" class="chat-send" aria-label="Send">↵</button>
             </form>
           </div>
-        </div>
-        <div class="starters" id="starters">
-          <button type="button" class="starter">Product manager</button>
-          <button type="button" class="starter">Remote software engineer</button>
-          <button type="button" class="starter">Data analyst</button>
-        </div>
-        <button type="button" class="link-quiet" id="to-form">or fill in a quick form instead</button>
       </section>
 
       <!-- ── results: the gauge-card carousel ─────────────────────────────────── -->
@@ -162,18 +157,7 @@
           <label class="flab" for="f-fit">Minimum fit <span class="val" id="f-fit-val">any</span></label>
           <input type="range" id="f-fit" min="0" max="100" value="0" />
         </div>
-        <div class="fgroup">
-          <span class="flab">Work style</span>
-          <div class="toggle3" role="group" aria-label="Work style">
-            <button type="button" data-remote="any" class="sel">Any</button>
-            <button type="button" data-remote="remote">Remote</button>
-            <button type="button" data-remote="onsite">On-site</button>
-          </div>
-        </div>
-        <div class="fgroup">
-          <span class="flab">Title tags</span>
-          <div class="tagpick" id="f-tags"></div>
-        </div>
+        <div class="facets" id="f-facets"></div>
         <div class="fgroup">
           <label class="fcheck"><input type="checkbox" id="f-agency" /> Hide staffing / agency</label>
           <label class="fcheck"><input type="checkbox" id="f-seen" /> Hide roles I've seen</label>
@@ -228,8 +212,8 @@
       </article>
     </template>
 
-    <script src="atmosphere.js"></script>
-    <script src="app.js"></script>
-    <script src="chat.js"></script>
+    <script src="atmosphere.js?v=11"></script>
+    <script src="app.js?v=11"></script>
+    <script src="chat.js?v=11"></script>
   </body>
 </html>

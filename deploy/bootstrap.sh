@@ -96,7 +96,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
 		# never in the repo. Fill in the keys you have, then:
 		#   systemctl restart jobfitr-web && systemctl start jobfitr-harvest
 		JOBFITR_JOBS_PATH=$DATA_DIR/jobs.json
+		JOBFITR_DB_PATH=$DATA_DIR/jobs.db
 		JOBFITR_WEB_DIR=$APP_DIR/web
+
+		# Live-fetch load-shed: max Adzuna/USAJOBS fetches per day before a search
+		# degrades to the cache (protects the free daily quota). Adzuna free = ~250/day.
+		ADZUNA_DAILY_CEILING=200
 
 		# Optional — broaden coverage (the free boards run without these).
 		ADZUNA_APP_ID=
@@ -114,11 +119,14 @@ log "Installing systemd units and Caddyfile"
 install -m 644 "$APP_DIR/deploy/jobfitr-web.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/jobfitr-harvest.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/jobfitr-harvest.timer" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/jobfitr-evict.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/jobfitr-evict.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
 
 systemctl daemon-reload
 systemctl enable --now jobfitr-web.service
 systemctl enable --now jobfitr-harvest.timer
+systemctl enable --now jobfitr-evict.timer
 
 # ── 9. first harvest + reload Caddy ──────────────────────────────────────────
 log "Running the first harvest (this hits the free job sources — ~1 min)"

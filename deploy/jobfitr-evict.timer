@@ -1,0 +1,15 @@
+# Fire the jobfitr eviction nightly at 03:30 (with a small randomized delay so it
+# never lands exactly on another job). Persistent=true runs a missed eviction after
+# downtime instead of skipping it. This is the outflow side of the pool control loop.
+# Install: /etc/systemd/system/jobfitr-evict.timer (done by bootstrap.sh).
+
+[Unit]
+Description=Run the jobfitr pool eviction nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

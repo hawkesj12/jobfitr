@@ -64,13 +64,10 @@ def _reset_usage(monkeypatch):
 
 
 # ── stream_chat: tokens + a config the real contract accepts ──────────────────
-def test_stream_chat_yields_tokens_then_config(monkeypatch):
+def test_stream_chat_yields_tokens_and_extracts_config(monkeypatch):
     monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
     events = _collect(
-        chat.stream_chat(
-            [{"role": "user", "content": "product manager in denver, ready to search"}],
-            {},
-        )
+        chat.stream_chat([{"role": "user", "content": "product manager in denver"}], {})
     )
     kinds = [e["event"] for e in events]
     assert "token" in kinds
@@ -81,8 +78,10 @@ def test_stream_chat_yields_tokens_then_config(monkeypatch):
     cfg = payload["config"]
     assert cfg["titles"] == ["product manager"]
     assert cfg["location"] == "Denver, CO"
-    assert payload["ready"] is True  # ready_to_search=true in the tool call
     assert "ready_to_search" not in cfg  # a tool arg, never a config field
+    # the interview gate: one user turn is not enough — ready is held even though the
+    # model set ready_to_search=true, so it can't bail before the interview completes.
+    assert payload["ready"] is False
 
     # the extracted config round-trips through the real config_from_dict contract
     built = config_from_dict(cfg)
@@ -90,12 +89,32 @@ def test_stream_chat_yields_tokens_then_config(monkeypatch):
     assert built.location == "Denver, CO"
 
 
+def test_stream_chat_go_escape_hatch_flips_ready(monkeypatch):
+    # "go" is the explicit escape hatch — search runs immediately with what we have.
+    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
+    events = _collect(chat.stream_chat([{"role": "user", "content": "just go"}], {}))
+    payload = json.loads(next(e for e in events if e["event"] == "config")["data"])
+    assert payload["ready"] is True  # said_go + titles present → ready
+
+
+def test_stream_chat_ready_after_full_interview(monkeypatch):
+    # five user turns satisfies the interview gate (with titles + ready_to_search).
+    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
+    msgs = [{"role": "user", "content": f"answer {i}"} for i in range(5)]
+    payload = json.loads(
+        next(e for e in _collect(chat.stream_chat(msgs, {})) if e["event"] == "config")[
+            "data"
+        ]
+    )
+    assert payload["ready"] is True
+
+
 def test_stream_chat_no_titles_is_not_ready(monkeypatch):
     chunks = [{"choices": [{"delta": {"content": "What kind of role are you after?"}}]}]
     monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(chunks))
-    events = _collect(chat.stream_chat([{"role": "user", "content": "hi"}], {}))
+    events = _collect(chat.stream_chat([{"role": "user", "content": "just go"}], {}))
     cfg_event = next(e for e in events if e["event"] == "config")
-    assert json.loads(cfg_event["data"])["ready"] is False
+    assert json.loads(cfg_event["data"])["ready"] is False  # no titles → never ready
 
 
 # ── the endpoint: fails CLOSED to the form ────────────────────────────────────

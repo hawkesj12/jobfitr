@@ -1,13 +1,14 @@
-# Fire the jobfitr harvest every 6 hours (and shortly after boot).
-# Persistent=true runs a missed harvest after downtime instead of skipping it.
+# Fire the jobfitr baseline harvest once a day (and shortly after boot). Demoted
+# from 6h → 24h: live per-search fetches own freshness now, so this is just the
+# broad baseline floor. Persistent=true runs a missed harvest after downtime.
 # Install: /etc/systemd/system/jobfitr-harvest.timer (done by bootstrap.sh).
 
 [Unit]
-Description=Run the jobfitr harvest every 6h
+Description=Run the jobfitr baseline harvest daily
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=6h
+OnUnitActiveSec=24h
 Persistent=true
 
 [Install]

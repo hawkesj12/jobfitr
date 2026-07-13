@@ -1,0 +1,25 @@
+# jobfitr evict — the pool's OUTFLOW (the control-loop garbage collector).
+# Deletes jobs unseen > 14d or posted > 60d, and enforces an LRU row cap, so the
+# SQLite store reaches a bounded steady state instead of growing without limit.
+# Eviction age (14d) >> the search TTL (24h): that timescale gap is the damping
+# that stops a re-fetched job from thrashing in and out of the pool.
+# Oneshot; fired nightly by jobfitr-evict.timer.
+# Install: /etc/systemd/system/jobfitr-evict.service (done by bootstrap.sh).
+
+[Unit]
+Description=jobfitr evict (garbage-collect the stale job pool)
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+WorkingDirectory=/opt/jobfitr/jobfitr
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-evict
+
+# Hardening — may write only the SQLite store directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/data

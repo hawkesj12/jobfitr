@@ -1,5 +1,7 @@
 # jobfitr web API — uvicorn serving jobfitr.server:app on loopback.
 # Caddy is the only thing that talks to it; it is never exposed publicly.
+# It reads AND writes the SQLite store in /opt/jobfitr/data (the live-fetch-on-search
+# hybrid upserts fetched jobs), so that dir is ReadWritePaths below.
 # Install: /etc/systemd/system/jobfitr-web.service (done by bootstrap.sh).
 
 [Unit]
@@ -15,11 +17,12 @@ ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-serve --host 127.0.0.1 --port 8
 Restart=always
 RestartSec=3
 
-# Hardening — the web process only ever reads the cached snapshot.
+# Hardening — the web process reads/writes only the SQLite store directory.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/data
 
 [Install]
 WantedBy=multi-user.target

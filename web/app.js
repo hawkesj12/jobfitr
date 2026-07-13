@@ -8,7 +8,31 @@
 const KEY = { config: "jobfitr.config", applied: "jobfitr.applied", dismissed: "jobfitr.dismissed" };
 const LIST_FIELDS = ["titles", "boosts", "exclude", "rank_down"];
 const AGENCY_RE = /staffing|agency|recruit|talent solutions/i;
-const REMOTE_RE = /remote|anywhere|work from home|wfh/i;
+
+// The facet drawer groups, in display order. `own` = the value lives in its own card
+// field (job.category / job.employment_type); the rest are in job.tags (the derived
+// remote / seniority / salary_band tags). `label` humanizes a raw facet value.
+const FACET_GROUPS = [
+  { key: "category", title: "Field", own: true, label: (v) => v.replace(/ Jobs$/, "") },
+  { key: "remote", title: "Work style", own: false, label: (v) => (v === "onsite" ? "On-site" : "Remote") },
+  { key: "employment_type", title: "Type", own: true, label: (v) => v.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) },
+  { key: "seniority", title: "Level", own: false, label: (v) => v.charAt(0).toUpperCase() + v.slice(1) },
+  { key: "salary_band", title: "Salary", own: false, label: labelBand },
+];
+const REMOTE_TAGS = new Set(["remote", "onsite"]);
+const SENIORITY_TAGS = new Set(["junior", "mid", "senior", "lead"]);
+
+function labelBand(v) {
+  return (
+    { "under-50k": "< $50k", "50-80k": "$50–80k", "80-120k": "$80–120k", "120-180k": "$120–180k", "180k-plus": "$180k+" }[v] || v
+  );
+}
+// Which facet group a derived job.tags value belongs to.
+function tagGroup(tag) {
+  if (REMOTE_TAGS.has(tag)) return "remote";
+  if (SENIORITY_TAGS.has(tag)) return "seniority";
+  return "salary_band";
+}
 
 const $ = (s, r = document) => r.querySelector(s);
 const el = {
@@ -30,7 +54,7 @@ const el = {
   filters: $("#filters"),
   fFit: $("#f-fit"),
   fFitVal: $("#f-fit-val"),
-  fTags: $("#f-tags"),
+  fFacets: $("#f-facets"),
   fAgency: $("#f-agency"),
   fSeen: $("#f-seen"),
   fCount: $("#f-count"),
@@ -67,9 +91,13 @@ const store = {
 const state = {
   all: [], // every scored job from the last /api/score
   cfg: {},
-  filters: { fit: 0, remote: "any", tags: new Set(), agency: false, seen: true },
+  // facets: per-group Set of selected values (OR within a group, AND across groups)
+  filters: { fit: 0, facets: {}, agency: false, seen: true },
   sort: "fit",
 };
+function selectedFacets(key) {
+  return state.filters.facets[key] || (state.filters.facets[key] = new Set());
+}
 
 // ── config <-> form <-> URL hash ───────────────────────────────────────────
 function splitList(s) {
@@ -162,8 +190,8 @@ async function run(cfg) {
     state.all = data.jobs || [];
     show(el.loading, false);
     show(el.carousel, true);
-    maybeThinNotice(data);
-    buildTagFilter();
+    renderNotice(data);
+    buildFacets();
     applyFilters(true);
   } catch {
     show(el.loading, false);
@@ -171,24 +199,49 @@ async function run(cfg) {
   }
 }
 
-function maybeThinNotice(data) {
-  if ((data.count || 0) < 3) {
-    el.notice.innerHTML =
-      "Thin results? The free job sources skew remote-tech right now. A wider search improves once the keyed sources are on.";
-    show(el.notice, true);
-  } else {
-    show(el.notice, false);
+// ── the degradation / thin-results banner (warm, honest, never alarming) ──────
+function renderNotice(data) {
+  let msg = "";
+  if (data.degraded === "adzuna_daily_limit") {
+    msg =
+      "🌅 We've hit today's live-search budget — jobfitr is a free tool with a daily API allowance. These are the freshest saved matches. Fresh pulls refill tomorrow.";
+  } else if (data.degraded === "fetch_error") {
+    msg =
+      "A job source hiccuped just now, so these are the most recent saved matches. Try again in a moment for a fresh pull.";
+  } else if ((data.pool || 0) > 0 && (data.pool || 0) < 200 && (data.count || 0) < 3) {
+    msg =
+      "The board is still filling in for this search — check back soon and it'll be richer.";
+  } else if ((data.count || 0) < 3) {
+    msg =
+      "Thin results — try a broader title or drop a filter, and jobfitr will pull wider next time.";
   }
+  el.notice.textContent = msg;
+  show(el.notice, !!msg);
 }
 
 // ── filtering + carousel render ──────────────────────────────────────────────
-function isRemote(job) {
-  return REMOTE_RE.test(job.location || "");
-}
 function seenSet() {
   const applied = store.get(KEY.applied, {});
   const dismissed = new Set(store.get(KEY.dismissed, []));
   return { applied, dismissed };
+}
+// Does a job hold the given facet value? Own-field groups read the card field;
+// the rest read the derived job.tags array (remote / seniority / salary_band).
+function jobHasFacet(job, group, value) {
+  return group.own ? job[group.key] === value : (job.tags || []).includes(value);
+}
+// A job passes a group if it matches ANY selected value in that group (OR-within).
+// It must pass EVERY group that has a selection (AND-across).
+function passesFacets(job) {
+  for (const g of FACET_GROUPS) {
+    const sel = state.filters.facets[g.key];
+    if (sel && sel.size) {
+      let hit = false;
+      for (const v of sel) if (jobHasFacet(job, g, v)) { hit = true; break; }
+      if (!hit) return false;
+    }
+  }
+  return true;
 }
 function filteredJobs() {
   const { applied, dismissed } = seenSet();
@@ -197,18 +250,10 @@ function filteredJobs() {
     if (!j.url) return false;
     if (f.seen && (applied[j.url] || dismissed.has(j.url))) return false;
     if ((j.fit_pct || 0) < f.fit) return false;
-    if (f.remote === "remote" && !isRemote(j)) return false;
-    if (f.remote === "onsite" && isRemote(j)) return false;
     if (f.agency && AGENCY_RE.test(`${j.title} ${j.company}`)) return false;
-    if (f.tags.size) {
-      const sig = (j.why || "").toLowerCase();
-      for (const t of f.tags) if (!sig.includes(t)) return false;
-    }
+    if (!passesFacets(j)) return false;
     return true;
   });
-  if (f.remote !== "onsite") {
-    // sort
-  }
   list = sortJobs(list);
   return list;
 }
@@ -387,28 +432,52 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
-// ── the filter drawer ────────────────────────────────────────────────────────
-function buildTagFilter() {
+// ── the filter drawer: tag-driven facets with live counts ────────────────────
+function facetCounts(key, own) {
+  // count each value across the whole scored set (own field, or the tags array)
   const counts = new Map();
   for (const j of state.all) {
-    for (const w of (j.why || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean)) {
-      counts.set(w, (counts.get(w) || 0) + 1);
-    }
+    const vals = own ? [j[key]] : j.tags || [];
+    for (const v of vals) if (v) counts.set(v, (counts.get(v) || 0) + 1);
   }
-  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map((e) => e[0]);
-  el.fTags.textContent = "";
-  state.filters.tags.clear();
-  for (const tag of top) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = tag;
-    b.addEventListener("click", () => {
-      b.classList.toggle("sel");
-      if (b.classList.contains("sel")) state.filters.tags.add(tag);
-      else state.filters.tags.delete(tag);
-      applyFilters(false);
-    });
-    el.fTags.appendChild(b);
+  return counts;
+}
+function buildFacets() {
+  el.fFacets.textContent = "";
+  state.filters.facets = {};
+  for (const g of FACET_GROUPS) {
+    let counts = facetCounts(g.key, g.own);
+    if (!g.own) {
+      // the tags array mixes all three derived groups — keep only this group's values
+      counts = new Map([...counts].filter(([v]) => tagGroup(v) === g.key));
+    }
+    if (!counts.size) continue;
+    const values = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const sel = selectedFacets(g.key);
+
+    const group = document.createElement("div");
+    group.className = "fgroup";
+    const head = document.createElement("span");
+    head.className = "flab";
+    head.textContent = g.title;
+    group.appendChild(head);
+    const pick = document.createElement("div");
+    pick.className = "tagpick";
+    for (const [value, count] of values) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "facet-chip";
+      b.innerHTML = `${escapeHtml(g.label(value))}<span class="fc">${count}</span>`;
+      b.addEventListener("click", () => {
+        b.classList.toggle("sel");
+        if (b.classList.contains("sel")) sel.add(value);
+        else sel.delete(value);
+        applyFilters(false);
+      });
+      pick.appendChild(b);
+    }
+    group.appendChild(pick);
+    el.fFacets.appendChild(group);
   }
 }
 function updateFilterCount(n) {
@@ -440,10 +509,14 @@ el.form.addEventListener("submit", (e) => {
   e.preventDefault();
   run(readForm());
 });
-el.toForm.addEventListener("click", () => {
-  hydrateForm(state.cfg || store.get(KEY.config, null));
-  showForm();
-});
+// The manual "quick form instead" link was removed for the minimal front door;
+// the form is now only reached as the automatic no-AI fallback (showForm()).
+if (el.toForm) {
+  el.toForm.addEventListener("click", () => {
+    hydrateForm(state.cfg || store.get(KEY.config, null));
+    showForm();
+  });
+}
 el.toChat.addEventListener("click", showChat);
 el.refine.addEventListener("click", showChat);
 el.sort.addEventListener("change", () => {
@@ -458,14 +531,6 @@ el.fFit.addEventListener("input", () => {
   state.filters.fit = +el.fFit.value;
   el.fFitVal.textContent = state.filters.fit === 0 ? "any" : `${state.filters.fit}%+`;
   applyFilters(false);
-});
-document.querySelectorAll(".toggle3 button").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".toggle3 button").forEach((b) => b.classList.remove("sel"));
-    btn.classList.add("sel");
-    state.filters.remote = btn.dataset.remote;
-    applyFilters(false);
-  });
 });
 el.fAgency.addEventListener("change", () => {
   state.filters.agency = el.fAgency.checked;

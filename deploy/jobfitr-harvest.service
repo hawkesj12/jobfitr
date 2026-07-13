@@ -1,6 +1,7 @@
-# jobfitr harvest — build the jobs.json snapshot the web API serves.
-# Oneshot; fired on a schedule by jobfitr-harvest.timer. This is the ONLY thing
-# that reaches out to the job sources — user requests never do.
+# jobfitr harvest — the demoted BASELINE inflow. Builds the broad jobs.json snapshot
+# AND upserts it into the SQLite store, so the pool has a floor even for searches
+# nobody has run live yet. Live per-search fetches (on /api/score) own freshness now;
+# this just keeps a broad baseline warm. Oneshot; fired by jobfitr-harvest.timer.
 # Install: /etc/systemd/system/jobfitr-harvest.service (done by bootstrap.sh).
 
 [Unit]
