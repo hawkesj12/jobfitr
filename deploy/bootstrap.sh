@@ -58,6 +58,9 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
 fi
 mkdir -p "$DATA_DIR"
 chown -R "$APP_USER:$APP_USER" "$BASE"
+# Ubuntu 24.04 creates home dirs 0750; Caddy runs as its own user and must be
+# able to traverse into $BASE to serve web/ — make the base dir world-traversable.
+chmod 755 "$BASE"
 
 # ── 4. uv (installed for the app user) ───────────────────────────────────────
 UV="$BASE/.local/bin/uv"
