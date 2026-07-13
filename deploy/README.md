@@ -22,9 +22,9 @@ The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger
 
 ### 1. Get SSH access
 
-The box is `193.203.165.61` (Ubuntu 24.04). Establish access one of these ways:
+The box is `<VPS_IP>` (Ubuntu 24.04) — replace `<VPS_IP>` with your VPS's public IP throughout. Establish access one of these ways:
 
-- **Hostinger hPanel / API** — attach your SSH public key to the VPS (VPS → SSH keys), or set/reset the root password. Then `ssh root@193.203.165.61`.
+- **Hostinger hPanel / API** — attach your SSH public key to the VPS (VPS → SSH keys), or set/reset the root password. Then `ssh root@<VPS_IP>`.
 - **Hostinger browser console** — run the commands directly if you'd rather not open SSH.
 
 Create a non-root sudo user for yourself if the box only has root:
@@ -56,7 +56,7 @@ The free boards already work with no keys; these just broaden coverage.
 
 ### 4. Point DNS at the box
 
-`jobfitr.app`'s apex `A` record currently points at a parking IP (`2.57.91.91`) — move it to the VPS (`193.203.165.61`). **GET the zone first, then PUT only the changed record**, keeping the existing `www` CNAME. Using the Hostinger DNS API (token sourced from the local secrets file, never echoed):
+`jobfitr.app`'s apex `A` record starts out on a Hostinger parking IP — move it to the VPS (`<VPS_IP>`). **GET the zone first, then PUT only the changed record**, keeping the existing `www` CNAME. Using the Hostinger DNS API (token sourced from the local secrets file, never echoed):
 
 ```bash
 # inspect (safe)
@@ -66,7 +66,7 @@ curl -s -H "Authorization: Bearer $HOSTINGER_TOKEN" \
 # repoint the apex A record to the VPS
 curl -s -X PUT -H "Authorization: Bearer $HOSTINGER_TOKEN" -H 'Content-Type: application/json' \
   https://developers.hostinger.com/api/dns/v1/zones/jobfitr.app \
-  -d '{"overwrite":true,"zone":[{"name":"@","type":"A","ttl":300,"records":[{"content":"193.203.165.61"}]}]}'
+  -d '{"overwrite":true,"zone":[{"name":"@","type":"A","ttl":300,"records":[{"content":"<VPS_IP>"}]}]}'
 ```
 
 Hostinger keeps zone snapshots, so a bad edit rolls back. Once DNS resolves to the box, **Caddy issues the TLS cert automatically** (give it a minute; it retries).
