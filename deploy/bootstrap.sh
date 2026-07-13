@@ -112,7 +112,6 @@ install -m 644 "$APP_DIR/deploy/jobfitr-web.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/jobfitr-harvest.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/jobfitr-harvest.timer" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/Caddyfile" /etc/caddy/Caddyfile
-mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy
 
 systemctl daemon-reload
 systemctl enable --now jobfitr-web.service

@@ -19,11 +19,9 @@ jobfitr.app {
 		root * /opt/jobfitr/jobfitr/web
 		file_server
 	}
-
-	log {
-		output file /var/log/caddy/jobfitr.log
-	}
 }
+# Access logs go to journald by default (journalctl -u caddy) — no custom file,
+# which the caddy systemd sandbox blocks under /var/log.
 
 # Send www → apex (the www CNAME already resolves here).
 www.jobfitr.app {
