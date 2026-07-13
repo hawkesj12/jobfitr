@@ -82,7 +82,7 @@ clone_or_pull "$JOBFITR_REPO" "$APP_DIR"
 
 # ── 6. venv + install (job-radar editable, then jobfitr[web]) ────────────────
 log "Building the virtualenv"
-sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && '$UV' venv && '$UV' pip install -e '$ENGINE_DIR' && '$UV' pip install -e '.[web]'"
+sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && '$UV' venv --clear && '$UV' pip install -e '$ENGINE_DIR' && '$UV' pip install -e '.[web]'"
 
 # ── 7. server EnvironmentFile (placeholders — real keys added by hand) ───────
 mkdir -p "$ENV_DIR"
