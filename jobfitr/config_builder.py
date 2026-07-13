@@ -107,9 +107,14 @@ def config_from_dict(doc: dict) -> Config:
     if rank_down:
         cfg.agency_penalty = {kw: _RANK_DOWN_PENALTY for kw in rank_down}
 
-    # Hard exclusions: titles the user never wants to see.
-    if exclude:
-        cfg.exclude_titles = exclude
+    # Hard exclusions: ONLY the user's own (empty if they named none). We must NOT
+    # inherit job_radar's tech-recruiting default exclude list — it contains
+    # "sales", "marketing", "customer success", "accountant", "recruiter", etc.,
+    # which would silently hide those non-tech roles from jobfitr's general audience.
+    cfg.exclude_titles = exclude
+    # Likewise clear the tech-specific title penalty (research-scientist / member-of-
+    # technical-staff) — meaningless for a general audience and unfair to those roles.
+    cfg.title_penalty = {}
 
     # Location / remote.
     location = doc.get("location")

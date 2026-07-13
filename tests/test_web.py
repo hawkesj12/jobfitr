@@ -91,6 +91,22 @@ def test_config_from_dict_remote_and_anywhere():
     )
 
 
+def test_config_from_dict_does_not_inherit_tech_exclude_defaults():
+    from job_radar.scoring import relevant
+
+    # A general-audience search must NOT inherit job_radar's tech-recruiting default
+    # exclude list (sales/marketing/accountant/...) — that would silently hide those
+    # non-tech roles. With no user exclude, nothing is excluded.
+    cfg = config_from_dict({"titles": ["accountant"]})
+    assert cfg.exclude_titles == []
+    assert relevant("General Accountant", cfg) is True  # no longer hidden
+    assert relevant("Sales Manager", config_from_dict({"titles": ["sales"]})) is True
+    # a user-provided exclude still applies
+    cfg2 = config_from_dict({"titles": ["engineer"], "exclude": ["intern"]})
+    assert cfg2.exclude_titles == ["intern"]
+    assert relevant("Engineering Intern", cfg2) is False
+
+
 # ── Step 2: snapshot round-trip ───────────────────────────────────────────────
 def test_snapshot_roundtrip(tmp_path, monkeypatch):
     from job_radar.config import Config
