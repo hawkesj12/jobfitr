@@ -20,14 +20,6 @@
     <div id="wash" aria-hidden="true"></div>
     <div id="stars" aria-hidden="true"></div>
 
-    <header class="site-header">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">🎯</span>
-        <span class="brand-name">jobfitr</span>
-      </div>
-      <p class="freshness" id="freshness" aria-live="polite"></p>
-    </header>
-
     <main id="stage" class="stage">
       <!-- ── the chat front door ──────────────────────────────────────────────── -->
       <section id="chat-view" class="chat-view" aria-label="Describe your search">
@@ -49,9 +41,9 @@
           </div>
         </div>
         <div class="starters" id="starters">
-          <button type="button" class="starter">Zookeeper near Louisville</button>
-          <button type="button" class="starter">Remote React developer</button>
-          <button type="button" class="starter">Warehouse ops manager</button>
+          <button type="button" class="starter">Product manager</button>
+          <button type="button" class="starter">Remote software engineer</button>
+          <button type="button" class="starter">Data analyst</button>
         </div>
         <button type="button" class="link-quiet" id="to-form">or fill in a quick form instead</button>
       </section>
@@ -91,41 +83,49 @@
         </div>
       </section>
 
-      <!-- ── the 5-question form: the no-AI fallback ──────────────────────────── -->
+      <!-- ── the search form: the no-AI fallback ──────────────────────────────── -->
       <section id="form-view" class="form-view" hidden aria-label="Search form">
         <form id="search-form" class="search-form glass" novalidate>
-          <div class="field">
-            <label for="q-titles">1. What jobs do you want?</label>
-            <small class="hint">The titles or kind of work. The more specific, the better.</small>
-            <input type="text" id="q-titles" name="titles" autocomplete="off" placeholder="zookeeper, animal keeper, wildlife technician" />
+          <div class="form-head">
+            <h2>Set up your search</h2>
+            <p class="form-sub">Only the first line is needed — fill in the rest to sharpen the match.</p>
           </div>
+
           <div class="field">
-            <label for="q-boosts">2. What should make a job rank higher?</label>
-            <small class="hint">Skills, tools, industry, a city for nearby jobs — each becomes a scoring keyword.</small>
-            <input type="text" id="q-boosts" name="boosts" autocomplete="off" placeholder="animal husbandry, reptiles, biology degree, Louisville" />
+            <label for="q-titles">The job you want</label>
+            <small class="hint">Titles or the kind of work. Comma-separate a few.</small>
+            <input type="text" id="q-titles" name="titles" autocomplete="off" placeholder="product manager, program manager" />
           </div>
+
+          <div class="field">
+            <label for="q-boosts">What should rank a job higher</label>
+            <small class="hint">Skills, tools, industry — add a city to float nearby roles up.</small>
+            <input type="text" id="q-boosts" name="boosts" autocomplete="off" placeholder="SaaS, roadmapping, Denver" />
+          </div>
+
           <fieldset class="field field-split">
-            <legend>3. What should rank lower, or disappear?</legend>
+            <legend>What to push down or hide</legend>
             <div class="split">
               <div>
-                <label for="q-exclude" class="sub">Never show these</label>
-                <input type="text" id="q-exclude" name="exclude" autocomplete="off" placeholder="intern, volunteer, recruiter" />
+                <label for="q-exclude" class="sub">Hide entirely</label>
+                <input type="text" id="q-exclude" name="exclude" autocomplete="off" placeholder="intern, junior, contract" />
               </div>
               <div>
-                <label for="q-rankdown" class="sub">Rank these down</label>
+                <label for="q-rankdown" class="sub">Just rank down</label>
                 <input type="text" id="q-rankdown" name="rank_down" autocomplete="off" placeholder="staffing, agency" />
               </div>
             </div>
           </fieldset>
+
           <fieldset class="field field-split">
-            <legend>4. Where, and how fresh?</legend>
+            <legend>Location &amp; freshness</legend>
             <div class="split">
               <div>
                 <label for="q-location" class="sub">Where</label>
                 <input type="text" id="q-location" name="location" autocomplete="off" placeholder="remote, anywhere, or a city" />
               </div>
               <div>
-                <label for="q-maxage" class="sub">Skip anything older than</label>
+                <label for="q-maxage" class="sub">Newer than</label>
                 <div class="with-suffix">
                   <input type="number" id="q-maxage" name="max_age_days" min="1" max="365" placeholder="60" />
                   <span class="suffix">days</span>
@@ -133,8 +133,9 @@
               </div>
             </div>
           </fieldset>
+
           <div class="field">
-            <span class="label" id="picky-label">5. How picky?</span>
+            <span class="label" id="picky-label">How picky?</span>
             <div class="segmented" role="radiogroup" aria-labelledby="picky-label">
               <input type="radio" name="min_score" id="picky-plenty" value="plenty" />
               <label for="picky-plenty">Show me plenty</label>
@@ -144,6 +145,7 @@
               <label for="picky-strong">Only the strong ones</label>
             </div>
           </div>
+
           <div class="form-actions">
             <button type="submit" class="btn btn-primary" id="submit-btn">Find my jobs</button>
             <button type="button" class="btn btn-ghost" id="to-chat">← back to the assistant</button>

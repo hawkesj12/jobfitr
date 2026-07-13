@@ -16,10 +16,14 @@ from jobfitr.config_builder import config_from_dict
 # A mocked OpenRouter stream: two text deltas, then a tool-call whose JSON arguments
 # arrive split across two chunks (the real streaming shape).
 TOOLCALL_CHUNKS = [
-    {"choices": [{"delta": {"content": "Nice — pulling that together."}}]},
+    {"choices": [{"delta": {"content": "Great — pulling roles that fit."}}]},
     {
         "choices": [
-            {"delta": {"tool_calls": [{"function": {"arguments": '{"titles": ["zoo'}}]}}
+            {
+                "delta": {
+                    "tool_calls": [{"function": {"arguments": '{"titles": ["product '}}]
+                }
+            }
         ]
     },
     {
@@ -29,7 +33,7 @@ TOOLCALL_CHUNKS = [
                     "tool_calls": [
                         {
                             "function": {
-                                "arguments": 'keeper"], "location": "Louisville, KY"}'
+                                "arguments": 'manager"], "location": "Denver, CO", "ready_to_search": true}'
                             }
                         }
                     ]
@@ -64,7 +68,8 @@ def test_stream_chat_yields_tokens_then_config(monkeypatch):
     monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
     events = _collect(
         chat.stream_chat(
-            [{"role": "user", "content": "zookeeper jobs in louisville"}], {}
+            [{"role": "user", "content": "product manager in denver, ready to search"}],
+            {},
         )
     )
     kinds = [e["event"] for e in events]
@@ -74,14 +79,15 @@ def test_stream_chat_yields_tokens_then_config(monkeypatch):
     cfg_event = next(e for e in events if e["event"] == "config")
     payload = json.loads(cfg_event["data"])
     cfg = payload["config"]
-    assert cfg["titles"] == ["zookeeper"]
-    assert cfg["location"] == "Louisville, KY"
-    assert payload["ready"] is True
+    assert cfg["titles"] == ["product manager"]
+    assert cfg["location"] == "Denver, CO"
+    assert payload["ready"] is True  # ready_to_search=true in the tool call
+    assert "ready_to_search" not in cfg  # a tool arg, never a config field
 
     # the extracted config round-trips through the real config_from_dict contract
     built = config_from_dict(cfg)
-    assert built.title_queries == ["zookeeper"]
-    assert built.location == "Louisville, KY"
+    assert built.title_queries == ["product manager"]
+    assert built.location == "Denver, CO"
 
 
 def test_stream_chat_no_titles_is_not_ready(monkeypatch):
@@ -108,12 +114,12 @@ def test_chat_streams_with_mocked_openrouter(monkeypatch):
     r = TestClient(server.app).post(
         "/api/chat",
         json={
-            "messages": [{"role": "user", "content": "zookeeper in louisville"}],
+            "messages": [{"role": "user", "content": "product manager in denver, go"}],
             "config": {},
         },
     )
     assert r.status_code == 200
-    assert "zookeeper" in r.text  # the streamed config event carried it
+    assert "product manager" in r.text  # the streamed config event carried it
 
 
 def test_chat_turn_cap_429(monkeypatch):

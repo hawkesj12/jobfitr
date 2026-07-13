@@ -171,7 +171,7 @@ button { font: inherit; cursor: pointer; }
 .notice { font-size: 13px; color: var(--sub); padding: 12px 16px; margin-bottom: 12px; }
 
 /* ── the filter drawer (left edge) ──────────────────────────────────────────── */
-.drawer { position: fixed; top: 84px; left: 0; z-index: 8; max-width: 300px; width: 82%; }
+.drawer { position: fixed; top: 20px; left: 0; z-index: 8; max-width: 300px; width: 82%; }
 .drawer-body { transform: translateX(-92%); transition: transform 360ms cubic-bezier(0.22, 1, 0.36, 1); padding: 16px 18px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .drawer:hover .drawer-body, .drawer.open .drawer-body { transform: translateX(0); }
 .drawer-head { font-size: 14px; font-weight: 640; margin-bottom: 10px; }
@@ -195,7 +195,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17p
 input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
 
 /* ── the applied rail (right edge) ──────────────────────────────────────────── */
-.rail { position: fixed; top: 84px; right: 0; z-index: 8; text-align: right; }
+.rail { position: fixed; top: 20px; right: 0; z-index: 8; text-align: right; }
 .rail-toggle { display: inline-flex; align-items: center; gap: 8px; background: var(--card-bg); border: 1px solid var(--card-brd); border-right: 0; border-radius: 100px 0 0 100px; padding: 9px 16px; color: var(--ink); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
 .rail-count { font-weight: 700; font-family: var(--mono); }
 .rail-word { font-size: 12px; color: var(--sub); }
@@ -216,7 +216,12 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .gcard.dismissing { transition: opacity 260ms ease, transform 260ms ease; opacity: 0; transform: scale(0.94); }
 
 /* ── the fallback form (glassed) ────────────────────────────────────────────── */
-.search-form { padding: 22px; display: flex; flex-direction: column; gap: 18px; }
+.form-view { min-height: 62vh; display: flex; align-items: center; }
+.search-form { padding: 26px 26px 24px; display: flex; flex-direction: column; gap: 20px; width: 100%; }
+.form-head { display: flex; flex-direction: column; gap: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--card-brd); }
+.form-head h2 { font-size: 20px; font-weight: 660; letter-spacing: -0.02em; }
+.form-sub { font-size: 13px; color: var(--sub); }
+.field legend { padding: 0; }
 .field { display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 0; }
 .field label, .field legend, .field .label { font-weight: 600; font-size: 14px; }
 .field .sub { font-weight: 500; font-size: 12.5px; color: var(--sub); }

@@ -15,7 +15,6 @@ const el = {
   chatView: $("#chat-view"),
   resultsView: $("#results-view"),
   formView: $("#form-view"),
-  freshness: $("#freshness"),
   notice: $("#notice"),
   carousel: $("#carousel"),
   summary: $("#result-summary"),
@@ -114,31 +113,6 @@ function decodeHash() {
   }
 }
 
-// ── freshness ─────────────────────────────────────────────────────────────
-function relTime(iso) {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return "";
-  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
-  if (mins < 2) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
-}
-async function loadFreshness() {
-  try {
-    const r = await fetch("/api/meta");
-    if (!r.ok) return;
-    const m = await r.json();
-    if (m && m.count) {
-      const when = m.harvested_at ? ` · refreshed ${relTime(m.harvested_at)}` : "";
-      el.freshness.textContent = `${m.count.toLocaleString()} jobs in the pool${when}`;
-    }
-  } catch {
-    /* cosmetic — silent if unreachable */
-  }
-}
-
 // ── the count-up summary "moment" ───────────────────────────────────────────
 let _summaryToken = 0;
 function summaryText(n) {
@@ -169,7 +143,9 @@ async function run(cfg) {
   state.cfg = cfg;
   store.set(KEY.config, cfg);
   hydrateForm(cfg);
-  history.replaceState(null, "", encodeHash(cfg));
+  // Deliberately do NOT write the config into the URL — a plain reload should
+  // return to a fresh chat, not silently re-run the last search. (A pasted
+  // #q= share link is still honored on load; we just don't mint one here.)
   showResults();
   show(el.error, false);
   show(el.notice, false);
@@ -526,11 +502,13 @@ window.jobfitr = { run, showChat, showResults, showForm };
 // ── boot ─────────────────────────────────────────────────────────────────────
 (function init() {
   renderRail();
-  loadFreshness();
+  // A plain reload starts fresh at the chat front door. Only a shared link
+  // (a #q= hash someone was sent) runs a search straight away.
   const fromHash = decodeHash();
-  const cfg = fromHash || store.get(KEY.config, null);
-  if (cfg) {
-    hydrateForm(cfg);
-    run(cfg); // a shared link or returning user lands straight on results
+  if (fromHash) {
+    hydrateForm(fromHash);
+    run(fromHash);
+  } else {
+    showChat();
   }
 })();
