@@ -238,6 +238,44 @@ def test_score_miss_triggers_live_fetch(client, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_prefetch_warms_cache_then_score_does_not_refetch(client, monkeypatch):
+    # The progressive-harvest path: prefetch the moment titles + location are known,
+    # then the later score reuses the warm cache — ONE upstream fetch across both.
+    calls = {"n": 0}
+
+    def fake_fetch(titles, location):
+        calls["n"] += 1
+        return [_job("Line Cook", text="restaurant line cook", url="https://x/lc")]
+
+    monkeypatch.setattr(live, "coalesced_fetch", fake_fetch)
+    p = client.post(
+        "/api/prefetch", json={"titles": ["line cook"], "location": "reno, nv"}
+    ).json()
+    assert p["ok"] is True and p["warmed"] is True
+    assert calls["n"] == 1  # prefetch did the live fetch
+    assert store.pool_size() == 1
+
+    d = client.post(
+        "/api/score",
+        json={"titles": ["line cook"], "location": "reno, nv", "min_score": "plenty"},
+    ).json()
+    assert calls["n"] == 1  # score saw the fresh cache → NO second fetch
+    assert d["jobs"] and d["jobs"][0]["title"] == "Line Cook"
+
+
+def test_prefetch_without_titles_is_a_noop(client, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_fetch(titles, location):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(live, "coalesced_fetch", fake_fetch)
+    p = client.post("/api/prefetch", json={"location": "denver, co"}).json()
+    assert p["warmed"] is False
+    assert calls["n"] == 0  # nothing to fetch without a title
+
+
 def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
     _seed(
         [

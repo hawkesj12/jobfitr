@@ -1,6 +1,9 @@
-"""Phase E tests for the conversational front door. The network boundary
-(chat._stream_openrouter) is monkeypatched, so these run with ZERO real network —
-the same discipline as test_zero_network_on_request for /api/score.
+"""Tests for the conversational front door. The network boundary
+(chat._call_openrouter) is monkeypatched, so these run with ZERO real network —
+the same discipline as the store-backed score path in test_web.py.
+
+The front door is now a single structured-output turn: one call returns
+{reply, config, ready}. `ready` is gated server-side on titles + location.
 """
 
 from __future__ import annotations
@@ -8,116 +11,114 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 from fastapi.testclient import TestClient
 
 from jobfitr import chat, server
 from jobfitr.config_builder import config_from_dict
 
-# A mocked OpenRouter stream: two text deltas, then a tool-call whose JSON arguments
-# arrive split across two chunks (the real streaming shape).
-TOOLCALL_CHUNKS = [
-    {"choices": [{"delta": {"content": "Great — pulling roles that fit."}}]},
-    {
-        "choices": [
-            {
-                "delta": {
-                    "tool_calls": [{"function": {"arguments": '{"titles": ["product '}}]
-                }
-            }
-        ]
-    },
-    {
-        "choices": [
-            {
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "function": {
-                                "arguments": 'manager"], "location": "Denver, CO", "ready_to_search": true}'
-                            }
-                        }
-                    ]
-                }
-            }
-        ]
-    },
-]
+
+def _completion(obj: dict) -> dict:
+    """Wrap a turn object the way OpenRouter returns a json_schema completion."""
+    return {"choices": [{"message": {"content": json.dumps(obj)}}]}
 
 
-def _fake_stream(chunks):
-    async def gen(payload):
-        for c in chunks:
-            yield c
+def _fake_call(obj: dict):
+    """An async _call_openrouter stand-in that returns a fixed turn object."""
 
-    return gen
+    async def call(payload):
+        return _completion(obj)
+
+    return call
 
 
-def _collect(agen):
-    async def run():
-        return [e async for e in agen]
-
-    return asyncio.run(run())
+def _run(coro):
+    return asyncio.run(coro)
 
 
 def _reset_usage(monkeypatch):
     monkeypatch.setattr(chat, "_usage", {"date": "", "count": 0})
 
 
-# ── stream_chat: tokens + a config the real contract accepts ──────────────────
-def test_stream_chat_yields_tokens_and_extracts_config(monkeypatch):
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
-    events = _collect(
-        chat.stream_chat([{"role": "user", "content": "product manager in denver"}], {})
-    )
-    kinds = [e["event"] for e in events]
-    assert "token" in kinds
-    assert kinds[-2] == "config" and kinds[-1] == "done"
+# A complete turn object (strict schema → every key present).
+FULL_TURN = {
+    "reply": "Great — pulling the roles that fit you…",
+    "ready": True,
+    "titles": ["product manager"],
+    "boosts": [],
+    "exclude": [],
+    "rank_down": [],
+    "location": "Denver, CO",
+    "remote_only": False,
+    "min_score": "balanced",
+}
 
-    cfg_event = next(e for e in events if e["event"] == "config")
-    payload = json.loads(cfg_event["data"])
-    cfg = payload["config"]
-    assert cfg["titles"] == ["product manager"]
-    assert cfg["location"] == "Denver, CO"
-    assert "ready_to_search" not in cfg  # a tool arg, never a config field
-    # the interview gate: one user turn is not enough — ready is held even though the
-    # model set ready_to_search=true, so it can't bail before the interview completes.
-    assert payload["ready"] is False
+
+# ── turn(): reply + config + ready, and the config the real contract accepts ───
+def test_turn_extracts_reply_and_config(monkeypatch):
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(FULL_TURN))
+    out = _run(
+        chat.turn([{"role": "user", "content": "product manager in denver"}], {})
+    )
+    assert out["reply"].startswith("Great")
+    assert out["config"]["titles"] == ["product manager"]
+    assert out["config"]["location"] == "Denver, CO"
+    assert out["ready"] is True  # titles + location + model-ready
 
     # the extracted config round-trips through the real config_from_dict contract
-    built = config_from_dict(cfg)
+    built = config_from_dict(out["config"])
     assert built.title_queries == ["product manager"]
     assert built.location == "Denver, CO"
 
 
-def test_stream_chat_go_escape_hatch_flips_ready(monkeypatch):
-    # "go" is the explicit escape hatch — search runs immediately with what we have.
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
-    events = _collect(chat.stream_chat([{"role": "user", "content": "just go"}], {}))
-    payload = json.loads(next(e for e in events if e["event"] == "config")["data"])
-    assert payload["ready"] is True  # said_go + titles present → ready
+def test_turn_not_ready_without_location(monkeypatch):
+    obj = {**FULL_TURN, "location": "", "remote_only": False, "ready": True}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "product manager"}], {}))
+    assert out["ready"] is False  # no location → never ready, even if the model says so
 
 
-def test_stream_chat_ready_after_full_interview(monkeypatch):
-    # five user turns satisfies the interview gate (with titles + ready_to_search).
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
-    msgs = [{"role": "user", "content": f"answer {i}"} for i in range(5)]
-    payload = json.loads(
-        next(e for e in _collect(chat.stream_chat(msgs, {})) if e["event"] == "config")[
-            "data"
-        ]
+def test_turn_not_ready_without_titles(monkeypatch):
+    obj = {**FULL_TURN, "titles": [], "ready": True}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "denver"}], {}))
+    assert out["ready"] is False  # no titles → never ready
+
+
+def test_turn_remote_counts_as_location(monkeypatch):
+    obj = {**FULL_TURN, "location": "", "remote_only": True, "ready": True}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "remote pm"}], {}))
+    assert out["ready"] is True  # remote_only is a valid location answer
+
+
+def test_turn_empty_delta_preserves_prior_config(monkeypatch):
+    # the model returns empty titles this turn — the known title must NOT be wiped.
+    obj = {**FULL_TURN, "titles": [], "location": "", "remote_only": False}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(
+        chat.turn(
+            [{"role": "user", "content": "actually add python"}],
+            {"titles": ["data analyst"], "location": "Austin, TX"},
+        )
     )
-    assert payload["ready"] is True
+    assert out["config"]["titles"] == ["data analyst"]  # preserved
+    assert out["config"]["location"] == "Austin, TX"  # preserved
 
 
-def test_stream_chat_no_titles_is_not_ready(monkeypatch):
-    chunks = [{"choices": [{"delta": {"content": "What kind of role are you after?"}}]}]
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(chunks))
-    events = _collect(chat.stream_chat([{"role": "user", "content": "just go"}], {}))
-    cfg_event = next(e for e in events if e["event"] == "config")
-    assert json.loads(cfg_event["data"])["ready"] is False  # no titles → never ready
+def test_turn_upstream_error_falls_back(monkeypatch):
+    async def boom(payload):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(chat, "_call_openrouter", boom)
+    out = _run(chat.turn([{"role": "user", "content": "hi"}], {"titles": ["x"]}))
+    assert out["ready"] is False
+    assert out["reply"] == ""
+    assert "error" in out
+    assert out["config"] == {"titles": ["x"]}  # current config carried through
 
 
-# ── the endpoint: fails CLOSED to the form ────────────────────────────────────
+# ── the endpoint: JSON turn + fails CLOSED to the form ────────────────────────
 def test_chat_503_without_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     r = TestClient(server.app).post(
@@ -126,19 +127,22 @@ def test_chat_503_without_key(monkeypatch):
     assert r.status_code == 503
 
 
-def test_chat_streams_with_mocked_openrouter(monkeypatch):
+def test_chat_returns_json_turn(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(FULL_TURN))
     _reset_usage(monkeypatch)
     r = TestClient(server.app).post(
         "/api/chat",
         json={
-            "messages": [{"role": "user", "content": "product manager in denver, go"}],
+            "messages": [{"role": "user", "content": "product manager in denver"}],
             "config": {},
         },
     )
     assert r.status_code == 200
-    assert "product manager" in r.text  # the streamed config event carried it
+    body = r.json()
+    assert body["config"]["titles"] == ["product manager"]
+    assert body["ready"] is True
+    assert body["reply"].startswith("Great")
 
 
 def test_chat_turn_cap_429(monkeypatch):
@@ -199,7 +203,7 @@ def test_sanitize_messages_strips_non_user_assistant():
 # ── the guarantee: /api/chat reaches no job API ───────────────────────────────
 def test_chat_reaches_no_job_api(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    monkeypatch.setattr(chat, "_stream_openrouter", _fake_stream(TOOLCALL_CHUNKS))
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(FULL_TURN))
     _reset_usage(monkeypatch)
 
     def _boom(*a, **k):

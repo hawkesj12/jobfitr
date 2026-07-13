@@ -1,9 +1,10 @@
 "use strict";
 
-// The conversational front door. Streams /api/chat (SSE over a POST), renders the
-// assistant's tokens live, captures the set_config delta, and hands the finished
-// config to window.jobfitr.run(). Fails gracefully to the 5-question form whenever
-// the AI is unavailable (no key, daily ceiling, or an error).
+// The conversational front door. One JSON turn per message: POST /api/chat →
+// {reply, config, ready}. The model converses (reply, always above the box) while the
+// config fills; the moment titles + location are known the client warms the results
+// cache (/api/prefetch) so the search is instant. Falls back to the search form if the
+// AI is unavailable (no key, daily ceiling, or an upstream error).
 
 (function () {
   const form = document.getElementById("chat-form");
@@ -12,25 +13,15 @@
   const echo = document.getElementById("echo");
   if (!form) return;
 
-  // ── the front door types its own question on load ───────────────────────────
-  const QUESTION = "What job are you chasing?";
+  const OPENER = "What job are you chasing?";
   const reduceMo = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  function typeQuestion() {
-    if (reduceMo) { input.placeholder = QUESTION; return; }
-    let i = 0;
-    (function step() {
-      if (input.value) return; // the user started typing — stop, get out of the way
-      input.placeholder = QUESTION.slice(0, i) + (i < QUESTION.length ? "▌" : "");
-      if (i < QUESTION.length) { i++; setTimeout(step, 55 + Math.random() * 45); }
-      else { input.placeholder = QUESTION; }
-    })();
-  }
-  setTimeout(typeQuestion, 450);
 
   const messages = [];
   let config = {};
   let busy = false;
-  let currentQuestion = QUESTION; // the question the next answer is responding to
+  let prefetched = false;
+  let currentQuestion = OPENER; // the question the next answer responds to
+  let typeToken = 0;
 
   function renderSay(text, withCursor) {
     sayEl.textContent = text;
@@ -39,6 +30,27 @@
       c.className = "cur";
       sayEl.appendChild(c);
     }
+  }
+
+  // Type `text` into the assistant line ABOVE the box, with a blinking cursor. A newer
+  // message supersedes an in-flight one (typeToken).
+  function typeInto(text) {
+    const token = ++typeToken;
+    if (reduceMo || !text) {
+      renderSay(text || "", false);
+      return;
+    }
+    let i = 0;
+    (function step() {
+      if (token !== typeToken) return;
+      renderSay(text.slice(0, i), true);
+      if (i < text.length) {
+        i++;
+        setTimeout(step, 18 + Math.random() * 22);
+      } else {
+        renderSay(text, false);
+      }
+    })();
   }
 
   function pushEcho(question, answer) {
@@ -58,100 +70,86 @@
     rows.forEach((r, i) => (r.style.opacity = i === rows.length - 1 ? "1" : i === rows.length - 2 ? "0.5" : "0.28"));
   }
 
-  function toResults(cfg) {
-    const go = () => window.jobfitr && window.jobfitr.run(cfg);
-    if (document.startViewTransition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      document.startViewTransition(go);
-    } else {
-      go();
+  function persist() {
+    try {
+      localStorage.setItem("jobfitr.config", JSON.stringify(config));
+    } catch {
+      /* storage disabled — the session still works */
     }
   }
 
+  function hasTitles() {
+    return Array.isArray(config.titles) ? config.titles.length > 0 : !!config.titles;
+  }
+  function hasLocation() {
+    const loc = config.location;
+    return (typeof loc === "string" && loc.trim() !== "") || !!config.remote_only;
+  }
+
+  // The moment titles + location are both known, warm the results cache in the
+  // background so the 3-4s live fetch overlaps the rest of the chat. Fire once.
+  function maybePrefetch() {
+    if (prefetched || !hasTitles() || !hasLocation()) return;
+    prefetched = true;
+    fetch("/api/prefetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ titles: config.titles, location: config.location || "" }),
+    }).catch(() => {
+      prefetched = false; // let a later turn retry
+    });
+  }
+
+  function toConfirm() {
+    if (window.jobfitr && window.jobfitr.confirm) window.jobfitr.confirm(config);
+    else if (window.jobfitr) window.jobfitr.run(config);
+  }
   function fallbackToForm() {
     if (window.jobfitr) window.jobfitr.showForm();
-  }
-
-  function handleEvent(block) {
-    const lines = block.split("\n");
-    let event = "message";
-    const data = [];
-    for (const line of lines) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data.push(line.slice(5).trim());
-    }
-    const raw = data.join("\n");
-    if (!raw) return null;
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return null;
-    }
-    return { event, parsed };
   }
 
   async function send(text) {
     if (busy || !text.trim()) return;
     busy = true;
     input.value = "";
-    input.placeholder = ""; // drop the stale first-question placeholder once talking
     pushEcho(currentQuestion, text);
     messages.push({ role: "user", content: text });
     renderSay("", true);
 
-    let assistant = "";
-    let ready = false;
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages, config }),
       });
-      if (!resp.ok || !resp.body) {
+      if (!resp.ok) {
         // 503 (no key / daily ceiling) or 429 (caps): the assistant is unavailable.
-        // Run what we already have, or hand off to the quick form — with a warm note
-        // so the switch never feels like a failure.
-        if (config.titles && config.titles.length) {
-          renderSay("The assistant is resting — pulling your matches from what you told me.", false);
-          setTimeout(() => toResults(config), 700);
+        // Use what we have, or hand to the form — with a warm note, never a failure.
+        if (hasTitles()) {
+          typeInto("The assistant is resting — pulling your matches from what you told me.");
+          setTimeout(toConfirm, 900);
         } else {
-          renderSay("The assistant is resting just now — switching you to the quick form.", false);
-          setTimeout(fallbackToForm, 900);
+          typeInto("The assistant is resting just now — switching you to the quick form.");
+          setTimeout(fallbackToForm, 1100);
         }
         return;
       }
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true }).replace(/\r/g, "");
-        let idx;
-        while ((idx = buf.indexOf("\n\n")) >= 0) {
-          const ev = handleEvent(buf.slice(0, idx));
-          buf = buf.slice(idx + 2);
-          if (!ev) continue;
-          if (ev.event === "token" && ev.parsed.text) {
-            assistant += ev.parsed.text;
-            renderSay(assistant, true);
-          } else if (ev.event === "config") {
-            config = ev.parsed.config || config;
-            ready = !!ev.parsed.ready;
-          } else if (ev.event === "error") {
-            if (config.titles && config.titles.length) toResults(config);
-            else fallbackToForm();
-            return;
-          }
-        }
+      const data = await resp.json();
+      if (data.error) {
+        if (hasTitles()) toConfirm();
+        else fallbackToForm();
+        return;
       }
-      renderSay(assistant || "Got it.", false);
-      messages.push({ role: "assistant", content: assistant });
-      // the assistant's reply is the question the NEXT answer will respond to
-      if (assistant) currentQuestion = assistant;
-      if (ready) setTimeout(() => toResults(config), 450);
+      config = data.config || config;
+      persist();
+      const reply = data.reply || "Got it.";
+      messages.push({ role: "assistant", content: reply });
+      currentQuestion = reply;
+      typeInto(reply);
+      maybePrefetch();
+      if (data.ready) setTimeout(toConfirm, reply.length * 22 + 500);
     } catch {
-      if (config.titles && config.titles.length) toResults(config);
+      if (hasTitles()) toConfirm();
       else fallbackToForm();
     } finally {
       busy = false;
@@ -162,4 +160,7 @@
     e.preventDefault();
     send(input.value);
   });
+
+  // Open the conversation: type the first question ABOVE the box.
+  setTimeout(() => typeInto(OPENER), 450);
 })();

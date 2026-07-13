@@ -77,13 +77,17 @@
       root.style.setProperty("--ink", "#0b0f1a");
       root.style.setProperty("--sub", "rgba(11,15,26,0.60)");
       root.style.setProperty("--card-brd", "rgba(255,255,255,0.62)");
+      root.style.setProperty("--rip-col", "rgba(255,255,255,0.85)"); // bright scene → light heartbeat
     } else {
       root.style.setProperty("--ink", "#f4f6fb");
       root.style.setProperty("--sub", "rgba(244,246,251,0.66)");
       root.style.setProperty("--card-brd", "rgba(255,255,255,0.18)");
+      root.style.setProperty("--rip-col", "rgba(10,14,26,0.62)"); // dark scene → shadowy heartbeat
     }
     // the halo breathes slower as it darkens — the app "sleeping"
     root.style.setProperty("--breath", (4.2 + (1 - fr.lum) * 4.5).toFixed(1) + "s");
+    // the heartbeat slows toward sleep as it darkens
+    bpm = 46 + fr.lum * 20; // ~46 bpm deep night → ~66 bpm midday
 
     const wantStars = fr.lum < 0.16 && !reduce && starsLayer;
     if (wantStars && !starsOn) { starsOn = true; startStars(); }
@@ -111,6 +115,26 @@
     if (starsLayer) starsLayer.textContent = "";
   }
 
+  // ── heartbeat: a faint lub-dub pulse from the chat, slowing toward sleep ─────
+  const pulse = document.getElementById("pulse");
+  let bpm = 62; // set by time-of-day in apply()
+  function rip(dub) {
+    // Skip while hidden: backgrounded tabs pause CSS animations, so animationend
+    // would never fire and rips would pile up. No point beating when unseen.
+    if (reduce || !pulse || document.hidden) return;
+    const r = document.createElement("div");
+    r.className = "rip run" + (dub ? " dub" : "");
+    pulse.appendChild(r);
+    const kill = () => r.remove();
+    r.addEventListener("animationend", kill);
+    setTimeout(kill, 2000); // fallback: a dropped animationend can't leak
+  }
+  function heartbeat() {
+    rip(false); // lub
+    setTimeout(() => rip(true), 235); // dub, a beat later
+    setTimeout(heartbeat, 60000 / bpm); // rest, then the next beat
+  }
+
   // ── boot on the local clock, tick each minute ───────────────────────────────
   function nowMinute() {
     const d = new Date();
@@ -118,4 +142,5 @@
   }
   apply(nowMinute());
   setInterval(() => apply(nowMinute()), 15000);
+  if (!reduce && pulse) setTimeout(heartbeat, 600);
 })();

@@ -110,7 +110,6 @@ button { font: inherit; cursor: pointer; }
 .echo .row { transition: opacity 600ms ease; margin-bottom: 10px; }
 .echo .row .q-asked { color: var(--ink); opacity: 0.72; }          /* the question, flush left */
 .echo .row .a-given { color: var(--accent); padding-left: 18px; }   /* the answer, indented beneath */
-.chatwrap { position: relative; width: 100%; }
 .halo {
   position: absolute; inset: -14px; border-radius: 26px; z-index: -1; pointer-events: none;
   background: radial-gradient(60% 120% at 50% 50%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 70%);
@@ -156,6 +155,11 @@ button { font: inherit; cursor: pointer; }
 .chat-send { border: 0; background: transparent; color: var(--accent); font-size: 18px; padding: 2px 6px; }
 .starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .starter { font-size: 12.5px; color: var(--ink); background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+/* suggested-chips row — sits just under the pinned bar (grid row 3); hidden when empty.
+   Populated later (fixed per-question or model-suggested); the front door stays bare for now. */
+.chips { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chips:empty { display: none; }
+.chip { font-size: 12.5px; color: var(--ink); background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; cursor: pointer; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); transition: background 1400ms ease, border-color 1400ms ease; }
 .link-quiet { background: none; border: 0; color: var(--sub); font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; }
 
 /* ── results toolbar ────────────────────────────────────────────────────────── */

@@ -25,7 +25,6 @@ from job_radar.util import age_int
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from sse_starlette.sse import EventSourceResponse
 
 from . import chat as chatmod
 from . import live, store
@@ -177,6 +176,45 @@ def _rank(
     return [x for x in scored if x[1] >= floor][:limit], top
 
 
+def _warm_cache(titles: list, location: str) -> str | None:
+    """Ensure the store holds fresh jobs for this (titles, location): serve the fresh
+    cache untouched, or do ONE bounded live fetch (Adzuna + USAJOBS, single-flighted).
+
+    Returns a `degraded` reason (or None). Idempotent + coalesced, so calling it early
+    from /api/prefetch and again from /api/score costs at most one upstream fetch —
+    mark_fetched makes the second call see a fresh cache.
+    """
+    if not titles:
+        return None
+    key = store.search_key(titles, location)
+    if store.search_fresh(key):
+        return None  # fresh (< TTL) — no API call
+    if _fetch_ceiling_reached():
+        return "adzuna_daily_limit"  # load-shed: serve the cache
+    try:
+        rows = live.coalesced_fetch(
+            titles, location
+        )  # blocking (threadpool), single-flight
+        if rows:
+            store.upsert_jobs(rows)
+        store.mark_fetched(key)
+        _note_fetch()
+        return None
+    except Exception:  # noqa: BLE001
+        return "fetch_error"  # serve whatever's cached
+
+
+@app.post("/api/prefetch")
+@limiter.limit(SCORE_RATE_LIMIT)
+def prefetch(request: Request, payload: dict = Body(...)) -> dict:
+    """Warm the cache for a search-in-progress the moment titles + location are known,
+    so the 3-4s live fetch overlaps the rest of the chat and /api/score is instant.
+    Reuses _warm_cache — coalesced + mark_fetched dedup it against the later score."""
+    titles, location = search_inputs(payload)
+    degraded = _warm_cache(titles, location)
+    return {"ok": degraded is None, "warmed": bool(titles), "degraded": degraded}
+
+
 @app.post("/api/score")
 @limiter.limit(SCORE_RATE_LIMIT)
 def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
@@ -205,24 +243,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         else min(limit, MAX_LIMIT)
     )
 
-    degraded = None
-    if titles:
-        key = store.search_key(titles, location)
-        if store.search_fresh(key):
-            pass  # the cache is fresh (< TTL) — no API call
-        elif _fetch_ceiling_reached():
-            degraded = "adzuna_daily_limit"  # load-shed: serve the cache
-        else:
-            try:
-                rows = live.coalesced_fetch(
-                    titles, location
-                )  # blocking (in threadpool), single-flight
-                if rows:
-                    store.upsert_jobs(rows)
-                store.mark_fetched(key)
-                _note_fetch()
-            except Exception:  # noqa: BLE001
-                degraded = "fetch_error"  # serve whatever's cached
+    degraded = _warm_cache(titles, location)
 
     candidates = store.bm25_candidates(titles, limit=CANDIDATE_LIMIT) if titles else []
     kept, top = _rank(
@@ -252,11 +273,12 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
 
 @app.post("/api/chat")
 @limiter.limit(CHAT_RATE_LIMIT)
-async def chat_endpoint(request: Request, payload: dict = Body(...)):
-    """Stream one assistant turn. The ONLY metered path; never touches scoring.
+async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
+    """One structured chat turn → {reply, config, ready}. The ONLY metered path;
+    never touches scoring.
 
     Fails CLOSED to the form: a 503 (no key / daily ceiling) or 429 (rate/turn cap)
-    tells the front end to fall back to the 5-question form.
+    tells the front end to fall back to the search form.
     """
     if not chatmod.chat_available():
         raise HTTPException(status_code=503, detail="chat_unavailable")
@@ -271,7 +293,7 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)):
 
     current = payload.get("config") if isinstance(payload.get("config"), dict) else {}
     chatmod.note_request()
-    return EventSourceResponse(chatmod.stream_chat(messages, current))
+    return await chatmod.turn(messages, current)
 
 
 @app.get("/api/meta")

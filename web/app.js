@@ -562,7 +562,15 @@ el.railShare.addEventListener("click", async () => {
 });
 
 // expose the surface chat.js drives
-window.jobfitr = { run, showChat, showResults, showForm };
+// Confirmation-on-ready: the chat calls this once it has enough. Pre-fill the form
+// with the extracted config so the user can review/edit before the search runs (the
+// form's own submit calls run()). Reuses the fallback form as the confirmation surface.
+function confirmConfig(cfg) {
+  hydrateForm(cfg);
+  showForm();
+}
+
+window.jobfitr = { run, showChat, showResults, showForm, confirm: confirmConfig };
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 (function init() {
