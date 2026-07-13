@@ -1,0 +1,301 @@
+<title>jobfitr — Atmosphere Study</title>
+<style>
+  :root {
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --display: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --ink: #0b0f1a;
+    --sub: rgba(11,15,26,0.6);
+    --card-bg: rgba(255,255,255,0.34);
+    --card-brd: rgba(255,255,255,0.6);
+    --field-bg: rgba(255,255,255,0.28);
+    --accent: #e6b985;
+    --breath: 5s;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; font-family: var(--display); color: var(--ink);
+    overflow: hidden; -webkit-font-smoothing: antialiased;
+    transition: color 1600ms ease;
+  }
+
+  /* ── the sky ─────────────────────────────────────────────── */
+  #sky {
+    position: fixed; inset: 0; z-index: -4;
+    background: linear-gradient(180deg, var(--sky-top) 0%, var(--sky-mid) 52%, var(--sky-bot) 100%);
+    transition: background 1400ms linear;
+  }
+  #glow {
+    position: fixed; z-index: -3; left: var(--gx, 50%); top: var(--gy, 30%);
+    width: 130vmax; height: 130vmax; margin: -65vmax 0 0 -65vmax;
+    background: radial-gradient(circle, var(--glow) 0%, transparent 42%);
+    opacity: var(--gA, 0.6); pointer-events: none; mix-blend-mode: screen;
+    transition: opacity 1400ms linear, top 1800ms ease, background 1400ms linear;
+    animation: drift 46s ease-in-out infinite alternate;
+  }
+  @keyframes drift {
+    0%   { transform: translate(-2.5vw, 0) scale(1); }
+    100% { transform: translate(2.5vw, -1.5vh) scale(1.05); }
+  }
+  /* slow secondary cloud wash so the colors keep moving */
+  #wash {
+    position: fixed; inset: -20% -20% -20% -20%; z-index: -2; pointer-events: none; opacity: 0.5;
+    background: radial-gradient(60% 40% at 30% 30%, var(--wash-a), transparent 60%),
+                radial-gradient(50% 45% at 75% 65%, var(--wash-b), transparent 62%);
+    mix-blend-mode: screen;
+    transition: background 1600ms linear;
+    animation: wash 60s ease-in-out infinite alternate;
+  }
+  @keyframes wash {
+    0%   { transform: translate(-3%, 1%) scale(1.05); }
+    100% { transform: translate(3%, -2%) scale(1.12); }
+  }
+  #stars { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+  .tw { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff;
+        box-shadow: 0 0 4px 1px rgba(255,255,255,0.7); opacity: 0; }
+  @keyframes tw { 0% { opacity: 0; transform: scale(0.4); } 45% { opacity: 0.85; transform: scale(1); } 100% { opacity: 0; transform: scale(0.6); } }
+  .tw.on { animation: tw 2.6s ease-in-out; }
+
+  /* ── the floating scene ──────────────────────────────────── */
+  .scene {
+    position: relative; z-index: 1; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; padding: 20px 20px 120px; width: min(500px, 100%); margin: 0 auto;
+  }
+  .glass {
+    background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 16px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.22) inset, 0 12px 44px rgba(15,20,38,0.18);
+    -webkit-backdrop-filter: blur(22px) saturate(1.4); backdrop-filter: blur(22px) saturate(1.4);
+    transition: background 1600ms ease, border-color 1600ms ease;
+  }
+
+  /* chat + living halo */
+  .chatwrap { position: relative; width: 100%; }
+  .halo {
+    position: absolute; inset: -14px; border-radius: 26px; z-index: -1; pointer-events: none;
+    background: radial-gradient(60% 120% at 50% 50%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 70%);
+    opacity: 0.5; animation: breathe var(--breath) ease-in-out infinite;
+  }
+  @keyframes breathe { 0%,100% { transform: scale(0.99); opacity: 0.34; } 50% { transform: scale(1.04); opacity: 0.6; } }
+  .chat { width: 100%; padding: 15px 17px; }
+  .chat .line { font-size: 14.5px; margin-bottom: 11px; line-height: 1.5; }
+  .chat .line .cur { display: inline-block; width: 7px; height: 15px; vertical-align: -2px; background: var(--accent); margin-left: 2px; border-radius: 1px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .field { display: flex; align-items: center; gap: 10px; padding: 10px 13px; border-radius: 11px;
+           background: var(--field-bg); border: 1px solid var(--card-brd); transition: background 1600ms ease, border-color 1600ms ease; }
+  .field .ph { flex: 1; color: var(--sub); font-size: 13.5px; }
+  .field .go { color: var(--accent); font-size: 16px; }
+
+  /* carousel */
+  .carousel { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .cc { width: 100%; transition: background 1600ms ease, border-color 1600ms ease; }
+  .cc.slim { padding: 9px 15px; }
+  .cc.up2, .cc.dn2 { width: 68%; opacity: 0.34; filter: blur(2px); }
+  .cc.up1, .cc.dn1 { width: 84%; opacity: 0.62; filter: blur(0.6px); }
+  .cc.focus { width: 100%; }
+  .cc .role { font-weight: 650; font-size: 14px; }
+  .cc.focus .role { font-size: 16px; }
+  .cc .org { font-size: 12px; color: var(--sub); margin-top: 1px; }
+  .cc .rowline { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .cc .mini { font-family: var(--mono); font-size: 11px; color: var(--sub); }
+
+  .gcard { position: relative; overflow: hidden; padding: 15px 17px; isolation: isolate; }
+  .gcard .fill {
+    position: absolute; inset: 0; z-index: -1; width: 0%;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, transparent), color-mix(in srgb, var(--accent) 52%, transparent));
+    border-right: 2px solid color-mix(in srgb, var(--accent) 82%, transparent);
+    transition: width 1100ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .gcard .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .gcard .fitcorner { text-align: right; white-space: nowrap; }
+  .gcard .tier { font-weight: 700; font-size: 14px; color: color-mix(in srgb, var(--accent) 72%, var(--ink)); }
+  .gcard .rank { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--sub); margin-top: 2px; }
+  .gcard .why { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .gcard .why b { font-family: var(--mono); font-weight: 500; font-size: 10.5px; color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 6px; padding: 2px 7px; transition: background 1600ms ease; }
+
+  /* controls */
+  .controls {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 3;
+    width: min(500px, calc(100% - 32px)); padding: 13px 17px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .controls .readout { display: flex; align-items: center; gap: 11px; }
+  .controls .time { font-family: var(--mono); font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+  .controls .phase { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--sub); padding: 3px 9px; border: 1px solid var(--card-brd); border-radius: 100px; }
+  .controls .spacer { flex: 1; }
+  .controls button { font-family: var(--mono); font-size: 11.5px; color: var(--ink); cursor: pointer; background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 8px; padding: 6px 11px; transition: background 1600ms ease; }
+  .controls button.on { color: var(--accent); border-color: var(--accent); }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 5px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 20%, transparent); outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.25); cursor: pointer; }
+  input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
+  .hint { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 3; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; color: var(--sub); text-align: center; padding: 6px 14px; border-radius: 100px; background: var(--card-bg); border: 1px solid var(--card-brd); -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #glow, #wash, .halo, .tw.on, .chat .line .cur { animation: none; }
+    #sky, #glow, #wash, .glass, .cc, .field, .gcard .why b, .controls button, body { transition: none; }
+  }
+</style>
+
+<div id="sky"></div>
+<div id="glow"></div>
+<div id="wash"></div>
+<div id="stars"></div>
+
+<div class="hint">jobfitr atmosphere study · opens on your computer's local time · drag to move through the day · ▶ play</div>
+
+<div class="scene">
+  <div class="chatwrap">
+    <div class="halo"></div>
+    <div class="glass chat">
+      <div class="line" id="chatline">Nice — a few strong fits near you. Tap a card to see the detail.<span class="cur"></span></div>
+      <div class="field"><span class="ph">Refine your search…</span><span class="go">↵</span></div>
+    </div>
+  </div>
+
+  <div class="carousel">
+    <div class="glass cc slim up2"><div class="rowline"><span class="role">Curator of Herpetology</span><span class="mini">#—</span></div></div>
+    <div class="glass cc slim up1"><div class="rowline"><span class="role">Wildlife Rehabilitator</span><span class="mini">Good · #3</span></div></div>
+
+    <div class="glass cc focus gcard">
+      <div class="fill" id="fill"></div>
+      <div class="top">
+        <div><div class="role">Senior Zookeeper — Reptiles</div><div class="org">Louisville Zoo · Louisville, KY</div></div>
+        <div class="fitcorner"><span class="tier">Strong fit</span><span class="rank">#1 of 34</span></div>
+      </div>
+      <div class="why"><b>reptiles</b><b>conservation</b><b>biology degree</b></div>
+    </div>
+
+    <div class="glass cc slim dn1"><div class="rowline"><span class="role">Animal Care Specialist</span><span class="mini">Good · #4</span></div></div>
+    <div class="glass cc slim dn2"><div class="rowline"><span class="role">Aquarist II</span><span class="mini">#—</span></div></div>
+  </div>
+</div>
+
+<div class="glass controls">
+  <div class="readout">
+    <span class="time" id="clock">12:00 PM</span>
+    <span class="phase" id="phase">Midday</span>
+    <span class="spacer"></span>
+    <button id="playbtn" type="button">▶ play</button>
+    <button id="livebtn" type="button">◉ live</button>
+  </div>
+  <input id="slider" type="range" min="0" max="1439" value="720" aria-label="Minute of the day" />
+</div>
+
+<script>
+  "use strict";
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Keyframes from the reference skies. acc = the accent the UI borrows from that light
+  // (warm by day, cool moonlight at night) so nothing is a static blue-green.
+  var KF = [
+    { m:0,    top:"#0f1730", mid:"#182238", bot:"#222d47", glow:"#3c4470", acc:"#8ea3d6", gx:"50%", gy:"88%", gA:0.20, lum:0.06 },
+    { m:300,  top:"#212c4c", mid:"#3f4266", bot:"#665c78", glow:"#9a7f88", acc:"#bd8fa2", gx:"64%", gy:"82%", gA:0.32, lum:0.20 },
+    { m:390,  top:"#a7c0df", mid:"#eec6cd", bot:"#f7d8c7", glow:"#fff1e4", acc:"#f0a184", gx:"40%", gy:"74%", gA:0.75, lum:0.68 },
+    { m:540,  top:"#9ec9ec", mid:"#dde3f1", bot:"#f2d4dd", glow:"#ffffff", acc:"#ec9caf", gx:"46%", gy:"40%", gA:0.80, lum:0.86 },
+    { m:720,  top:"#a6d2f2", mid:"#d6e8f5", bot:"#eaf3ee", glow:"#ffffff", acc:"#e6b985", gx:"50%", gy:"16%", gA:0.85, lum:1.00 },
+    { m:900,  top:"#a9cbe8", mid:"#e7dbe6", bot:"#f4dacf", glow:"#fff6ec", acc:"#edac86", gx:"56%", gy:"36%", gA:0.80, lum:0.88 },
+    { m:1110, top:"#82a7cf", mid:"#f0c6b6", bot:"#f4c3b2", glow:"#ffd9a6", acc:"#eaa06f", gx:"62%", gy:"66%", gA:0.72, lum:0.62 },
+    { m:1230, top:"#50608a", mid:"#c9a0b1", bot:"#c2b2cf", glow:"#f2b391", acc:"#d98f80", gx:"60%", gy:"78%", gA:0.58, lum:0.38 },
+    { m:1320, top:"#233151", mid:"#3f5a7a", bot:"#495472", glow:"#d9b48f", acc:"#6d7fb0", gx:"55%", gy:"84%", gA:0.34, lum:0.18 },
+    { m:1440, top:"#0f1730", mid:"#182238", bot:"#222d47", glow:"#3c4470", acc:"#8ea3d6", gx:"50%", gy:"88%", gA:0.20, lum:0.06 }
+  ];
+
+  function hex(h){ h=h.replace("#",""); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+  function lerpA(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+  function css(a){ return "rgb("+Math.round(a[0])+","+Math.round(a[1])+","+Math.round(a[2])+")"; }
+  function rgba(a,al){ return "rgba("+Math.round(a[0])+","+Math.round(a[1])+","+Math.round(a[2])+","+al+")"; }
+  function toward(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+  function pnum(s){ return parseFloat(s); }
+  var WHITE=[255,255,255], NIGHT=[16,19,31];
+
+  function frame(minute){
+    var t=((minute%1440)+1440)%1440, i=0;
+    for (var k=0;k<KF.length-1;k++){ if (t>=KF[k].m && t<KF[k+1].m){ i=k; break; } }
+    var a=KF[i], b=KF[i+1], f=(t-a.m)/(b.m-a.m);
+    return {
+      top:lerpA(hex(a.top),hex(b.top),f), mid:lerpA(hex(a.mid),hex(b.mid),f), bot:lerpA(hex(a.bot),hex(b.bot),f),
+      glow:lerpA(hex(a.glow),hex(b.glow),f), acc:lerpA(hex(a.acc),hex(b.acc),f),
+      gx:pnum(a.gx)+(pnum(b.gx)-pnum(a.gx))*f, gy:pnum(a.gy)+(pnum(b.gy)-pnum(a.gy))*f,
+      gA:a.gA+(b.gA-a.gA)*f, lum:a.lum+(b.lum-a.lum)*f, t:t
+    };
+  }
+
+  var root=document.documentElement, clock=document.getElementById("clock"), phaseEl=document.getElementById("phase"), slider=document.getElementById("slider");
+
+  function phaseName(t){ if(t<300)return"Night"; if(t<390)return"Pre-dawn"; if(t<480)return"Sunrise"; if(t<660)return"Morning"; if(t<780)return"Midday"; if(t<1050)return"Afternoon"; if(t<1200)return"Golden hour"; if(t<1290)return"Sunset"; if(t<1380)return"Dusk"; return"Night"; }
+  function fmt(t){ var h=Math.floor(t/60), m=t%60, ap=h<12?"AM":"PM", hh=h%12; if(hh===0)hh=12; return hh+":"+(m<10?"0":"")+m+" "+ap; }
+
+  var starsOn=false;
+  function apply(minute){
+    var fr=frame(minute);
+    root.style.setProperty("--sky-top",css(fr.top));
+    root.style.setProperty("--sky-mid",css(fr.mid));
+    root.style.setProperty("--sky-bot",css(fr.bot));
+    root.style.setProperty("--glow",css(fr.glow));
+    root.style.setProperty("--gx",fr.gx+"%");
+    root.style.setProperty("--gy",fr.gy+"%");
+    root.style.setProperty("--gA",fr.gA);
+    root.style.setProperty("--accent",css(fr.acc));
+    root.style.setProperty("--wash-a",rgba(fr.glow,0.10));
+    root.style.setProperty("--wash-b",rgba(fr.acc,0.10));
+
+    var bright = fr.lum > 0.5;
+    // glass takes a TINT from the sky (near-clear/light by day, darker at night)
+    var tint = bright ? toward(fr.mid, WHITE, 0.5) : toward(fr.mid, NIGHT, 0.55);
+    var cardA = 0.30 + (1-fr.lum)*0.16, fieldA = cardA*0.8;
+    root.style.setProperty("--card-bg", rgba(tint, cardA));
+    root.style.setProperty("--field-bg", rgba(tint, fieldA));
+    if (bright){
+      root.style.setProperty("--ink","#0b0f1a");
+      root.style.setProperty("--sub","rgba(11,15,26,0.60)");
+      root.style.setProperty("--card-brd","rgba(255,255,255,0.62)");
+    } else {
+      root.style.setProperty("--ink","#f4f6fb");
+      root.style.setProperty("--sub","rgba(244,246,251,0.66)");
+      root.style.setProperty("--card-brd","rgba(255,255,255,0.18)");
+    }
+    // breathe slower as it gets dark — the app "sleeping"
+    root.style.setProperty("--breath", (4.2 + (1-fr.lum)*4.5).toFixed(1)+"s");
+
+    clock.textContent=fmt(fr.t); phaseEl.textContent=phaseName(fr.t);
+
+    // twinkles only in the deep-night window
+    var wantStars = fr.lum < 0.16 && !reduce;
+    if (wantStars && !starsOn){ starsOn=true; startStars(); }
+    else if (!wantStars && starsOn){ starsOn=false; stopStars(); }
+  }
+
+  // ── twinkles ──────────────────────────────────────────────
+  var starsLayer=document.getElementById("stars"), starTimer=null;
+  function spawnStar(){
+    var n=1+Math.floor(Math.random()*2);
+    for (var i=0;i<n;i++){
+      var s=document.createElement("div"); s.className="tw on";
+      s.style.left=(Math.random()*100)+"%"; s.style.top=(Math.random()*72)+"%";
+      s.style.width=s.style.height=(1.5+Math.random()*1.8).toFixed(1)+"px";
+      starsLayer.appendChild(s);
+      (function(node){ setTimeout(function(){ node.remove(); }, 2700); })(s);
+    }
+  }
+  function startStars(){ if(starTimer)return; starTimer=setInterval(spawnStar, 620); }
+  function stopStars(){ if(starTimer){ clearInterval(starTimer); starTimer=null; } starsLayer.textContent=""; }
+
+  // ── gauge fill on load ────────────────────────────────────
+  setTimeout(function(){ document.getElementById("fill").style.width="88%"; }, 380);
+
+  // ── controls ──────────────────────────────────────────────
+  slider.addEventListener("input", function(){ stopAuto(); apply(+slider.value); });
+  var playing=false, liveOn=false, playRAF=null, liveTimer=null, pv=720;
+  var playBtn=document.getElementById("playbtn"), liveBtn=document.getElementById("livebtn");
+  function stopAuto(){ playing=false; liveOn=false; playBtn.classList.remove("on"); liveBtn.classList.remove("on"); playBtn.textContent="▶ play"; if(playRAF)cancelAnimationFrame(playRAF); if(liveTimer)clearInterval(liveTimer); }
+  playBtn.addEventListener("click", function(){
+    if(playing){ stopAuto(); return; }
+    stopAuto(); playing=true; playBtn.classList.add("on"); playBtn.textContent="❚❚ pause"; pv=+slider.value;
+    (function step(){ if(!playing)return; pv=(pv+3)%1440; slider.value=pv; apply(pv); playRAF=requestAnimationFrame(step); })();
+  });
+  function tickLive(){ var d=new Date(), t=d.getHours()*60+d.getMinutes(); slider.value=t; apply(t); }
+  liveBtn.addEventListener("click", function(){ if(liveOn){ stopAuto(); return; } stopAuto(); liveOn=true; liveBtn.classList.add("on"); tickLive(); liveTimer=setInterval(tickLive,15000); });
+
+  // boot on the computer's own local time
+  liveOn=true; liveBtn.classList.add("on"); tickLive(); liveTimer=setInterval(tickLive,15000);
+</script>

@@ -1,0 +1,791 @@
+<title>jobfitr — Design Board</title>
+<style>
+  :root {
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --raise: #ffffff;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --hair: #e1e0d9;
+    --line: #c3c2b7;
+    --accent: #2a78d6;
+    --accent-ink: #ffffff;
+    --good: #0ca30c;
+    --warn: #b23b2e;
+    --warn-bg: rgba(178, 59, 46, 0.06);
+    --good-bg: rgba(12, 163, 12, 0.07);
+    --gauge-a: #2a78d6;
+    --gauge-b: #0ca30c;
+    --shadow: 0 1px 2px rgba(11, 11, 11, 0.04), 0 10px 30px rgba(11, 11, 11, 0.07);
+    --shadow-sm: 0 1px 2px rgba(11, 11, 11, 0.05), 0 3px 10px rgba(11, 11, 11, 0.05);
+    --radius: 14px;
+    --radius-sm: 9px;
+    --display: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --maxw: 940px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --raise: #222220;
+      --ink: #ffffff;
+      --ink-2: #c9c8c1;
+      --muted: #8f8d87;
+      --hair: #2c2c2a;
+      --line: #3a3a36;
+      --accent: #3f8ce8;
+      --good: #23b823;
+      --warn: #e06a5c;
+      --warn-bg: rgba(224, 106, 92, 0.09);
+      --good-bg: rgba(35, 184, 35, 0.10);
+      --gauge-a: #3f8ce8;
+      --gauge-b: #23b823;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 34px rgba(0, 0, 0, 0.5);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 3px 12px rgba(0, 0, 0, 0.45);
+    }
+  }
+  :root[data-theme="light"] {
+    --page: #f9f9f7; --surface: #fcfcfb; --raise: #ffffff; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --hair: #e1e0d9; --line: #c3c2b7; --accent: #2a78d6; --good: #0ca30c;
+    --warn: #b23b2e; --warn-bg: rgba(178,59,46,0.06); --good-bg: rgba(12,163,12,0.07);
+    --gauge-a: #2a78d6; --gauge-b: #0ca30c;
+    --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 10px 30px rgba(11,11,11,0.07);
+    --shadow-sm: 0 1px 2px rgba(11,11,11,0.05), 0 3px 10px rgba(11,11,11,0.05);
+  }
+  :root[data-theme="dark"] {
+    --page: #0d0d0d; --surface: #1a1a19; --raise: #222220; --ink: #ffffff; --ink-2: #c9c8c1;
+    --muted: #8f8d87; --hair: #2c2c2a; --line: #3a3a36; --accent: #3f8ce8; --good: #23b823;
+    --warn: #e06a5c; --warn-bg: rgba(224,106,92,0.09); --good-bg: rgba(35,184,35,0.10);
+    --gauge-a: #3f8ce8; --gauge-b: #23b823;
+    --shadow: 0 1px 2px rgba(0,0,0,0.35), 0 12px 34px rgba(0,0,0,0.5);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.4), 0 3px 12px rgba(0,0,0,0.45);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--display);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { width: 100%; max-width: var(--maxw); margin: 0 auto; padding: 0 22px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  h1, h2, h3 { text-wrap: balance; margin: 0; letter-spacing: -0.02em; }
+  p { margin: 0; }
+  a { color: var(--accent); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+
+  /* ── Masthead ─────────────────────────────────────────────── */
+  .mast { padding: 74px 0 34px; border-bottom: 1px solid var(--hair); }
+  .mast .kicker { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .brand {
+    font-family: var(--mono); font-weight: 600; font-size: 13px; letter-spacing: 0.02em;
+    color: var(--ink); background: var(--surface); border: 1px solid var(--hair);
+    padding: 5px 11px; border-radius: 100px; box-shadow: var(--shadow-sm);
+  }
+  .brand b { color: var(--accent); }
+  .mast h1 { font-size: clamp(34px, 6.4vw, 62px); font-weight: 680; line-height: 1.02; }
+  .mast h1 .em { color: var(--accent); }
+  .lede {
+    margin-top: 22px; max-width: 60ch; font-size: clamp(16px, 2.3vw, 19px);
+    color: var(--ink-2);
+  }
+  .metarow { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  .tag {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.03em;
+    color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--hair); border-radius: 100px; padding: 5px 11px;
+  }
+  .tag .dot { color: var(--good); }
+
+  /* ── Section scaffold ─────────────────────────────────────── */
+  section { padding: 52px 0; border-bottom: 1px solid var(--hair); }
+  .sec-head { margin-bottom: 30px; }
+  .sec-head .eyebrow { display: block; margin-bottom: 10px; }
+  .sec-head h2 { font-size: clamp(23px, 3.4vw, 31px); font-weight: 640; }
+  .sec-head .sub { margin-top: 12px; max-width: 66ch; color: var(--ink-2); font-size: 16px; }
+
+  /* ── Thesis strip ─────────────────────────────────────────── */
+  .thesis {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .thesis .cell {
+    background: var(--surface); border: 1px solid var(--hair); border-radius: var(--radius);
+    padding: 22px; box-shadow: var(--shadow-sm);
+  }
+  .thesis .cell h3 { font-size: 15px; font-weight: 640; margin-bottom: 8px; }
+  .thesis .cell h3 .n { font-family: var(--mono); color: var(--accent); margin-right: 8px; font-size: 13px; }
+  .thesis .cell p { font-size: 14px; color: var(--ink-2); }
+
+  /* ── Journey moments ──────────────────────────────────────── */
+  .moment { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; align-items: center; }
+  .moment + .moment { margin-top: 46px; padding-top: 46px; border-top: 1px dashed var(--hair); }
+  .moment.flip .m-copy { order: 2; }
+  .m-copy .num {
+    font-family: var(--mono); font-size: 13px; color: var(--accent); letter-spacing: 0.08em;
+    display: inline-flex; align-items: center; gap: 9px; margin-bottom: 12px;
+  }
+  .m-copy .num::before { content: ""; width: 22px; height: 1px; background: var(--accent); opacity: 0.5; }
+  .m-copy h3 { font-size: 21px; font-weight: 640; margin-bottom: 10px; }
+  .m-copy p { color: var(--ink-2); font-size: 15px; margin-bottom: 14px; }
+  .mech {
+    display: flex; flex-wrap: wrap; gap: 7px;
+  }
+  .mech .chip {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em; color: var(--ink-2);
+    border: 1px solid var(--hair); border-radius: 7px; padding: 4px 9px; background: var(--surface);
+  }
+  .mech .chip.g { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, var(--hair)); }
+  .grounded {
+    margin-top: 15px; font-size: 12.5px; color: var(--muted);
+    padding-left: 13px; border-left: 2px solid var(--line);
+  }
+  .grounded b { color: var(--ink-2); font-weight: 600; }
+
+  /* ── Mock frame ───────────────────────────────────────────── */
+  .device {
+    background: var(--surface); border: 1px solid var(--hair); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 16px; position: relative; overflow: hidden;
+  }
+  .device .bar {
+    display: flex; gap: 6px; margin-bottom: 14px; align-items: center;
+  }
+  .device .bar i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+  .device .bar span {
+    margin-left: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+
+  /* echo chat mock */
+  .echo { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; }
+  .echo .row { color: var(--muted); }
+  .echo .row.faded { opacity: 0.32; }
+  .echo .row.faded2 { opacity: 0.16; }
+  .echo .row .q { color: var(--ink-2); }
+  .echo .row .a { color: var(--accent); }
+  .echo .live { margin-top: 10px; color: var(--ink); }
+  .echo .live .cursor {
+    display: inline-block; width: 7px; height: 15px; vertical-align: -2px;
+    background: var(--accent); margin-left: 2px; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .prompt {
+    margin-top: 14px; display: flex; align-items: center; gap: 9px;
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--raise);
+  }
+  .prompt .ph { color: var(--muted); font-size: 13px; flex: 1; }
+  .prompt .send { color: var(--accent); font-size: 15px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+  .chips .c {
+    font-size: 11.5px; color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--hair); border-radius: 100px; padding: 4px 10px;
+  }
+
+  /* gauge card mock — the whole card is the gauge */
+  .stage { display: flex; flex-direction: column; gap: 9px; }
+  .gcard {
+    position: relative; border: 1px solid var(--line); border-radius: var(--radius-sm);
+    background: var(--raise); padding: 14px 16px; overflow: hidden; isolation: isolate;
+  }
+  .gcard .fill {
+    position: absolute; inset: 0; z-index: -1; width: var(--pct, 0%);
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--gauge-a) 22%, transparent),
+      color-mix(in srgb, var(--gauge-b) 26%, transparent));
+    border-right: 2px solid color-mix(in srgb, var(--gauge-b) 70%, transparent);
+    transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .gcard .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .gcard .role { font-weight: 640; font-size: 15px; }
+  .gcard .org { font-size: 12.5px; color: var(--ink-2); margin-top: 1px; }
+  .gcard .pct {
+    font-family: var(--mono); font-weight: 600; font-size: 18px; font-variant-numeric: tabular-nums;
+    color: var(--ink); white-space: nowrap;
+  }
+  .gcard .pct small { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .gcard.strong .pct { color: var(--good); }
+  .gcard .whyrow { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
+  .gcard .whyrow b {
+    font-family: var(--mono); font-weight: 500; font-size: 10.5px; color: var(--ink-2);
+    background: var(--surface); border: 1px solid var(--hair); border-radius: 6px; padding: 2px 7px;
+  }
+  .masked { filter: blur(3.5px); opacity: 0.5; user-select: none; pointer-events: none; }
+  .masked .role, .masked .org { color: var(--muted); }
+  .stack-note {
+    text-align: center; font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+    letter-spacing: 0.05em; margin-top: 2px;
+  }
+
+  /* expanded detail mock */
+  .gcard .detail {
+    margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--hair);
+    font-size: 12.5px; color: var(--ink-2); line-height: 1.6;
+  }
+  .gcard .detail .money { color: var(--good); font-weight: 600; font-family: var(--mono); }
+  .gcard .acts { display: flex; gap: 8px; margin-top: 12px; }
+  .btn {
+    font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 7px 13px; cursor: default;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  }
+  .btn.p { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  .btn.ghost { color: var(--muted); }
+  .stepnote {
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 9px;
+    letter-spacing: 0.03em;
+  }
+  .stepnote .arw { color: var(--accent); }
+
+  /* applied board mock */
+  .board { display: grid; grid-template-columns: 1.5fr 1fr; gap: 0; }
+  .board .left { padding-right: 14px; }
+  .board .slide {
+    border-left: 1px solid var(--hair); padding-left: 14px;
+  }
+  .board .slide h4 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  .board .app {
+    display: flex; align-items: center; gap: 9px; padding: 8px 0; border-bottom: 1px solid var(--hair);
+    font-size: 12.5px;
+  }
+  .board .app:last-child { border-bottom: 0; }
+  .board .app .tick { color: var(--good); font-size: 13px; }
+  .board .app .r b { font-weight: 600; display: block; }
+  .board .app .r span { color: var(--muted); font-size: 11px; }
+  .share {
+    margin-top: 12px; font-size: 11.5px; font-weight: 600; color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--hair)); border-radius: 8px;
+    padding: 7px 10px; text-align: center;
+  }
+
+  /* ── Honest line comparison ───────────────────────────────── */
+  .ledger { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .col {
+    border-radius: var(--radius); border: 1px solid var(--hair); overflow: hidden;
+    box-shadow: var(--shadow-sm);
+  }
+  .col .h { padding: 14px 18px; display: flex; align-items: center; gap: 10px; font-weight: 640; font-size: 15px; }
+  .col.fair .h { background: var(--good-bg); color: var(--good); border-bottom: 1px solid color-mix(in srgb, var(--good) 22%, var(--hair)); }
+  .col.dark .h { background: var(--warn-bg); color: var(--warn); border-bottom: 1px solid color-mix(in srgb, var(--warn) 22%, var(--hair)); }
+  .col .h .mk { font-family: var(--mono); font-size: 13px; border: 1px solid currentColor; border-radius: 6px; width: 22px; height: 22px; display: grid; place-items: center; }
+  .col ul { list-style: none; margin: 0; padding: 8px 18px 18px; }
+  .col li { padding: 9px 0; border-bottom: 1px solid var(--hair); font-size: 13.5px; color: var(--ink-2); }
+  .col li:last-child { border-bottom: 0; }
+  .col li b { color: var(--ink); font-weight: 600; }
+  .testline {
+    margin-top: 18px; padding: 15px 18px; background: var(--surface); border: 1px solid var(--hair);
+    border-radius: var(--radius); font-size: 14px; color: var(--ink-2);
+  }
+  .testline b { color: var(--ink); }
+
+  /* ── Architecture gate ────────────────────────────────────── */
+  .arch { display: grid; grid-template-columns: 1fr auto 1fr; gap: 0; align-items: stretch; }
+  .plane {
+    background: var(--surface); border: 1px solid var(--hair); border-radius: var(--radius);
+    padding: 20px; box-shadow: var(--shadow-sm);
+  }
+  .plane .lab { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+  .plane.sacred { border-color: color-mix(in srgb, var(--good) 30%, var(--hair)); }
+  .plane .step { font-family: var(--mono); font-size: 12px; color: var(--ink-2); padding: 6px 0; }
+  .plane .step .k { color: var(--accent); }
+  .plane .step .g { color: var(--good); }
+  .gate { display: grid; place-items: center; padding: 0 14px; }
+  .gate .pipe {
+    text-align: center; font-family: var(--mono); font-size: 10.5px; color: var(--ink); line-height: 1.5;
+    background: var(--raise); border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow-sm);
+  }
+  .gate .pipe .big { font-size: 17px; color: var(--accent); display: block; }
+  .archnote { margin-top: 16px; font-size: 13px; color: var(--muted); }
+
+  /* ── Sign-off ─────────────────────────────────────────────── */
+  .signoff { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .decision {
+    background: var(--surface); border: 1px solid var(--hair); border-left: 3px solid var(--accent);
+    border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow-sm);
+  }
+  .decision .q { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 9px; }
+  .decision h3 { font-size: 17px; font-weight: 640; margin-bottom: 10px; }
+  .decision p { font-size: 13.5px; color: var(--ink-2); margin-bottom: 8px; }
+  .decision .rec { font-size: 13px; color: var(--ink); }
+  .decision .rec b { color: var(--good); }
+
+  /* ── Palette + stack footer ───────────────────────────────── */
+  .swatches { display: flex; flex-wrap: wrap; gap: 12px; }
+  .sw { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .sw .chipc { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--hair); }
+  .stacklist { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .stacklist .s {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--hair); border-radius: 8px; padding: 6px 11px;
+  }
+  .foot { padding: 40px 0 60px; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+  @media (max-width: 720px) {
+    .thesis, .ledger, .signoff { grid-template-columns: 1fr; }
+    .moment { grid-template-columns: 1fr; gap: 20px; }
+    .moment.flip .m-copy { order: 0; }
+    .arch { grid-template-columns: 1fr; gap: 14px; }
+    .gate { padding: 6px 0; }
+    .gate .pipe { transform: rotate(90deg); }
+    .board { grid-template-columns: 1fr; }
+    .board .slide { border-left: 0; border-top: 1px solid var(--hair); padding-left: 0; padding-top: 12px; margin-top: 12px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gcard .fill { transition: none; }
+    .echo .live .cursor { animation: none; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="kicker">
+      <span class="brand"><b>job</b>fitr</span>
+      <span class="eyebrow">Experience Design Board · v1 concept</span>
+    </div>
+    <h1>A job search that<br>feels <span class="em">human</span>.</h1>
+    <p class="lede">
+      Job hunting is painful and the tools make it worse. jobfitr turns a short conversation into a
+      ranked shortlist of real, direct-to-company openings — and makes the act of sorting through them
+      feel considered instead of exhausting. Professional, with life. Not a game.
+    </p>
+    <div class="metarow">
+      <span class="tag">2026-07-13</span>
+      <span class="tag"><span class="dot">●</span> grounded in 4 Arcanum field pages</span>
+      <span class="tag">honest engagement, not dark patterns</span>
+      <span class="tag">vanilla JS · FastAPI · cached-harvest</span>
+    </div>
+  </header>
+
+  <!-- THESIS -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">The principle</span>
+      <h2>One honest peak beats a hundred cheap thrills</h2>
+      <p class="sub">
+        The engagement research is blunt: copying the slot-machine loop wholesale reads as manipulation,
+        and people increasingly resent it. So jobfitr spends its whole delight budget where it counts and
+        stays quiet everywhere else. Every moment carries information — a transition, a value, a real win.
+      </p>
+    </div>
+    <div class="thesis">
+      <div class="cell">
+        <h3><span class="n">01</span>Peak-end, not sprinkle</h3>
+        <p>People remember an experience by its best moment and its ending. Build one great peak — the page lift and the fit reveal — and a warm close. No confetti on every click.</p>
+      </div>
+      <div class="cell">
+        <h3><span class="n">02</span>Honest open loops</h3>
+        <p>The pull to keep going comes from real roles waiting below, best-fit first. Never manufactured scarcity, fake urgency, or a broken-streak guilt trip.</p>
+      </div>
+      <div class="cell">
+        <h3><span class="n">03</span>Real value on return</h3>
+        <p>The reason to come back is true: the harvest refreshes every few hours, so "14 fresh roles since Tuesday" is a fact, not a trick.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE JOURNEY -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">The journey · six moments</span>
+      <h2>From a blank prompt to an application, one focused card at a time</h2>
+      <p class="sub">
+        The chat fills the search by talking, the page lifts into results, and a single wide card holds
+        the role in focus while the next-best waits, masked, below it. Each mockup is live — the gauges
+        fill as you scroll.
+      </p>
+    </div>
+
+    <!-- 01 cold open -->
+    <div class="moment">
+      <div class="m-copy">
+        <span class="num">MOMENT 01</span>
+        <h3>The cold open</h3>
+        <p>No splash screen — it taxes the first win. The opening line explains the app while it asks, and a
+          couple of tappable examples kill the blank-input freeze. The tokens stream in at a natural,
+          human cadence: the typing <i>is</i> the presence.</p>
+        <div class="mech">
+          <span class="chip">token streaming (SSE)</span>
+          <span class="chip">conversation starters</span>
+          <span class="chip g">time-to-first-token &lt; 1s</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> conversational-ui — "the stream of tokens is the typing indicator"; retention — do-it-for-me over show-me.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="bar"><i></i><i></i><i></i><span>jobfitr.app</span></div>
+        <div class="echo">
+          <div class="live">I turn a few answers into a ranked shortlist of real openings — no account, no spam. First: what job are you chasing?<span class="cursor"></span></div>
+        </div>
+        <div class="prompt"><span class="ph">Type your answer…</span><span class="send">↵</span></div>
+        <div class="chips">
+          <span class="c">Zookeeper near Louisville</span>
+          <span class="c">Remote React developer</span>
+          <span class="c">Warehouse ops manager</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 02 echo + page lift -->
+    <div class="moment flip">
+      <div class="m-copy">
+        <span class="num">MOMENT 02</span>
+        <h3>The echo &amp; the page lift</h3>
+        <p>Answered questions collapse upward into a faded command-line echo — only the last one or two stay
+          legible. When the fifth lands, the chat compresses to a top strip and the results rise from below.
+          That single transition is the reveal. No slot-machine tumbler.</p>
+        <div class="mech">
+          <span class="chip">chat as control surface</span>
+          <span class="chip">View Transitions / FLIP</span>
+          <span class="chip g">peak-end: one crafted moment</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> conversational-ui next-shift — "chat becomes an input method into a normal app"; motion — compositor-only page transition.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="bar"><i></i><i></i><i></i><span>filling the search</span></div>
+        <div class="echo">
+          <div class="row faded2"><span class="q">&gt; role</span> · zookeeper, animal keeper</div>
+          <div class="row faded"><span class="q">&gt; near</span> · Louisville, KY · <span class="q">avoid</span> · internships</div>
+          <div class="row"><span class="q">&gt; rank up</span> · <span class="a">reptiles, conservation, biology</span></div>
+          <div class="live">Got it — pulling your shortlist together now.<span class="cursor"></span></div>
+        </div>
+        <div class="stack-note" style="margin-top:14px">▲ chat compresses · results rise ▼</div>
+      </div>
+    </div>
+
+    <!-- 03 gauge card + masked stack -->
+    <div class="moment">
+      <div class="m-copy">
+        <span class="num">MOMENT 03</span>
+        <h3>The gauge-card &amp; the masked stack</h3>
+        <p>One wide, thin card in focus — its whole body is the fit gauge, filling left-to-right to the match
+          percentage. Below it, the next roles wait masked: clearly there, detail hidden. Always sorted
+          best-fit first, so the strongest real role is always the one in your hands.</p>
+        <div class="mech">
+          <span class="chip">card-as-gauge</span>
+          <span class="chip">reveal-on-promotion</span>
+          <span class="chip g">honest Zeigarnik loop</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> engagement — peak-end + honest open-loop; motion — FLIP promotion + WAAPI gauge fill.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="bar"><i></i><i></i><i></i><span>34 matches · best fit first</span></div>
+        <div class="stage">
+          <div class="gcard strong" data-pct="92">
+            <div class="fill"></div>
+            <div class="top">
+              <div><div class="role">Senior Zookeeper — Reptiles</div><div class="org">Louisville Zoo · Louisville, KY</div></div>
+              <div class="pct">92<small>%</small></div>
+            </div>
+            <div class="whyrow"><b>reptiles</b><b>conservation</b><b>biology degree</b></div>
+          </div>
+          <div class="gcard masked" data-pct="0">
+            <div class="fill"></div>
+            <div class="top"><div><div class="role">Animal Care Specialist</div><div class="org">•••••• ••••</div></div><div class="pct">••</div></div>
+          </div>
+          <div class="gcard masked" data-pct="0" style="opacity:.34">
+            <div class="top"><div><div class="role">Wildlife Keeper</div><div class="org">•••• ••••</div></div><div class="pct">••</div></div>
+          </div>
+          <div class="stack-note">18 more waiting below</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 04 expand for detail -->
+    <div class="moment flip">
+      <div class="m-copy">
+        <span class="num">MOMENT 04</span>
+        <h3>Expand for the detail</h3>
+        <p>Click the card and it drops open — description, salary, posted date, source. All of it served
+          instantly from the harvested snapshot, never scraped live from the source site on your request.
+          The data was already captured hours ago; the request stays fast and offline.</p>
+        <div class="mech">
+          <span class="chip">served from cache</span>
+          <span class="chip g">zero external call · sacred</span>
+          <span class="chip">progressive disclosure</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> the harvest already stores JD text + salary; enrich the harvest, never the request path.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="stage">
+          <div class="gcard strong" data-pct="92">
+            <div class="fill"></div>
+            <div class="top">
+              <div><div class="role">Senior Zookeeper — Reptiles</div><div class="org">Louisville Zoo · Louisville, KY</div></div>
+              <div class="pct">92<small>%</small></div>
+            </div>
+            <div class="whyrow"><b>reptiles</b><b>conservation</b><b>biology degree</b></div>
+            <div class="detail">
+              Lead husbandry for the reptile &amp; amphibian collection, mentor junior keepers, and support
+              conservation breeding programs. Requires a biology degree and 3+ years hands-on care…
+              <div style="margin-top:8px">Salary <span class="money">\$48k–\$56k</span> · Posted 2 days ago · via Adzuna</div>
+            </div>
+            <div class="acts">
+              <span class="btn p">Open posting ↗</span>
+              <span class="btn">Not for me</span>
+            </div>
+            <div class="stepnote">opening a tab is a <span class="arw">view</span>, not an application</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 05 two-step apply -->
+    <div class="moment">
+      <div class="m-copy">
+        <span class="num">MOMENT 05</span>
+        <h3>The two-step apply</h3>
+        <p>Opening the posting doesn't mark it applied — because it isn't. When you come back, the card asks
+          the honest question. Only a real "I applied" flies the card to your board. The scoreboard stays
+          true: it counts applications, not clicks.</p>
+        <div class="mech">
+          <span class="chip">view ≠ apply</span>
+          <span class="chip">FLIP fly-to-board</span>
+          <span class="chip g">honest scoreboard</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> retention — measure value delivered, not vanity; the Hook "investment" phase done ethically.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="stage">
+          <div class="gcard strong" data-pct="92">
+            <div class="fill"></div>
+            <div class="top">
+              <div><div class="role">Senior Zookeeper — Reptiles</div><div class="org">Louisville Zoo · Louisville, KY</div></div>
+              <div class="pct">92<small>%</small></div>
+            </div>
+            <div class="detail" style="border-top-color:transparent;padding-top:4px">Back already? Did you apply?</div>
+            <div class="acts">
+              <span class="btn p">I applied ✓</span>
+              <span class="btn ghost">Not this time</span>
+            </div>
+            <div class="stepnote"><span class="arw">✓</span> flies right to your applied board · otherwise the next card rises</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 06 applied board -->
+    <div class="moment flip">
+      <div class="m-copy">
+        <span class="num">MOMENT 06</span>
+        <h3>The applied board</h3>
+        <p>A slide-out on the right: the real record of what you've gone after, newest first. It turns a
+          lonely, formless slog into something with momentum and a visible finish line. And when you've
+          applied to a few, an honest share — a true count, not a brag.</p>
+        <div class="mech">
+          <span class="chip">momentum / mounting value</span>
+          <span class="chip g">honest share loop</span>
+          <span class="chip">persists in localStorage</span>
+        </div>
+        <p class="grounded"><b>Grounded:</b> engagement — the peak-end scoreboard; retention — the honest growth/referral loop.</p>
+      </div>
+      <div class="device" aria-hidden="true">
+        <div class="board">
+          <div class="left">
+            <div class="stack-note" style="text-align:left;margin-bottom:8px">still browsing →</div>
+            <div class="gcard" data-pct="78" style="border-color:var(--hair)">
+              <div class="fill"></div>
+              <div class="top"><div><div class="role">Aquarist II</div><div class="org">Newport Aquarium</div></div><div class="pct">78<small>%</small></div></div>
+            </div>
+          </div>
+          <div class="slide">
+            <h4>Applied · 3</h4>
+            <div class="app"><span class="tick">✓</span><div class="r"><b>Senior Zookeeper</b><span>Louisville Zoo · today</span></div></div>
+            <div class="app"><span class="tick">✓</span><div class="r"><b>Conservation Tech</b><span>KY Dept. Fish &amp; Wildlife · today</span></div></div>
+            <div class="app"><span class="tick">✓</span><div class="r"><b>Animal Keeper</b><span>Cincinnati Zoo · yesterday</span></div></div>
+            <div class="share">Share: "I applied to 3 roles on jobfitr today"</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CONTINUOUS VOICE + REFINE -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">The thread that runs through it</span>
+      <h2>The assistant never fully leaves — and it's how you steer</h2>
+      <p class="sub">
+        The chat stays docked at the top as a control surface. It speaks on real events, not a chatty timer,
+        and it's the one place you change your search — no "reset" button, no "retry." You just talk to it.
+      </p>
+    </div>
+    <div class="thesis">
+      <div class="cell">
+        <h3><span class="n">◆</span>Speaks on events</h3>
+        <p>A couple of passes in a row: "Nothing landing? Want to widen it?" A strong match surfacing: "This one scores high." Earned lines only — never filler.</p>
+      </div>
+      <div class="cell">
+        <h3><span class="n">◆</span>Refine by talking</h3>
+        <p>"Actually, remote only." The model emits a partial config update, it merges, and the list re-scores. The config is mutable by conversation — intuitive, no controls.</p>
+      </div>
+      <div class="cell">
+        <h3><span class="n">◆</span>Clean by design</h3>
+        <p>Because the chat is the refine surface, the interface stays uncluttered: no retry, no reset, no settings drawer. Going "up to the chat" is the obvious move.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HONEST LINE -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">The line we hold</span>
+      <h2>Honest engagement vs. dark pattern</h2>
+      <p class="sub">
+        Same mechanics the casinos and dating apps use — pointed at real value instead of against the user.
+        The left column ships. The right column never does.
+      </p>
+    </div>
+    <div class="ledger">
+      <div class="col fair">
+        <div class="h"><span class="mk">✓</span> Fair game — ships</div>
+        <ul>
+          <li><b>One crafted peak</b> — the page lift + the fit reveal, then a warm close.</li>
+          <li><b>Honest open loop</b> — real roles waiting below, best-fit first.</li>
+          <li><b>Real return value</b> — "14 fresh since Tuesday," true from the harvest.</li>
+          <li><b>Real scoreboard</b> — the board counts actual applications.</li>
+          <li><b>Real token streaming</b> — honest presence, natural cadence.</li>
+          <li><b>Reduced-motion honored</b> — every moment degrades gracefully.</li>
+        </ul>
+      </div>
+      <div class="col dark">
+        <div class="h"><span class="mk">✕</span> Dark pattern — never</div>
+        <ul>
+          <li><b>Confetti on everything</b> — reward inflation; trains the eye to ignore it.</li>
+          <li><b>Manufactured scarcity</b> — fake "3 people viewing this right now."</li>
+          <li><b>The near-miss</b> — "you were 1 away." A hard red line.</li>
+          <li><b>Streak guilt</b> — "don't lose your streak" notifications.</li>
+          <li><b>Slot-tumbler drama</b> — fake suspense on instant content.</li>
+          <li><b>Faked latency</b> — typing dots as theater. Erodes trust.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="testline"><b>The one-line test:</b> does this animation carry information — a transition, a value change, a real achievement — or is it decoration? If it's decoration, cut it.</p>
+  </section>
+
+  <!-- ARCHITECTURE -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Under the hood · why it's safe</span>
+      <h2>Two planes, one gate</h2>
+      <p class="sub">
+        The AI talks and fills a config. The scoring engine reads a cached snapshot and never touches an
+        external API. The only thing that crosses between them is a validated config — which is both the
+        security boundary and the reason the whole thing stays fast and cheap.
+      </p>
+    </div>
+    <div class="arch">
+      <div class="plane">
+        <div class="lab">AI plane · metered · streamed</div>
+        <div class="step"><span class="k">chat input</span> → /api/chat</div>
+        <div class="step">→ OpenRouter (cheap model)</div>
+        <div class="step">→ emits <span class="k">set_config( )</span></div>
+        <div class="step" style="color:var(--muted)">turn cap · per-IP limit · daily ceiling</div>
+      </div>
+      <div class="gate">
+        <div class="pipe"><span class="big">→</span>only a<br>config dict<br>crosses</div>
+      </div>
+      <div class="plane sacred">
+        <div class="lab">Scoring plane · free · zero-network</div>
+        <div class="step">/api/score → <span class="g">config_from_dict</span></div>
+        <div class="step">→ score the cached jobs.json</div>
+        <div class="step">→ ranked JSON + <span class="g">fit_pct</span></div>
+        <div class="step" style="color:var(--good)">never calls an external API ✓</div>
+      </div>
+    </div>
+    <p class="archnote">
+      Proven by spike: hostile AI output (<span style="font-family:var(--mono)">DROP TABLE</span>,
+      <span style="font-family:var(--mono)">&lt;script&gt;</span>, <span style="font-family:var(--mono)">rm -rf /</span>,
+      hallucinated keys) collapses into a harmless search config — unknown keys ignored, bad types defaulted,
+      strings treated only as keywords. The attack ceiling is "a weird search."
+    </p>
+  </section>
+
+  <!-- SIGN-OFF -->
+  <section>
+    <div class="sec-head">
+      <span class="eyebrow">Needs your call before build</span>
+      <h2>Two decisions</h2>
+    </div>
+    <div class="signoff">
+      <div class="decision">
+        <div class="q">Decision 01</div>
+        <h3>What does the gauge's 100% mean?</h3>
+        <p><b>Relative:</b> top match this search = 100%, always looks full — but "100%" is just "best of this search."</p>
+        <p><b>Absolute:</b> scored against a fixed reference, so a weak match visibly reads weak and a real winner still sweeps near-full.</p>
+        <p class="rec">Recommendation: <b>absolute-hybrid</b> — honest, and still lands the satisfying near-full sweep on a genuine match.</p>
+      </div>
+      <div class="decision">
+        <div class="q">Decision 02</div>
+        <h3>Bless the taste line as the north star</h3>
+        <p>The whole board deliberately rejects the slot-machine kit — tumbler, near-miss, streak-guilt,
+          confetti-on-everything — for one crafted peak and honest loops.</p>
+        <p class="rec">That restraint is what makes it read as <b>a professional product with life, not a game</b> — and it's the stronger portfolio story. Confirm it as the direction.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- PALETTE + STACK -->
+  <section style="border-bottom:0">
+    <div class="sec-head">
+      <span class="eyebrow">Materials</span>
+      <h2>Palette &amp; stack</h2>
+      <p class="sub">The board runs on jobfitr's own tokens — warm neutrals, a working blue, a fit-green, and the blue→green gauge as the signature. Light and dark are both first-class.</p>
+    </div>
+    <div class="swatches">
+      <div class="sw"><span class="chipc" style="background:#f9f9f7"></span>page / #f9f9f7</div>
+      <div class="sw"><span class="chipc" style="background:#0d0d0d"></span>ink-dark / #0d0d0d</div>
+      <div class="sw"><span class="chipc" style="background:#e1e0d9"></span>hairline / #e1e0d9</div>
+      <div class="sw"><span class="chipc" style="background:#2a78d6"></span>accent / #2a78d6</div>
+      <div class="sw"><span class="chipc" style="background:#0ca30c"></span>fit / #0ca30c</div>
+      <div class="sw"><span class="chipc" style="background:linear-gradient(90deg,#2a78d6,#0ca30c)"></span>gauge</div>
+    </div>
+    <div class="stacklist">
+      <span class="s">vanilla JS (no framework)</span>
+      <span class="s">FastAPI + SSE (sse-starlette)</span>
+      <span class="s">OpenRouter · tool-calling</span>
+      <span class="s">Motion One / WAAPI</span>
+      <span class="s">View Transitions API</span>
+      <span class="s">slowapi rate-limit</span>
+      <span class="s">cached-harvest engine (job-radar)</span>
+      <span class="s">the form, kept as fallback</span>
+    </div>
+  </section>
+
+  <div class="foot">jobfitr experience design board · concept v1 · 2026-07-13 · grounded in engagement-design-and-game-feel, conversational-ui-and-chat-interface-design, web-animation-and-motion-engineering, product-onboarding-activation-and-retention.</div>
+
+</div>
+
+<script>
+  (function () {
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var cards = document.querySelectorAll(".gcard[data-pct]");
+    function setFill(card) {
+      var fill = card.querySelector(".fill");
+      if (fill) fill.style.width = (card.getAttribute("data-pct") || "0") + "%";
+    }
+    if (reduce || !("IntersectionObserver" in window)) {
+      cards.forEach(setFill);
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { setFill(e.target); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.35 });
+    cards.forEach(function (c) { io.observe(c); });
+  })();
+</script>

@@ -178,6 +178,16 @@ def test_score_endpoint_ranks_and_filters(tmp_path, monkeypatch):
     assert "text" not in data["jobs"][0]  # full JD body not leaked; snippet only
     assert "snippet" in data["jobs"][0]
 
+    # fit_pct: a derived gauge value, 0-100, that tracks the fit_score ordering.
+    pcts = [j["fit_pct"] for j in data["jobs"]]
+    assert all(0 < p <= 100 for p in pcts)
+    assert pcts == sorted(pcts, reverse=True)  # monotonic with fit_score
+    assert pcts[0] == max(pcts)  # the top match reads highest on the gauge
+    # description: fuller than the snippet, still from the cache (not a live fetch).
+    top = data["jobs"][0]
+    assert len(top["description"]) >= len(top["snippet"])
+    assert "fit_score" in top  # the raw engine score stays canonical alongside fit_pct
+
     # Tight pass: a high threshold drops the weak matches, keeps the strong one.
     strict = client.post("/api/score", json={**body, "min_score": 15}).json()
     strict_titles = [j["title"] for j in strict["jobs"]]
