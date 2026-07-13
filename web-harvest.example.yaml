@@ -14,7 +14,8 @@
 # are added — those two self-skip with no creds, so leaving them listed is safe.
 
 profile:
-  title_queries: # what we SEARCH the boards for (broad net)
+  title_queries: # what we SEARCH the boards for (broad, cross-sector net)
+    # tech + corporate
     - software engineer
     - developer
     - data
@@ -30,6 +31,16 @@ profile:
     - support
     - finance
     - human resources
+    # broader sectors (Adzuna reaches these nationwide once keys are set)
+    - manager
+    - retail
+    - nurse
+    - healthcare
+    - warehouse
+    - driver
+    - teacher
+    - accountant
+    - administrative assistant
   signal_titles: # relevance gate — broad union so most real roles pass
     - engineer
     - developer
@@ -67,7 +78,10 @@ profile:
 
 filters:
   remote_only: false # keep on-site + hybrid too; the user narrows later
-  location: remote
+  # Empty = no geographic filter, so Adzuna/USAJOBS return jobs NATIONWIDE (a real
+  # place name here, e.g. "remote", makes Adzuna's `where=` match a city and return
+  # nothing). The per-user location lens is applied later at request time.
+  location: ""
   exclude_titles: [] # no exclusions at harvest — the user excludes at request time
   max_age_days: 90 # generous; per-user freshness is applied at request time
   min_score: 0 # harvest keeps everything; scoring/threshold happens per-request
