@@ -1,0 +1,16 @@
+{
+  "id": "009-teacher-relocating",
+  "notes": "location is a named city they're moving to; exclude substitute roles. [remote_only unlabeled: user never addressed remoteness]",
+  "transcript": "User: High school math teacher. We're relocating to Austin, Texas. No substitute or paraprofessional positions please. Recent stuff, past 30 days.",
+  "expected": {
+    "titles": [
+      "high school math teacher"
+    ],
+    "exclude": [
+      "substitute",
+      "paraprofessional"
+    ],
+    "location": "Austin, TX",
+    "max_age_days": 30
+  }
+}

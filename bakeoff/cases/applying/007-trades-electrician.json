@@ -1,0 +1,18 @@
+{
+  "id": "007-trades-electrician",
+  "notes": "skilled trade; short and clean; no pickiness given (must omit min_score). [remote_only unlabeled: user never addressed remoteness]",
+  "transcript": "User: Journeyman electrician, commercial preferred. Around Phoenix AZ. Don't show apprenticeships.",
+  "expected": {
+    "titles": [
+      "journeyman electrician"
+    ],
+    "boosts": [
+      "commercial"
+    ],
+    "exclude": [
+      "apprentice",
+      "apprenticeship"
+    ],
+    "location": "Phoenix, AZ"
+  }
+}

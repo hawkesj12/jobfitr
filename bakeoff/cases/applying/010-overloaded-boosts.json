@@ -1,0 +1,26 @@
+{
+  "id": "010-overloaded-boosts",
+  "notes": "many boost signals in one breath; tests list completeness/recall.",
+  "transcript": "User: DevOps / platform engineer. Kubernetes, Terraform, AWS, CI/CD, observability, Go. Remote only. Rank down anything that's really an SRE-on-call-heavy role. Strong matches only.",
+  "expected": {
+    "titles": [
+      "devops engineer",
+      "platform engineer"
+    ],
+    "boosts": [
+      "kubernetes",
+      "terraform",
+      "aws",
+      "ci/cd",
+      "observability",
+      "go"
+    ],
+    "rank_down": [
+      "sre",
+      "on-call"
+    ],
+    "location": "remote",
+    "remote_only": true,
+    "min_score": "strong"
+  }
+}

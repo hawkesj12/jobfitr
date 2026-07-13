@@ -1,0 +1,20 @@
+{
+  "id": "004-voice-rambler",
+  "notes": "voice-to-text run-on with filler; the concepts are in there but messy. [remote_only unlabeled: user never addressed remoteness]",
+  "transcript": "User: ok so um i've been a line cook for like six years and i wanna move up to sous chef maybe kitchen manager, uh anything farm to table would be great i love that, please no catering gigs though, and yeah keep it around nashville, last couple weeks of postings, give me a balanced amount not too crazy",
+  "expected": {
+    "titles": [
+      "sous chef",
+      "kitchen manager"
+    ],
+    "boosts": [
+      "farm to table"
+    ],
+    "exclude": [
+      "catering"
+    ],
+    "location": "Nashville",
+    "max_age_days": 14,
+    "min_score": "balanced"
+  }
+}

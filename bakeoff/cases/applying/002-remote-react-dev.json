@@ -1,0 +1,23 @@
+{
+  "id": "002-remote-react-dev",
+  "notes": "tech, remote-only, strong pickiness.",
+  "transcript": "User: Senior frontend engineer, React and TypeScript. Remote only. I care about design systems and accessibility. No agency or contract-to-hire junk. Only show me the strongest matches.",
+  "expected": {
+    "titles": [
+      "senior frontend engineer"
+    ],
+    "boosts": [
+      "react",
+      "typescript",
+      "design systems",
+      "accessibility"
+    ],
+    "rank_down": [
+      "agency",
+      "contract-to-hire"
+    ],
+    "location": "remote",
+    "remote_only": true,
+    "min_score": "strong"
+  }
+}

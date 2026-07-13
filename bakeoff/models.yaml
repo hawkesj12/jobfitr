@@ -1,0 +1,34 @@
+# The bakeoff field — every entrant is a FREE OpenRouter slug (verified free via
+# GET /api/v1/models, pricing.prompt == pricing.completion == "0", 2026-07-13).
+#
+# This is the single edit point: change what gets baked off by editing these
+# lists. The client iterates them; nothing else hardcodes a model.
+#
+# capability flags (from the live catalog) — tools = native tool-calling,
+# struct = advertises response_format/structured-outputs (NOT a guarantee it
+# honors the schema; that's exactly what the applying bakeoff measures).
+
+# ── APPLYING role: transcript -> config JSON. Prioritize struct + small/fast. ──
+applying:
+  - google/gemma-4-31b-it:free            # tools+struct, 262k
+  - qwen/qwen3-next-80b-a3b-instruct:free  # tools+struct, 262k, strong instruct prior
+  - nvidia/nemotron-nano-9b-v2:free        # tools+struct, tiny/fast — the dark horse
+  - tencent/hy3:free                       # tools+struct, 262k
+  - google/gemma-4-26b-a4b-it:free         # tools+struct, MoE, faster
+  # openai/gpt-oss-20b:free — EXCLUDED: spike showed it ignores strict schema +
+  # burns reasoning tokens on trivial extraction. Left here as a documented control.
+
+# ── ASKING role: the chat interviewer. Prioritize conversation + tool-calling. ──
+asking:
+  - qwen/qwen3-next-80b-a3b-instruct:free
+  - openai/gpt-oss-120b:free               # tools (reasoning) — JSON via prompt
+  - meta-llama/llama-3.3-70b-instruct:free # tools, known-solid instruct
+  - google/gemma-4-31b-it:free
+  - nvidia/nemotron-3-super-120b-a12b:free # tools+struct, big MoE
+
+# ── Fixed infrastructure models (must NOT overlap the entrant pools) ──
+# The judge scores asking transcripts; the user_simulator role-plays personas.
+# Kept off both entrant lists so a model never judges/simulates against itself.
+judge: nvidia/nemotron-3-ultra-550b-a55b:free   # largest free reasoner, not an entrant
+user_simulator: meta-llama/llama-3.2-3b-instruct:free  # small/cheap, steerable persona actor
+

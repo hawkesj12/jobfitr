@@ -1,0 +1,18 @@
+{
+  "id": "006-federal-analyst",
+  "notes": "government/federal; remote_only false, location a metro.",
+  "transcript": "User: Looking for a data analyst or program analyst role, ideally federal government. SQL and Tableau are my strengths. Washington DC area. Not remote necessarily.",
+  "expected": {
+    "titles": [
+      "data analyst",
+      "program analyst"
+    ],
+    "boosts": [
+      "federal",
+      "sql",
+      "tableau"
+    ],
+    "location": "Washington, DC",
+    "remote_only": false
+  }
+}

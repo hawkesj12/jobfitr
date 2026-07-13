@@ -1,0 +1,12 @@
+{
+  "id": "003-vague-career-switcher",
+  "notes": "under-specified \u2014 user gives a title and almost nothing else. Model must NOT invent fields.",
+  "transcript": "Assistant: What role are you after?\nUser: Honestly not sure exactly, something in project management I think.\nAssistant: Any location preference?\nUser: Anywhere is fine.",
+  "expected": {
+    "titles": [
+      "project management"
+    ],
+    "location": "anywhere",
+    "remote_only": false
+  }
+}

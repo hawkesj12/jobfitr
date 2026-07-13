@@ -1,0 +1,27 @@
+{
+  "id": "001-zookeeper",
+  "notes": "non-tech, fully specified \u2014 the canonical 'a zookeeper is as valid as an ML engineer' case.",
+  "transcript": "Assistant: What kind of role are you looking for?\nUser: I'm a zookeeper, ideally working with reptiles. Also open to 'animal keeper' roles.\nAssistant: Anything that makes a role a better fit?\nUser: A biology degree is a plus. I really don't want internships or volunteer gigs. And skip anything from staffing agencies.\nAssistant: Where, and how fresh?\nUser: Louisville KY, not remote. Fresh postings only, last month or so. Show me plenty.",
+  "expected": {
+    "titles": [
+      "zookeeper",
+      "animal keeper"
+    ],
+    "boosts": [
+      "reptiles",
+      "biology degree"
+    ],
+    "exclude": [
+      "intern",
+      "volunteer"
+    ],
+    "rank_down": [
+      "staffing",
+      "agency"
+    ],
+    "location": "Louisville, KY",
+    "remote_only": false,
+    "max_age_days": 30,
+    "min_score": "plenty"
+  }
+}

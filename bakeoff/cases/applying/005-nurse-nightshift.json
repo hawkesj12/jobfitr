@@ -1,0 +1,25 @@
+{
+  "id": "005-nurse-nightshift",
+  "notes": "healthcare; excludes + a rank-down; explicit day count. [remote_only unlabeled: user never addressed remoteness]",
+  "transcript": "User: Registered nurse, ICU or ER. I'd rank travel-nursing agencies way down. Hard no on any 'nurse educator' or 'case manager' postings. Around Denver, within the last 45 days. Balanced is fine.",
+  "expected": {
+    "titles": [
+      "registered nurse"
+    ],
+    "boosts": [
+      "icu",
+      "er"
+    ],
+    "exclude": [
+      "nurse educator",
+      "case manager"
+    ],
+    "rank_down": [
+      "travel",
+      "agency"
+    ],
+    "location": "Denver",
+    "max_age_days": 45,
+    "min_score": "balanced"
+  }
+}

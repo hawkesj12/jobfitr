@@ -1,0 +1,8 @@
+id: 002-vague-career-switcher
+notes: "under-specified and unsure \u2014 stresses the model's ability to draw intent out gently."
+persona: You are switching careers and are not sure exactly what you want. You think something in 'project
+  management' but you're fuzzy on details. You are open to location. You give short, uncertain answers
+  and need the assistant to help you figure it out without overwhelming you. Do not volunteer preferences
+  you don't have.
+required_fields:
+- titles

@@ -1,0 +1,31 @@
+{
+  "role": "applying",
+  "date": "2026-07-13",
+  "n_cases": 12,
+  "unavailable_at_run_time": [],
+  "reports": [
+    {
+      "model": "openai/gpt-4o-mini",
+      "cases_scored": 12,
+      "schema_valid_rate": 1.0,
+      "mean_field": 0.7811,
+      "mean_hallucination": 0.0,
+      "p50_latency": 1.28,
+      "p95_latency": 1.71,
+      "mean_tokens": 612.2,
+      "total_cost_usd": 0.001343,
+      "mean_cost_usd": 0.000112,
+      "cost_per_1k_users_usd": 0.1119,
+      "per_field": {
+        "titles": 0.875,
+        "boosts": 0.738,
+        "exclude": 0.778,
+        "rank_down": 0.25,
+        "location": 0.727,
+        "remote_only": 0.571,
+        "max_age_days": 1.0,
+        "min_score": 1.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "id": "008-remote-anywhere-writer",
+  "notes": "'work from anywhere' \u2192 remote true; distinguishes 'anywhere location' from remote intent.",
+  "transcript": "User: Freelance technical writer or content designer, fully remote, work from anywhere. I love developer docs and API documentation. Show me lots of options.",
+  "expected": {
+    "titles": [
+      "technical writer",
+      "content designer"
+    ],
+    "boosts": [
+      "developer docs",
+      "api documentation"
+    ],
+    "location": "remote",
+    "remote_only": true,
+    "min_score": "plenty"
+  }
+}

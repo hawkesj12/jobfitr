@@ -1,0 +1,10 @@
+{
+  "id": "011-title-only",
+  "notes": "bare minimum \u2014 one title, nothing else. Everything else must be omitted.",
+  "transcript": "User: barista jobs",
+  "expected": {
+    "titles": [
+      "barista"
+    ]
+  }
+}

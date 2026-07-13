@@ -1,0 +1,18 @@
+{
+  "id": "012-conflicting-remote",
+  "notes": "user says a city AND 'open to remote too' \u2014 remote_only should be False, location the city.",
+  "transcript": "User: Accountant or bookkeeper roles around Portland Oregon, though I'm open to remote too. Skip any commission-only or 1099 contractor stuff. Balanced picky.",
+  "expected": {
+    "titles": [
+      "accountant",
+      "bookkeeper"
+    ],
+    "exclude": [
+      "commission-only",
+      "1099"
+    ],
+    "location": "Portland, OR",
+    "remote_only": false,
+    "min_score": "balanced"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "model": "claude-opus (via Claude Code)",
+  "note": "Re-run under the canonical bakeoff/claude_code/brief.md (fair prompt, no teaching-to-test hints).",
+  "outputs": [
+    {"id": "001-zookeeper", "config": {"titles": ["zookeeper", "animal keeper"], "boosts": ["biology degree"], "exclude": ["internships", "volunteer"], "rank_down": ["staffing agencies"], "location": "Louisville KY", "remote_only": false, "max_age_days": 30, "min_score": "plenty"}},
+    {"id": "002-remote-react-dev", "config": {"titles": ["senior frontend engineer"], "boosts": ["React", "TypeScript", "design systems", "accessibility"], "rank_down": ["agency", "contract-to-hire"], "location": "remote", "remote_only": true, "min_score": "strong"}},
+    {"id": "003-vague-career-switcher", "config": {"titles": ["project management"], "location": "anywhere"}},
+    {"id": "004-voice-rambler", "config": {"titles": ["sous chef", "kitchen manager"], "boosts": ["farm to table"], "exclude": ["catering"], "location": "nashville", "max_age_days": 14, "min_score": "balanced"}},
+    {"id": "005-nurse-nightshift", "config": {"titles": ["registered nurse", "ICU", "ER"], "exclude": ["nurse educator", "case manager"], "rank_down": ["travel-nursing agencies"], "location": "Denver", "max_age_days": 45, "min_score": "balanced"}},
+    {"id": "006-federal-analyst", "config": {"titles": ["data analyst", "program analyst"], "boosts": ["federal government", "SQL", "Tableau"], "location": "Washington DC", "remote_only": false}},
+    {"id": "007-trades-electrician", "config": {"titles": ["journeyman electrician"], "boosts": ["commercial"], "exclude": ["apprenticeships"], "location": "Phoenix AZ"}},
+    {"id": "008-remote-anywhere-writer", "config": {"titles": ["freelance technical writer", "content designer"], "boosts": ["developer docs", "API documentation"], "location": "anywhere", "remote_only": true, "min_score": "plenty"}},
+    {"id": "009-teacher-relocating", "config": {"titles": ["high school math teacher"], "exclude": ["substitute", "paraprofessional"], "location": "Austin, Texas", "max_age_days": 30}},
+    {"id": "010-overloaded-boosts", "config": {"titles": ["DevOps engineer", "platform engineer"], "boosts": ["Kubernetes", "Terraform", "AWS", "CI/CD", "observability", "Go"], "rank_down": ["SRE-on-call-heavy"], "location": "remote", "remote_only": true, "min_score": "strong"}},
+    {"id": "011-title-only", "config": {"titles": ["barista"]}},
+    {"id": "012-conflicting-remote", "config": {"titles": ["accountant", "bookkeeper"], "exclude": ["commission-only", "1099 contractor"], "location": "Portland Oregon", "min_score": "balanced"}}
+  ]
+}
