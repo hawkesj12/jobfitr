@@ -15,7 +15,11 @@ User=jobfitr
 Group=jobfitr
 WorkingDirectory=/opt/jobfitr/jobfitr
 EnvironmentFile=/etc/jobfitr/jobfitr.env
-ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-snapshot --out /opt/jobfitr/data/jobs.json
+# --watchlist turns on the DEPTH lane: ~94 verified tech companies' ATS feeds
+# (Greenhouse/Lever/Ashby/SmartRecruiters), ~2.8k tech roles/harvest. The list is
+# read-only here (funnel auto_grow stays off — the hardening below only lets the
+# harvest write /opt/jobfitr/data, not the repo).
+ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-snapshot --out /opt/jobfitr/data/jobs.json --watchlist /opt/jobfitr/jobfitr/deploy/tech-watchlist.json
 
 # Hardening — may write only the snapshot directory.
 NoNewPrivileges=true
