@@ -90,7 +90,7 @@
     // the heartbeat slows toward sleep as it darkens
     bpm = 46 + fr.lum * 20; // ~46 bpm deep night → ~66 bpm midday
 
-    const wantStars = fr.lum < 0.16 && !reduce && starsLayer;
+    const wantStars = fr.lum < 0.2 && !reduce && starsLayer; // twinkles out by ~10pm
     if (wantStars && !starsOn) { starsOn = true; startStars(); }
     else if (!wantStars && starsOn) { starsOn = false; stopStars(); }
   }
