@@ -239,10 +239,17 @@ button { font: inherit; cursor: pointer; }
    to the top and the chat re-centers. ─────────────────────────────────────────────── */
 body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 48px; }
 body.board #chat-view { display: contents; } /* dissolve so the bar can stick across the whole page */
-body.board .transcript { width: min(760px, 100%); margin: 30vh auto 0; max-height: 22vh; overflow: hidden; }
+body.board .transcript { width: min(760px, 100%); margin: 17vh auto 0; max-height: 20vh; overflow: hidden; }
 body.board .barwrap { position: sticky; top: 10px; z-index: 6; width: min(760px, 100%); margin: 8px auto 0; }
 body.board .chips { display: none; }
 body.board #results-view { margin-top: 16px; }
+/* keep the filter/sort/salary reachable while scrolling — the toolbar sticks under the bar */
+body.board .toolbar { position: sticky; top: 72px; z-index: 5; margin-bottom: 10px; }
+/* cards fade into the sky BEFORE they slide under the sticky chat bar + toolbar */
+body.board::before {
+  content: ""; position: fixed; left: 0; right: 0; top: 0; height: 148px; z-index: 4; pointer-events: none;
+  background: linear-gradient(to bottom, var(--sky-top), color-mix(in srgb, var(--sky-top) 55%, transparent) 58%, transparent);
+}
 /* fresh search: the results flow up beneath the chat bar as it settles into place */
 @keyframes flowUp { from { opacity: 0; transform: translateY(34px); } to { opacity: 1; transform: none; } }
 body.board #results-view.flow-up { animation: flowUp 620ms cubic-bezier(0.22, 1, 0.36, 1); }
