@@ -1,0 +1,190 @@
+{
+  "role": "applying",
+  "date": "2026-07-14",
+  "n_cases": 12,
+  "unavailable_at_run_time": [],
+  "reports": [
+    {
+      "model": "openai/gpt-4o-mini",
+      "cases_scored": 12,
+      "schema_valid_rate": 1.0,
+      "mean_field": 0.7656,
+      "mean_hallucination": 0.0,
+      "p50_latency": 1.22,
+      "p95_latency": 1.52,
+      "mean_tokens": 399.6,
+      "total_cost_usd": 0.000946,
+      "mean_cost_usd": 7.9e-05,
+      "cost_per_1k_extractions_usd": 0.0788,
+      "per_field": {
+        "titles": 0.833,
+        "boosts": 0.738,
+        "exclude": 0.75,
+        "rank_down": 0.5,
+        "location": 0.818,
+        "remote_only": 0.714
+      },
+      "predictions": {
+        "001-zookeeper": {
+          "titles": [
+            "zookeeper",
+            "animal keeper"
+          ],
+          "boosts": [
+            "biology degree"
+          ],
+          "exclude": [
+            "intern",
+            "volunteer"
+          ],
+          "rank_down": [
+            "staffing",
+            "agency"
+          ],
+          "location": "Louisville KY",
+          "remote_only": false
+        },
+        "002-remote-react-dev": {
+          "titles": [
+            "Senior frontend engineer"
+          ],
+          "boosts": [
+            "React",
+            "TypeScript",
+            "design systems",
+            "accessibility"
+          ],
+          "rank_down": [
+            "agency",
+            "contract-to-hire"
+          ],
+          "location": "remote",
+          "remote_only": true
+        },
+        "003-vague-career-switcher": {
+          "titles": [
+            "project management"
+          ],
+          "location": "anywhere"
+        },
+        "004-voice-rambler": {
+          "titles": [
+            "sous chef",
+            "kitchen manager"
+          ],
+          "boosts": [
+            "farm to table"
+          ],
+          "exclude": [
+            "catering"
+          ],
+          "location": "Nashville",
+          "remote_only": false
+        },
+        "005-nurse-nightshift": {
+          "titles": [
+            "Registered nurse",
+            "ICU",
+            "ER"
+          ],
+          "rank_down": [
+            "travel-nursing agencies"
+          ],
+          "exclude": [
+            "nurse educator",
+            "case manager"
+          ],
+          "location": "Denver",
+          "remote_only": false
+        },
+        "006-federal-analyst": {
+          "titles": [
+            "data analyst",
+            "program analyst"
+          ],
+          "boosts": [
+            "SQL",
+            "Tableau",
+            "federal government",
+            "Washington DC area"
+          ],
+          "location": "Washington DC area",
+          "remote_only": false
+        },
+        "007-trades-electrician": {
+          "titles": [
+            "Journeyman electrician"
+          ],
+          "boosts": [
+            "commercial",
+            "Phoenix AZ"
+          ],
+          "exclude": [
+            "apprenticeships"
+          ],
+          "location": "Phoenix AZ"
+        },
+        "008-remote-anywhere-writer": {
+          "titles": [
+            "Freelance technical writer",
+            "content designer"
+          ],
+          "boosts": [
+            "developer docs",
+            "API documentation"
+          ],
+          "location": "remote",
+          "remote_only": true
+        },
+        "009-teacher-relocating": {
+          "titles": [
+            "math teacher"
+          ],
+          "exclude": [
+            "substitute",
+            "paraprofessional"
+          ],
+          "location": "Austin, Texas"
+        },
+        "010-overloaded-boosts": {
+          "titles": [
+            "DevOps engineer",
+            "platform engineer"
+          ],
+          "boosts": [
+            "Kubernetes",
+            "Terraform",
+            "AWS",
+            "CI/CD",
+            "observability",
+            "Go"
+          ],
+          "rank_down": [
+            "SRE-on-call-heavy"
+          ],
+          "remote_only": true
+        },
+        "011-title-only": {
+          "titles": [
+            "barista"
+          ],
+          "exclude": [],
+          "location": "",
+          "remote_only": false
+        },
+        "012-conflicting-remote": {
+          "titles": [
+            "Accountant",
+            "bookkeeper"
+          ],
+          "exclude": [
+            "commission-only",
+            "1099 contractor"
+          ],
+          "location": "Portland, Oregon",
+          "remote_only": true
+        }
+      }
+    }
+  ]
+}

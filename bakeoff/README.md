@@ -9,13 +9,15 @@ graded cases, scorer, and results all live in this directory so anyone can re-ru
 - **Asking** — the chat interviewer (`/api/chat`) that talks to a visitor and
   fills their search config. (Harness built in `run_asking.py`; not yet run.)
 - **Applying** — turning what the visitor said into the structured config JSON the
-  scorer needs (the `config_from_dict` contract: `titles, boosts, exclude,
-rank_down, location, remote_only, max_age_days, min_score`). This is what the
-  committed results below measure.
+  scorer needs. The extraction contract is the **6 fields the chat collects**
+  (`titles, boosts, exclude, rank_down, location, remote_only`, sourced live from
+  `jobfitr.chat.CONFIG_FIELDS`); `max_age_days` (recency) and `min_score` (pickiness)
+  are set deterministically downstream now, not extracted, so they aren't scored.
+  This is what the committed results below measure.
 
-The production chat currently defaults to a **free** model (`jobfitr/chat.py`:
-`DEFAULT_MODEL = meta-llama/llama-3.3-70b-instruct:free`, overridable via
-`CHAT_MODEL`). The bakeoff exists to check that choice with real numbers.
+The production chat currently defaults to `openai/gpt-4o-mini` (`jobfitr/chat.py`:
+`DEFAULT_MODEL`, overridable via `CHAT_MODEL`). The bakeoff exists to check that
+choice — and whether a cheaper/free model could match it — with real numbers.
 
 It benchmarks three lanes on the **identical** prompt, gold cases, and scorer:
 
@@ -72,10 +74,11 @@ column separate from field accuracy.
 ## Cost observability
 
 Every OpenRouter call's real dollar cost (`usage.cost`) is captured and rolled up:
-a **`$/1k users`** column in the ranking, `total_cost_usd` in the JSON, and a
+a **`$/1k extractions`** column in the ranking, `total_cost_usd` in the JSON, and a
 **"Total OpenRouter spend this run"** line printed at the end. Free models and the
 Claude Code path show `free` / subscription. This makes the accuracy-vs-cost
-trade-off explicit — the whole point of the paid-vs-free comparison.
+trade-off explicit — the whole point of the paid-vs-free comparison. (It's cost per
+one-shot extraction; a full multi-turn chat costs several of these — see Caveats.)
 
 ## Layout
 
@@ -143,9 +146,10 @@ gone: all lanes now share **one canonical prompt** (`bakeoff/prompts.py`,
 interpreting "show me lots" or "open to remote too" is the model's job. Removing the
 hints dropped the frontier models ~7 points, which is the honest number.
 
-The applying tool reuses the production `SET_CONFIG_TOOL` _schema_ (the contract
-can't drift), and `strip_unknown` is applied identically in every lane so schema
-validity is scored on the same envelope.
+The applying tool derives its fields straight from the live production contract
+(`jobfitr.chat.TURN_SCHEMA`, narrowed to `CONFIG_FIELDS`), so the eval can't drift
+from the app's real schema, and `strip_unknown` is applied identically in every
+lane so schema validity is scored on the same envelope.
 
 ## Rate limits (why free runs are paced)
 
@@ -156,44 +160,45 @@ constraint). `client.py` spaces requests and backs off on 429 honoring
 endpoints are also congested at US peak hours, so for a complete free-model table,
 **run off-peak** — paid models (gpt-4o-mini) and the Claude Code lane are unaffected.
 
-## Results (2026-07-13) — applying task, 12 gold cases, one shared prompt + scorer
+## Results (2026-07-14) — applying task, 12 gold cases, one shared prompt + scorer
 
-Every number below is reproducible from committed inputs: the Claude Code rows from
-`claude_code/*.json` via `score_claude_code.py`; the gpt-4o-mini row from
-`results/applying-2026-07-13.json`.
+Scored on the **6-field** contract the chat actually collects. Every number below is
+reproducible from committed inputs: the Claude Code rows from `claude_code/*.json`
+via `score_claude_code.py`; the gpt-4o-mini row from `results/applying-2026-07-14.json`
+(which now also commits the raw per-case extractions, so it re-scores offline too).
 
-| Model           | Lane            | Field acc | Schema-valid | Speed p50 |   $/1k users |
-| --------------- | --------------- | --------: | -----------: | --------: | -----------: |
-| Opus            | Claude Code     |       83% |         100% |         — | subscription |
-| Sonnet          | Claude Code     |       81% |         100% |         — | subscription |
-| **gpt-4o-mini** | OpenRouter paid |   **78%** |     **100%** |  **1.3s** |   **\$0.11** |
+| Model           | Lane            | Field acc | Schema-valid | Speed p50 | $/1k extractions |
+| --------------- | --------------- | --------: | -----------: | --------: | ---------------: |
+| Opus            | Claude Code     |       80% |         100% |         — |     subscription |
+| Sonnet          | Claude Code     |       78% |         100% |         — |     subscription |
+| **gpt-4o-mini** | OpenRouter paid |   **77%** |     **100%** |  **1.2s** |       **\$0.08** |
 
 **Free models were congested/unavailable at this (US peak) run** — the harness set
 them aside rather than fake a score. A full free-model table needs an **off-peak
-re-run** (early AM / late PM ET). An earlier congested run of `gemma-4-26b` landed
-around 30% field / 25% schema; don't cite that as final until it's re-run and
-committed.
+re-run** (early AM / late PM ET); no free-model row is committed here, so don't cite
+one as final until it's run and committed.
 
 **Takeaway (scoped honestly):** on config **extraction**, `gpt-4o-mini` lands within
-~5 points of the frontier models (78% vs 81–83%), is the only OpenRouter option that
-hit 100% schema validity here, is fast (1.3s), and costs **\$0.11 per 1,000
-extractions** (the whole benchmark cost \$0.0013). That makes a cheap paid model a
-strong candidate for the extraction path. It does **not** yet prove the production
-**chat** model — that's the multi-turn asking path, which hasn't been run.
+~1–3 points of the frontier models (77% vs 78–80%), hit 100% schema validity, is fast
+(1.2s), and costs **\$0.08 per 1,000 extractions** (the whole benchmark cost \$0.0009).
+At n=12 that gap is within noise — read it as "a cheap paid model matches the frontier
+on extraction," not a strict ranking. It does **not** yet prove the production **chat**
+model — that's the multi-turn asking path, which hasn't been run.
 
 ## Caveats (stated honestly)
 
 - **Applying is a one-shot proxy.** Production chat is streaming, multi-turn,
   tool-call-gated. Run `run_asking.py` before staking the production chat model.
-- **Cost is one-shot.** \$0.11/1k is per single extraction. The asking path re-sends
+- **Cost is one-shot.** \$0.08/1k is per single extraction. The asking path re-sends
   a growing transcript across up to 6 turns, so a real per-interview cost is several
   times higher and is not measured here.
 - **Free-model rows are incomplete** at US peak hours (congestion). Re-run off-peak;
   paid + Claude Code rows are stable any time.
-- **The OpenRouter lane doesn't yet persist raw per-case outputs**, so its table is
-  reproducible by re-running the API, not byte-for-byte offline (the Claude Code lane
-  is — its outputs are committed). Persisting raw OpenRouter outputs is a TODO.
-- **n = 12, no confidence intervals.** The top spread (78 vs 81 vs 83) is within
+- **Every lane now re-scores offline.** The OpenRouter lane persists its raw per-case
+  extractions in `results/applying-<date>.json` (`predictions`), and the Claude Code
+  lane commits its inputs (`claude_code/*.json`) — so after a scorer change, every
+  number can be re-derived without re-hitting the API.
+- **n = 12, no confidence intervals.** The top spread (77 vs 78 vs 80) is within
   noise — read it as "indistinguishable at this n," not a strict ranking. Grow to
   ~30 cases before over-reading. Some ceiling is gold-label strictness (e.g.
   "staffing agencies" as one token vs `staffing`+`agency`).

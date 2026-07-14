@@ -3,22 +3,25 @@ benchmarked without a human in the loop.
 
 A fixed, cheap sim model role-plays a persona (from cases/asking/*.yaml) while the
 candidate ASKING model runs the REAL production interview: jobfitr.chat's
-SYSTEM_PROMPT + SET_CONFIG_TOOL, with tool-call args merged via chat.merge_config
-exactly as the live endpoint does. So the transcript reflects the true task, and
-we get two objective signals for free alongside the judged quality:
+TURN_SYSTEM_PROMPT + TURN_SCHEMA (structured output), with the returned config
+fields merged via chat.merge_config exactly as the live endpoint does. So the
+transcript reflects the true task, and we get two objective signals for free
+alongside the judged quality:
   - turns_to_complete : how few turns to fill the required fields (lower = better)
   - fields_missed     : required fields still empty when the interview ended
 
 The candidate uses non-streaming completions (the bakeoff doesn't need SSE); the
-merged config is assembled from tool calls the same way stream_chat does.
+merged config is read from the structured-output response the same way the live
+turn endpoint does.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from bakeoff import client
-from jobfitr.chat import SET_CONFIG_TOOL, SYSTEM_PROMPT, merge_config
+from jobfitr.chat import CONFIG_FIELDS, TURN_SCHEMA, TURN_SYSTEM_PROMPT, merge_config
 
 MAX_TURNS = 6  # matches the production CHAT_MAX_TURNS default
 
@@ -43,22 +46,32 @@ class Interview:
 # ═══════════════════════════════════════════════════════════════
 # _candidate_turn()
 # ═══════════════════════════════════════════════════════════════
-# One assistant turn from the candidate ASKING model: it sees the production
-# system prompt + the running conversation, may emit text AND/OR a set_config
-# tool call. Returns (assistant_text, config_delta).
+# One assistant turn from the candidate ASKING model: it sees the production turn
+# system prompt + the running conversation and runs ONE production structured-output
+# turn (response_format=TURN_SCHEMA) — a `reply` plus the running config. Returns
+# (reply_text, config_delta) where the delta is the config fields the chat collects.
 # ═══════════════════════════════════════════════════════════════
 def _candidate_turn(model: str, convo: list) -> tuple[str, dict]:
     r = client.call(
         model,
-        [{"role": "system", "content": SYSTEM_PROMPT}, *convo],
-        tools=[SET_CONFIG_TOOL],
-        tool_choice="auto",
+        [{"role": "system", "content": TURN_SYSTEM_PROMPT}, *convo],
+        response_format=TURN_SCHEMA,
         max_tokens=320,
     )
     if not r.ok:
         return f"[error: {r.error}]", {}
-    delta = {k: v for k, v in r.tool_args().items() if v is not None}
-    text = r.content or ("Got it." if delta else "Could you tell me the role you want?")
+    try:
+        data = json.loads(r.content or "{}")
+    except json.JSONDecodeError:
+        data = {}
+    # The delta is only the config fields the chat collects, non-empty (the schema
+    # also carries reply/ready/chips, which aren't config).
+    delta = {
+        f: data[f] for f in CONFIG_FIELDS if f in data and data[f] not in (None, "", [])
+    }
+    text = data.get("reply") or (
+        "Got it." if delta else "Could you tell me the role you want?"
+    )
     return text, delta
 
 

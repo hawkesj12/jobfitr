@@ -2,6 +2,8 @@
 
 **Date:** 2026-07-13 · **Gate:** ✅ `ok:true`, 0 hard issues · **Grounds on:** the Oracle run `~/.claude/library/oracle/2026-07-13-jobfitr-free-model-bakeoff.md`
 
+> **Historical record — superseded 2026-07-14.** Production `jobfitr/chat.py` has since replaced `SET_CONFIG_TOOL`/`SYSTEM_PROMPT` with the structured-output `TURN_SCHEMA`/`TURN_SYSTEM_PROMPT` and trimmed the chat-collected contract to 6 fields (dropping `max_age_days`/`min_score`, now set deterministically downstream). The bakeoff was realigned to that live contract; references below to the old names describe the original plan, not the current code. See `README.md` for the current state.
+
 ## What this is (one sentence)
 
 A self-contained, committed `bakeoff/` package that empirically picks the best **free** OpenRouter model for jobfitr's two AI jobs — the **asking** model (the chat interviewer) and the **applying** model (structured JSON extraction) — with a methodology a skeptic can re-run.

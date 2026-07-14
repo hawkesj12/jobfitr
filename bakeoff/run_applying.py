@@ -2,9 +2,10 @@
 transcript; the deterministic scorer grades it; results land in results/ as JSON
 + a ranked markdown table. Runnable today with zero new dependencies.
 
-Fidelity: the extraction is driven by the SAME set_config tool schema the
-production chat uses (jobfitr.chat.SET_CONFIG_TOOL) and a system prompt derived
-from the production one — so we measure the real task. We try each model TWO
+Fidelity: the extraction fields come straight from the live production contract
+(jobfitr.chat.TURN_SCHEMA, narrowed to jobfitr.chat.CONFIG_FIELDS) plus a system
+prompt derived from the production one — so we measure the real task and the eval
+can't silently drift from the app. We try each model TWO
 ways and take the better, because free models honor different mechanisms:
   - tool-call   : the model calls set_config (what production actually does)
   - json_object : the model returns a bare JSON object (fallback for models
@@ -29,7 +30,7 @@ import yaml
 
 from bakeoff import client, scoring
 from bakeoff.prompts import EXTRACT_PROMPT
-from jobfitr.chat import SET_CONFIG_TOOL
+from jobfitr.chat import CONFIG_FIELDS, TURN_SCHEMA
 
 _ET = ZoneInfo("America/New_York")
 _HERE = Path(__file__).resolve().parent
@@ -41,9 +42,14 @@ _RESULTS = _HERE / "results"
 # tool path adds only "call set_config once"; the JSON fallback adds "return JSON".
 _EXTRACT_SYSTEM = EXTRACT_PROMPT + "\n\nCall the set_config tool exactly once."
 
-# The APPLYING tool: identical parameters (the config_from_dict contract) to the
-# production SET_CONFIG_TOOL, but with a complete-extraction description instead
-# of the incremental "omit the rest, this turn" one that biases toward a minimal call.
+# The APPLYING tool. Its parameters are the CONFIG fields the production chat
+# actually collects (jobfitr.chat.CONFIG_FIELDS), with each field's schema pulled
+# straight from the live jobfitr.chat.TURN_SCHEMA — so the extractor is graded on
+# the app's real contract and can't drift from it. (TURN_SCHEMA is the turn
+# structured-output schema; we take only its config-field properties, dropping the
+# chat-only reply/ready/chips.) A complete-extraction description replaces the
+# incremental "this turn" framing, since applying is a one-shot task.
+_TURN_PROPS = TURN_SCHEMA["json_schema"]["schema"]["properties"]
 _EXTRACT_TOOL = {
     "type": "function",
     "function": {
@@ -52,7 +58,10 @@ _EXTRACT_TOOL = {
             "Record the user's COMPLETE job search from the transcript. Fill every "
             "field the transcript supports; omit only fields the user never mentioned."
         ),
-        "parameters": SET_CONFIG_TOOL["function"]["parameters"],
+        "parameters": {
+            "type": "object",
+            "properties": {f: _TURN_PROPS[f] for f in CONFIG_FIELDS},
+        },
     },
 }
 
@@ -262,8 +271,11 @@ def write_results(
                 "mean_tokens": round(r.mean_tokens, 1),
                 "total_cost_usd": round(r.total_cost, 6),
                 "mean_cost_usd": round(r.mean_cost, 6),
-                "cost_per_1k_users_usd": round(r.mean_cost * 1000, 4),
+                "cost_per_1k_extractions_usd": round(r.mean_cost * 1000, 4),
                 "per_field": {k: round(v, 3) for k, v in r.per_field.items()},
+                # Raw per-case extractions, so this lane is re-scorable OFFLINE after a
+                # scorer change — no need to re-hit the API to re-derive a number.
+                "predictions": {s.case_id: s.predicted for s in r.cases},
             }
             for r in reports
         ],
@@ -301,11 +313,11 @@ def write_results(
         "| **Hallucination** | Share of list items the model invented that the user never said (lower is better). These silently corrupt someone's search. |",
         "| **Response p50 / p95** | How long a genuine extraction took, in seconds. p50 = typical, p95 = worst-case (19 of 20 are faster). The wait a user would feel. |",
         "| **~tokens** | Average tokens per extraction — a rough cost/speed proxy; reasoning models spend far more. |",
-        "| **$/1k users** | Real spend, projected to 1,000 searches, from OpenRouter's reported per-call cost. Free models are \\$0; a paid model's true metered cost per 1,000 users. |",
+        "| **$/1k extractions** | Real spend, projected to 1,000 one-shot extractions, from OpenRouter's reported per-call cost. Free models are \\$0. NOTE: a full multi-turn user chat costs several extractions' worth, so this is a floor, not a per-user cost. |",
         "",
         "## Ranking",
         "",
-        "| Rank | Model | Scored | Schema-valid | Field accuracy | Hallucination | Response p50 | Response p95 | ~tokens | $/1k users |",
+        "| Rank | Model | Scored | Schema-valid | Field accuracy | Hallucination | Response p50 | Response p95 | ~tokens | $/1k extractions |",
         "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for i, r in enumerate(reports, 1):
@@ -356,8 +368,10 @@ def write_results(
         "| **rank_down** | Signals that should _sink_ a job but not hide it (e.g. `staffing`, `agency`). |",
         "| **location** | A place (`Louisville, KY`), or `remote`, or `anywhere`. |",
         "| **remote_only** | True if the user only wants remote roles. |",
-        "| **max_age_days** | Ignore postings older than this many days. |",
-        "| **min_score** | How picky: `plenty`, `balanced`, or `strong`. |",
+        "",
+        "_`max_age_days` (recency) and `min_score` (pickiness) are no longer part of the "
+        "extraction contract — the chat stopped asking for them; they're set "
+        "deterministically downstream — so they aren't scored here._",
         "",
         "_Generated by `bakeoff/run_applying.py` — see `bakeoff/README.md` for the methodology._",
         "",
@@ -391,7 +405,7 @@ def main(argv=None) -> int:
     print("\nRanking (model quality — field accuracy, then schema, then speed):")
     for i, r in enumerate(reports, 1):
         per_1k = r.mean_cost * 1000
-        cost = "free" if per_1k == 0 else f"${per_1k:,.2f}/1k users"
+        cost = "free" if per_1k == 0 else f"${per_1k:,.2f}/1k extractions"
         print(
             f"  {i}. {r.model:<44} field={r.mean_field:.0%} schema={r.schema_valid_rate:.0%} "
             f"p50={r.p50_latency:.1f}s {cost}  (scored {r.n}/{len(cases)})"

@@ -3,7 +3,7 @@ has ground truth: a hand-labeled config is the correct answer.
 
 Four things get measured per (model, case), because they are the four ways a
 free extractor actually fails (the spike showed all four are live):
-  - schema_valid  : did it emit the 8-field contract at all, with right types?
+  - schema_valid  : did it emit the config contract at all, with right types?
   - field score   : per-field set-F1 for the list fields, exact-match for scalars.
   - hallucination : fraction of emitted list items NOT supported by the transcript
                     (the failure that silently corrupts a user's search).
@@ -19,18 +19,26 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from jobfitr.chat import CONFIG_FIELDS
 from jobfitr.config_builder import _clean_list
 
-LIST_FIELDS = ("titles", "boosts", "exclude", "rank_down")
-SCALAR_FIELDS = ("location", "remote_only", "max_age_days", "min_score")
+# Score exactly the fields the production CHAT collects, sourced from
+# jobfitr.chat.CONFIG_FIELDS so the eval can't silently drift from the app again.
+# The chat stopped collecting max_age_days / min_score — they're set deterministically
+# downstream now (jobfitr.server's RESULT_LADDER + config_builder defaults), so they
+# are no longer an extraction target and aren't part of the contract an extractor is
+# graded against.
+_LISTY = ("titles", "boosts", "exclude", "rank_down")
+LIST_FIELDS = tuple(f for f in CONFIG_FIELDS if f in _LISTY)
+SCALAR_FIELDS = tuple(f for f in CONFIG_FIELDS if f not in _LISTY)
 ALL_FIELDS = LIST_FIELDS + SCALAR_FIELDS
 
 
 def strip_unknown(cfg: dict) -> dict:
-    """Keep only the 8 contract fields — the same narrowing jobfitr.chat.merge_config
-    does in production. Applied identically in EVERY lane so schema-validity is
-    scored on the same envelope (an extra key can't pass in one lane and fail in
-    another)."""
+    """Keep only the config-contract fields (jobfitr.chat.CONFIG_FIELDS) — the same
+    narrowing jobfitr.chat.merge_config does in production. Applied identically in
+    EVERY lane so schema-validity is scored on the same envelope (an extra key can't
+    pass in one lane and fail in another)."""
     return {k: v for k, v in (cfg or {}).items() if k in ALL_FIELDS}
 
 
@@ -170,6 +178,9 @@ class CaseScore:
         0.0  # USD for this case (0 for free models / Claude Code subscription)
     )
     overall: float = 0.0  # mean field score, gated by schema validity
+    predicted: dict = field(
+        default_factory=dict
+    )  # the config scored, for offline re-scoring
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -223,6 +234,7 @@ def score_case(
         tokens=tokens,
         cost=cost,
         overall=overall,
+        predicted=predicted,
     )
 
 

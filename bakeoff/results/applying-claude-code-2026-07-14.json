@@ -1,14 +1,14 @@
 {
   "role": "applying",
   "variant": "claude-code",
-  "date": "2026-07-13",
+  "date": "2026-07-14",
   "n_cases": 12,
   "reports": [
     {
       "model": "claude-opus (via Claude Code)",
       "cases_scored": 12,
       "schema_valid_rate": 1.0,
-      "mean_field": 0.8317,
+      "mean_field": 0.7981,
       "mean_hallucination": 0.0,
       "per_field": {
         "titles": 0.917,
@@ -16,16 +16,14 @@
         "exclude": 0.667,
         "rank_down": 0.25,
         "location": 0.909,
-        "remote_only": 0.714,
-        "max_age_days": 1.0,
-        "min_score": 1.0
+        "remote_only": 0.714
       }
     },
     {
       "model": "claude-sonnet (via Claude Code)",
       "cases_scored": 12,
       "schema_valid_rate": 1.0,
-      "mean_field": 0.815,
+      "mean_field": 0.7785,
       "mean_hallucination": 0.0,
       "per_field": {
         "titles": 0.875,
@@ -33,9 +31,7 @@
         "exclude": 0.667,
         "rank_down": 0.25,
         "location": 0.727,
-        "remote_only": 0.857,
-        "max_age_days": 1.0,
-        "min_score": 1.0
+        "remote_only": 0.857
       }
     }
   ]

@@ -15,7 +15,7 @@ from bakeoff import client, scoring
 # ── scorer: schema validity ───────────────────────────────────────────────────
 def test_schema_valid_accepts_contract():
     assert scoring.schema_valid(
-        {"titles": ["x"], "remote_only": True, "max_age_days": 30}
+        {"titles": ["x"], "remote_only": True, "location": "Louisville, KY"}
     )
 
 
@@ -28,7 +28,9 @@ def test_schema_valid_rejects_unknown_key():
 
 def test_schema_valid_rejects_wrong_types():
     assert not scoring.schema_valid({"remote_only": "yes"})
-    assert not scoring.schema_valid({"max_age_days": True})  # bool is not an int here
+    assert not scoring.schema_valid(
+        {"titles": 123}
+    )  # an int is not a valid titles list
     assert not scoring.schema_valid({"location": ["remote"]})
 
 
@@ -80,15 +82,14 @@ def test_remote_only_omission_is_not_free_credit():
 
 
 def test_scalar_exact_match():
-    exp = {"location": "Louisville, KY", "remote_only": False, "min_score": "plenty"}
+    exp = {"location": "Louisville, KY", "remote_only": False}
     s = scoring.score_case(
         "c",
-        {"location": "louisville, ky", "remote_only": False, "min_score": "plenty"},
+        {"location": "louisville, ky", "remote_only": False},
         exp,
     )
     assert s.field_scores["location"] == 1.0
     assert s.field_scores["remote_only"] == 1.0
-    assert s.field_scores["min_score"] == 1.0
 
 
 def test_schema_validity_reported_separately_from_accuracy():
