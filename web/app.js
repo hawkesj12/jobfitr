@@ -54,6 +54,8 @@ const el = {
   filters: $("#filters"),
   fFit: $("#f-fit"),
   fFitVal: $("#f-fit-val"),
+  fSalary: $("#f-salary"),
+  fSalaryVal: $("#f-salary-val"),
   fFacets: $("#f-facets"),
   fAgency: $("#f-agency"),
   fSeen: $("#f-seen"),
@@ -92,8 +94,10 @@ const state = {
   all: [], // every scored job from the last /api/score
   cfg: {},
   // facets: per-group Set of selected values (OR within a group, AND across groups)
-  filters: { fit: 0, facets: {}, agency: false, seen: true },
+  filters: { fit: 0, minSalary: 0, facets: {}, agency: false, seen: true },
   sort: "fit",
+  view: [], // the current filtered/sorted list the board pages through
+  focusIndex: 0, // which job is the big primary card
 };
 function selectedFacets(key) {
   return state.filters.facets[key] || (state.filters.facets[key] = new Set());
@@ -243,6 +247,15 @@ function passesFacets(job) {
   }
   return true;
 }
+// The min salary a posting states (its FIRST number, however small), or null when the
+// salary field is empty. A tiny "$10" is a real (low/hourly) value — NOT "unlisted" —
+// so it must be caught by the slider, not slip through as a no-salary job.
+function salaryMin(job) {
+  const m = String(job.salary || "").match(/\d[\d,]*/);
+  if (!m) return null;
+  const n = parseInt(m[0].replace(/,/g, ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 function filteredJobs() {
   const { applied, dismissed } = seenSet();
   const f = state.filters;
@@ -251,6 +264,12 @@ function filteredJobs() {
     if (f.seen && (applied[j.url] || dismissed.has(j.url))) return false;
     if ((j.fit_pct || 0) < f.fit) return false;
     if (f.agency && AGENCY_RE.test(`${j.title} ${j.company}`)) return false;
+    // salary slider: hide only postings whose STATED salary is below the floor;
+    // keep the no-salary ones (coverage is sparse — don't silently drop them).
+    if (f.minSalary > 0) {
+      const s = salaryMin(j);
+      if (s !== null && s < f.minSalary) return false;
+    }
     if (!passesFacets(j)) return false;
     return true;
   });
@@ -263,8 +282,7 @@ function sortJobs(list) {
   if (s === "new") {
     copy.sort((a, b) => new Date(b.posted || 0) - new Date(a.posted || 0));
   } else if (s === "salary") {
-    const num = (x) => parseInt(String(x.salary || "").replace(/[^0-9]/g, ""), 10) || 0;
-    copy.sort((a, b) => num(b) - num(a));
+    copy.sort((a, b) => (salaryMin(b) || 0) - (salaryMin(a) || 0));
   } else {
     copy.sort((a, b) => (b.fit_score || 0) - (a.fit_score || 0));
   }
@@ -273,16 +291,13 @@ function sortJobs(list) {
 
 function applyFilters(animateCount) {
   const list = filteredJobs();
-  renderCarousel(list);
+  state.view = list;
+  if (state.focusIndex > list.length - 1) state.focusIndex = Math.max(0, list.length - 1);
+  renderCarousel();
   writeSummary(list.length, !!animateCount);
   updateFilterCount(list.length);
-  if (!list.length) {
-    show(el.empty, true);
-    show(el.carousel, false);
-  } else {
-    show(el.empty, false);
-    show(el.carousel, true);
-  }
+  show(el.empty, !list.length);
+  show(el.carousel, !!list.length);
 }
 
 function tierFor(pct) {
@@ -291,67 +306,97 @@ function tierFor(pct) {
   return { word: "Fair fit", cls: "fair" };
 }
 
-function renderCarousel(list) {
+// Some sources (e.g. HN) stuff the whole posting into `location`. Keep just the real
+// place: the first clause, capped — so the org line stays a clean "Company · Place".
+function cleanLoc(loc) {
+  const first = (loc || "").split(/[.;|]/)[0].trim();
+  if (!first) return "—";
+  return first.length > 60 ? first.slice(0, 57) + "…" : first;
+}
+
+// The board is a SCROLLABLE vertical carousel of small cards. Each is compact by
+// default (title · place, salary · posted, fit + rank); click it to expand the full
+// detail (bulleted description + Apply / Pass), click again to collapse. One open at a time.
+function renderCarousel() {
+  const list = state.view;
   el.carousel.textContent = "";
+  if (!list.length) return;
   const frag = document.createDocumentFragment();
   list.forEach((job, i) => frag.appendChild(buildCard(job, i, list.length)));
   el.carousel.appendChild(frag);
 }
 
+// Split a JD blob into a few readable bullet points — meaty sentences only, skipping
+// the title echoed back and ID-number noise the harvest sometimes leaves in.
+function descBullets(text, title) {
+  const t = (title || "").toLowerCase().trim();
+  return (text || "")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim().replace(/\s+/g, " "))
+    .filter((s) => {
+      if (s.length < 24) return false;
+      const low = s.toLowerCase();
+      if (low === t || low.startsWith(t + ".") || low.startsWith(t + " ")) return false;
+      const digits = (s.match(/\d/g) || []).length;
+      if (digits > s.length * 0.25) return false; // mostly numbers/ids
+      return true;
+    })
+    .slice(0, 20);
+}
+
 function buildCard(job, index, total) {
   const node = el.cardTpl.content.firstElementChild.cloneNode(true);
   node.dataset.url = job.url;
-  const focus = index === 0;
-  node.classList.add(focus ? "is-focus" : index <= 2 ? "is-near" : "is-far");
-  if (!focus) node.classList.add("is-masked");
 
   const pct = Math.max(0, Math.min(100, job.fit_pct || 0));
-  const fill = $(".fill", node);
-  requestAnimationFrame(() => (fill.style.width = pct + "%"));
+  requestAnimationFrame(() => ($(".fill", node).style.width = pct + "%"));
 
   $(".role", node).textContent = job.title || "Untitled role";
   $(".company", node).textContent = job.company || "—";
-  $(".loc", node).textContent = job.location || "—";
+  $(".loc", node).textContent = cleanLoc(job.location);
   const t = tierFor(pct);
   const tierEl = $(".tier", node);
   tierEl.textContent = t.word;
   tierEl.classList.add(t.cls);
   $(".rank", node).textContent = `#${index + 1} of ${total}`;
 
+  // always visible on the small card — everyone wants salary + posted at a glance
+  $(".salary", node).textContent = job.salary || "";
+  $(".posted", node).textContent = job.posted ? `Posted ${job.posted}` : "";
+  $(".source", node).textContent = job.source ? `via ${job.source}` : "";
+
+  // shown when the card is expanded: the why chips + the bulleted description
   const why = $(".why", node);
   (job.why || "").split(",").map((w) => w.trim()).filter(Boolean).slice(0, 5).forEach((w) => {
     const li = document.createElement("li");
     li.textContent = w;
     why.appendChild(li);
   });
-
-  $(".desc", node).textContent = job.description || job.snippet || "";
-  $(".salary", node).textContent = job.salary || "";
-  $(".posted", node).textContent = job.posted ? `Posted ${job.posted}` : "";
-  $(".source", node).textContent = job.source ? `via ${job.source}` : "";
-
-  const head = $(".gcard-head", node);
-  const detail = $(".detail", node);
-  head.addEventListener("click", () => {
-    if (!node.classList.contains("is-focus")) return; // only the focused card expands
-    const open = detail.hidden;
-    detail.hidden = !open;
-    head.setAttribute("aria-expanded", String(open));
+  const db = $(".desc-bullets", node);
+  descBullets(job.description || job.snippet, job.title).forEach((b) => {
+    const li = document.createElement("li");
+    li.textContent = b;
+    db.appendChild(li);
   });
 
   const open = $(".btn-open", node);
   open.href = job.url;
-  const applyActs = $(".acts-applied", node);
-  const viewActs = $(".acts:not(.acts-applied)", node);
-  open.addEventListener("click", () => {
-    // opening the posting is a VIEW, not an application — reveal the two-step
-    viewActs.hidden = true;
-    applyActs.hidden = false;
-  });
-  $(".btn-dismiss", node).addEventListener("click", () => dismissJob(node, job));
-  $(".btn-notthis", node).addEventListener("click", () => dismissJob(node, job));
-  $(".btn-applied", node).addEventListener("click", () => applyJob(node, job));
+  open.addEventListener("click", (e) => { e.stopPropagation(); applyJob(node, job); });
+  $(".btn-dismiss", node).addEventListener("click", (e) => { e.stopPropagation(); dismissJob(node, job); });
+
+  // click the card to expand/collapse (buttons stopPropagation so they don't toggle)
+  node.addEventListener("click", () => toggleExpand(node));
   return node;
+}
+
+// One card expanded at a time. Expanding scrolls it comfortably into view.
+function toggleExpand(node) {
+  const wasOpen = node.classList.contains("expanded");
+  el.carousel.querySelectorAll(".gcard.expanded").forEach((n) => n.classList.remove("expanded"));
+  if (!wasOpen) {
+    node.classList.add("expanded");
+    node.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "nearest" });
+  }
 }
 
 // ── two-step apply / dismiss ────────────────────────────────────────────────
@@ -489,18 +534,49 @@ function show(node, on) {
   if (node) node.hidden = !on;
 }
 function showResults() {
-  show(el.chatView, false);
+  // board mode: the AI stays on screen (chat + echo up top), the job carousel below.
+  const bar = el.chatView.querySelector(".barwrap");
+  const entering = !document.body.classList.contains("board");
+  const first = entering && bar ? bar.getBoundingClientRect() : null;
+
+  document.body.classList.add("board");
   show(el.formView, false);
+  show(el.chatView, true);
   show(el.resultsView, true);
+  show(el.filters, true); // the left filter drawer is only available on the board
+  state.focusIndex = 0;
+
+  // On a fresh search: FLIP the chat bar from its centered spot UP into its board
+  // position, and flow the results up beneath it.
+  if (first && bar && !reduceMotion()) {
+    const dy = first.top - bar.getBoundingClientRect().top;
+    if (Math.abs(dy) > 4) {
+      bar.style.transition = "none";
+      bar.style.transform = `translateY(${dy}px)`;
+      requestAnimationFrame(() => {
+        bar.style.transition = "transform 620ms cubic-bezier(0.22, 1, 0.36, 1)";
+        bar.style.transform = "";
+      });
+      bar.addEventListener("transitionend", () => { bar.style.transition = ""; bar.style.transform = ""; }, { once: true });
+    }
+    el.resultsView.classList.remove("flow-up");
+    void el.resultsView.offsetWidth; // restart the animation
+    el.resultsView.classList.add("flow-up");
+  }
 }
 function showChat() {
+  document.body.classList.remove("board");
   show(el.resultsView, false);
   show(el.formView, false);
+  show(el.filters, false);
+  el.filters.classList.remove("open");
   show(el.chatView, true);
 }
 function showForm() {
+  document.body.classList.remove("board");
   show(el.chatView, false);
   show(el.resultsView, false);
+  show(el.filters, false);
   show(el.formView, true);
 }
 
@@ -518,7 +594,7 @@ if (el.toForm) {
   });
 }
 el.toChat.addEventListener("click", showChat);
-el.refine.addEventListener("click", showChat);
+if (el.refine) el.refine.addEventListener("click", showChat); // Refine button removed from the toolbar
 el.sort.addEventListener("change", () => {
   state.sort = el.sort.value;
   applyFilters(false);
@@ -532,6 +608,14 @@ el.fFit.addEventListener("input", () => {
   el.fFitVal.textContent = state.filters.fit === 0 ? "any" : `${state.filters.fit}%+`;
   applyFilters(false);
 });
+if (el.fSalary) {
+  el.fSalary.addEventListener("input", () => {
+    state.filters.minSalary = +el.fSalary.value;
+    el.fSalaryVal.textContent =
+      state.filters.minSalary === 0 ? "$ any" : `$${Math.round(state.filters.minSalary / 1000)}k+`;
+    applyFilters(false);
+  });
+}
 el.fAgency.addEventListener("change", () => {
   state.filters.agency = el.fAgency.checked;
   applyFilters(false);

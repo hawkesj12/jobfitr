@@ -276,6 +276,28 @@ def test_prefetch_without_titles_is_a_noop(client, monkeypatch):
     assert calls["n"] == 0  # nothing to fetch without a title
 
 
+def test_score_ladder_relaxes_freshness_to_find_matches(client):
+    # A 40-day-old job is excluded by the tight 15/30-day tiers but included once the
+    # deterministic ladder relaxes past 30 days — no "how picky?" or recency question.
+    old = (date.today() - timedelta(days=40)).isoformat()
+    _seed(
+        [
+            _job(
+                "Staff Data Scientist",
+                text="ml data scientist role",
+                posted=old,
+                url="https://x/sds",
+            )
+        ]
+    )
+    _mark_fresh(["data scientist"], "remote")  # cache fresh → no live fetch
+    d = client.post(
+        "/api/score", json={"titles": ["data scientist"], "location": "remote"}
+    ).json()
+    assert d["jobs"] and d["jobs"][0]["title"] == "Staff Data Scientist"
+    assert d["tier"]["max_age_days"] >= 60  # relaxed past the tight tiers to include it
+
+
 def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
     _seed(
         [

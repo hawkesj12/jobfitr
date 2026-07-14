@@ -54,6 +54,18 @@ PENALTY_W = 3.0
 # min_score keyword → keep candidates scoring >= frac × the top result's score.
 MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
 
+# Deterministic freshness/pickiness ladder — replaces the "how picky?" + recency
+# questions. Start tight (fresh + strong), relax only as far as needed to reach TARGET
+# results; cap the shown set at TARGET. (max_age_days, min_score), tight → loose.
+TARGET_RESULTS = 50
+RESULT_LADDER = [
+    (15, "strong"),
+    (30, "strong"),
+    (30, "balanced"),
+    (60, "balanced"),
+    (90, "plenty"),
+]
+
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
 # Daily cap on live Adzuna/USAJOBS fetches — the actuator saturation. When tripped,
@@ -231,32 +243,29 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         cfg.agency_penalty.keys()
     )  # user rank_down or the generic staffing terms
     exclude = list(cfg.exclude_titles)
-    min_key = (
-        payload.get("min_score")
-        if isinstance(payload.get("min_score"), str)
-        else "balanced"
-    )
-    limit = payload.get("limit")
-    limit = (
-        DEFAULT_LIMIT
-        if not isinstance(limit, int) or limit <= 0
-        else min(limit, MAX_LIMIT)
-    )
 
     degraded = _warm_cache(titles, location)
 
     candidates = store.bm25_candidates(titles, limit=CANDIDATE_LIMIT) if titles else []
-    kept, top = _rank(
-        candidates,
-        titles,
-        boosts,
-        penalties,
-        exclude,
-        min_key,
-        cfg.remote_only,
-        cfg.max_age_days,
-        limit,
-    )
+    # The deterministic ladder: start fresh + strong, relax only as far as needed to
+    # reach TARGET_RESULTS. The first tier that clears the bar wins (freshest/strongest);
+    # if none does, the loosest tier's set is kept. Cheap — a re-rank over the same pool.
+    kept, top, tier = [], 0.0, RESULT_LADDER[-1]
+    for max_age, min_key in RESULT_LADDER:
+        kept, top = _rank(
+            candidates,
+            titles,
+            boosts,
+            penalties,
+            exclude,
+            min_key,
+            cfg.remote_only,
+            max_age,
+            TARGET_RESULTS,
+        )
+        tier = {"max_age_days": max_age, "min_score": min_key}
+        if len(kept) >= TARGET_RESULTS:
+            break
     ref = max(top, 0.1)
     results = [
         _shape(c, round(final), why, _fit_pct(final, ref)) for c, final, why in kept
@@ -267,6 +276,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         "degraded": degraded,
         "facets": facets,
         "pool": store.pool_size(),
+        "tier": tier,
         "jobs": results,
     }
 

@@ -50,7 +50,7 @@ FULL_TURN = {
     "rank_down": [],
     "location": "Denver, CO",
     "remote_only": False,
-    "min_score": "balanced",
+    "chips": ["Fintech", "B2B SaaS", "Roadmapping"],
 }
 
 
@@ -69,6 +69,12 @@ def test_turn_extracts_reply_and_config(monkeypatch):
     built = config_from_dict(out["config"])
     assert built.title_queries == ["product manager"]
     assert built.location == "Denver, CO"
+
+
+def test_turn_returns_chips(monkeypatch):
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(FULL_TURN))
+    out = _run(chat.turn([{"role": "user", "content": "product manager"}], {}))
+    assert out["chips"] == ["Fintech", "B2B SaaS", "Roadmapping"]
 
 
 def test_turn_not_ready_without_location(monkeypatch):

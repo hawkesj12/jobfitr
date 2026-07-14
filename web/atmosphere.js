@@ -60,16 +60,17 @@
     root.style.setProperty("--sky-top", cssRgb(fr.top));
     root.style.setProperty("--sky-mid", cssRgb(fr.mid));
     root.style.setProperty("--sky-bot", cssRgb(fr.bot));
-    root.style.setProperty("--glow", cssRgb(fr.glow));
     root.style.setProperty("--gx", fr.gx + "%");
     root.style.setProperty("--gy", fr.gy + "%");
     root.style.setProperty("--gA", fr.gA);
     root.style.setProperty("--accent", cssRgb(fr.acc));
-    root.style.setProperty("--wash-a", rgba(fr.glow, 0.1));
-    root.style.setProperty("--wash-b", rgba(fr.acc, 0.1));
+    root.style.setProperty("--wash-a", rgba(fr.glow, 0.24));
+    root.style.setProperty("--wash-b", rgba(fr.acc, 0.24));
 
     const bright = fr.lum > 0.5;
     const tint = bright ? lerp(fr.mid, WHITE, 0.5) : lerp(fr.mid, NIGHT, 0.55);
+    // the sun-glow flips dark WITH the glass — when the UI goes to night, so does the sun
+    root.style.setProperty("--glow", cssRgb(bright ? fr.glow : lerp(fr.glow, NIGHT, 0.6)));
     const cardA = 0.3 + (1 - fr.lum) * 0.16;
     root.style.setProperty("--card-bg", rgba(tint, cardA));
     root.style.setProperty("--field-bg", rgba(tint, cardA * 0.8));

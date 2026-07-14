@@ -11,9 +11,11 @@
   const input = document.getElementById("chat-input");
   const sayEl = document.getElementById("chat-say");
   const echo = document.getElementById("echo");
+  const chipsEl = document.getElementById("chips");
   if (!form) return;
 
   const OPENER = "What job are you chasing?";
+  const CHIP_SHOW = 4; // how many chips to show at once (pool is up to 8; refills on pick)
   const reduceMo = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   const messages = [];
@@ -22,6 +24,7 @@
   let prefetched = false;
   let currentQuestion = OPENER; // the question the next answer responds to
   let typeToken = 0;
+  let chipPool = []; // suggestions for the current question; CHIP_SHOW render, rest reserve
 
   function renderSay(text, withCursor) {
     sayEl.textContent = text;
@@ -67,7 +70,7 @@
     // keep the last three exchanges; fade the older ones so only the recent stay legible
     const rows = [...echo.children];
     while (rows.length > 3) echo.removeChild(rows.shift());
-    rows.forEach((r, i) => (r.style.opacity = i === rows.length - 1 ? "1" : i === rows.length - 2 ? "0.5" : "0.28"));
+    rows.forEach((r, i) => (r.style.opacity = i === rows.length - 1 ? "1" : i === rows.length - 2 ? "0.72" : "0.45"));
   }
 
   function persist() {
@@ -100,21 +103,57 @@
     });
   }
 
-  function toConfirm() {
-    if (window.jobfitr && window.jobfitr.confirm) window.jobfitr.confirm(config);
-    else if (window.jobfitr) window.jobfitr.run(config);
+  // ── contextual chips: tap to add to the answer; a picked chip is replaced by the
+  // next reserve one (so similar suggestions keep sliding in). Multi-select builds a
+  // comma-separated answer in the box. ──────────────────────────────────────────────
+  function renderChips() {
+    if (!chipsEl) return;
+    chipsEl.textContent = "";
+    for (const label of chipPool.slice(0, CHIP_SHOW)) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip";
+      b.textContent = label;
+      b.addEventListener("click", () => selectChip(label));
+      chipsEl.appendChild(b);
+    }
   }
-  function fallbackToForm() {
-    if (window.jobfitr) window.jobfitr.showForm();
+  function selectChip(label) {
+    const cur = input.value.trim().replace(/,\s*$/, "");
+    input.value = cur ? cur + ", " + label : label;
+    input.focus();
+    chipPool = chipPool.filter((c) => c !== label); // remove it; the next reserve slides in
+    renderChips();
+  }
+  function setChips(list) {
+    chipPool = Array.isArray(list) ? list.filter((c) => typeof c === "string" && c.trim()) : [];
+    renderChips();
+  }
+
+  // Search runs straight from the conversation once ready — no form, ever.
+  function toResults() {
+    if (window.jobfitr) window.jobfitr.run(config);
   }
 
   async function send(text) {
     if (busy || !text.trim()) return;
     busy = true;
     input.value = "";
+    setChips([]); // clear last question's chips until the next turn returns fresh ones
     pushEcho(currentQuestion, text);
     messages.push({ role: "user", content: text });
     renderSay("", true);
+
+    // Assistant unavailable (503/429/upstream/network). If we already have a role +
+    // place, just search; otherwise ask them to try again — never the form.
+    const unavailable = () => {
+      if (hasTitles() && hasLocation()) {
+        typeInto("Pulling your matches from what you told me…");
+        setTimeout(toResults, 900);
+      } else {
+        typeInto("One sec — I lost my train of thought. Say that again?");
+      }
+    };
 
     try {
       const resp = await fetch("/api/chat", {
@@ -122,22 +161,9 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages, config }),
       });
-      if (!resp.ok) {
-        // 503 (no key / daily ceiling) or 429 (caps): the assistant is unavailable.
-        // Use what we have, or hand to the form — with a warm note, never a failure.
-        if (hasTitles()) {
-          typeInto("The assistant is resting — pulling your matches from what you told me.");
-          setTimeout(toConfirm, 900);
-        } else {
-          typeInto("The assistant is resting just now — switching you to the quick form.");
-          setTimeout(fallbackToForm, 1100);
-        }
-        return;
-      }
-      const data = await resp.json();
-      if (data.error) {
-        if (hasTitles()) toConfirm();
-        else fallbackToForm();
+      const data = resp.ok ? await resp.json() : null;
+      if (!data || data.error) {
+        unavailable();
         return;
       }
       config = data.config || config;
@@ -146,11 +172,11 @@
       messages.push({ role: "assistant", content: reply });
       currentQuestion = reply;
       typeInto(reply);
+      setChips(data.chips);
       maybePrefetch();
-      if (data.ready) setTimeout(toConfirm, reply.length * 22 + 500);
+      if (data.ready) setTimeout(toResults, reply.length * 22 + 500);
     } catch {
-      if (hasTitles()) toConfirm();
-      else fallbackToForm();
+      unavailable();
     } finally {
       busy = false;
     }

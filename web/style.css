@@ -53,17 +53,32 @@ button { font: inherit; cursor: pointer; }
   background: radial-gradient(circle, var(--glow) 0%, transparent 42%);
   opacity: var(--gA, 0.7); mix-blend-mode: screen; pointer-events: none;
   transition: opacity 1400ms linear, top 1800ms ease, background 1400ms linear;
-  animation: drift 46s ease-in-out infinite alternate;
+  animation: drift 60s ease-in-out infinite alternate;
 }
-@keyframes drift { 0% { transform: translate(-2.5vw, 0) scale(1); } 100% { transform: translate(2.5vw, -1.5vh) scale(1.05); } }
-#wash {
-  position: fixed; inset: -20%; z-index: -2; pointer-events: none; opacity: 0.5; mix-blend-mode: screen;
-  background: radial-gradient(60% 40% at 30% 30%, var(--wash-a, transparent), transparent 60%),
-              radial-gradient(50% 45% at 75% 65%, var(--wash-b, transparent), transparent 62%);
-  transition: background 1600ms linear;
-  animation: wash 60s ease-in-out infinite alternate;
+@keyframes drift { 0% { transform: translate(-4.5vw, 0) scale(1); } 100% { transform: translate(4.5vw, -3vh) scale(1.09); } }
+/* two cloud layers drifting in different directions at different speeds — a slow,
+   windy, alive movement in the color and space. Colors from --wash-* (set per minute). */
+#wash { position: fixed; inset: -30%; z-index: -2; pointer-events: none; mix-blend-mode: screen; }
+#wash::before, #wash::after {
+  content: ""; position: absolute; inset: 0; transition: background 1600ms linear;
+  will-change: transform;
 }
-@keyframes wash { 0% { transform: translate(-3%, 1%) scale(1.05); } 100% { transform: translate(3%, -2%) scale(1.12); } }
+#wash::before {
+  opacity: 0.9;
+  background: radial-gradient(46% 34% at 22% 24%, var(--wash-a, transparent), transparent 60%),
+              radial-gradient(40% 38% at 80% 58%, var(--wash-b, transparent), transparent 62%),
+              radial-gradient(44% 30% at 58% 10%, var(--wash-b, transparent), transparent 64%);
+  animation: cloudA 48s ease-in-out infinite alternate;
+}
+#wash::after {
+  opacity: 0.75;
+  background: radial-gradient(52% 40% at 70% 14%, var(--wash-a, transparent), transparent 60%),
+              radial-gradient(46% 36% at 15% 72%, var(--wash-b, transparent), transparent 62%),
+              radial-gradient(40% 30% at 38% 6%, var(--wash-a, transparent), transparent 64%);
+  animation: cloudB 70s ease-in-out infinite alternate;
+}
+@keyframes cloudA { 0% { transform: translate(-9%, 3%) scale(1.06); } 100% { transform: translate(9%, -6%) scale(1.24); } }
+@keyframes cloudB { 0% { transform: translate(8%, -4%) scale(1.14); } 100% { transform: translate(-10%, 7%) scale(1.28); } }
 #stars { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
 .tw { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px 1px rgba(255, 255, 255, 0.7); opacity: 0; }
 @keyframes tw { 0% { opacity: 0; transform: scale(0.4); } 45% { opacity: 0.85; transform: scale(1); } 100% { opacity: 0; transform: scale(0.6); } }
@@ -109,7 +124,9 @@ button { font: inherit; cursor: pointer; }
 .echo { width: 100%; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--sub); }
 .echo .row { transition: opacity 600ms ease; margin-bottom: 10px; }
 .echo .row .q-asked { color: var(--ink); opacity: 0.72; }          /* the question, flush left */
-.echo .row .a-given { color: var(--accent); padding-left: 18px; }   /* the answer, indented beneath */
+/* the answer, indented beneath — a warm tint DARKENED toward the ink so it stays
+   readable on the light sky (the raw accent is too pale to read). */
+.echo .row .a-given { color: color-mix(in srgb, var(--accent) 20%, var(--ink)); padding-left: 18px; font-weight: 600; }
 .halo {
   position: absolute; inset: -14px; border-radius: 26px; z-index: -1; pointer-events: none;
   background: radial-gradient(60% 120% at 50% 50%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 70%);
@@ -120,18 +137,16 @@ button { font: inherit; cursor: pointer; }
 .pulse { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
 .rip {
   position: absolute; inset: 0; border-radius: 16px; pointer-events: none;
-  /* outline-offset (not transform:scale) so the ring travels the SAME distance on
-     every side — a uniform ripple, not a wide-but-short ellipse. Color adapts:
+  /* a faint heartbeat that swells to 1.06× the answer bar and fades. Color adapts:
      light on a bright sky, a dark shadow at night (--rip-col, set per-minute). */
-  outline: 3px solid var(--rip-col, rgba(15, 20, 38, 0.6));
-  outline-offset: 0;
+  border: 3px solid var(--rip-col, rgba(15, 20, 38, 0.6));
   filter: blur(1.5px);
-  opacity: 0; will-change: outline-offset, opacity;
+  opacity: 0; will-change: transform, opacity;
 }
 @keyframes ripOut {
-  0% { outline-offset: 0; opacity: 0; }
+  0% { transform: scale(1); opacity: 0; }
   26% { opacity: 0.12; }
-  100% { outline-offset: 34px; opacity: 0; }
+  100% { transform: scale(1.06); opacity: 0; }
 }
 .rip.run { animation: ripOut 1.7s ease-out forwards; }
 .rip.dub { animation-duration: 1.5s; }
@@ -169,13 +184,16 @@ button { font: inherit; cursor: pointer; }
 .toolbar .spacer { flex: 1; }
 .result-summary { font-family: var(--mono); font-size: 12px; color: var(--sub); }
 .result-summary b { color: var(--good); }
+.tb-salary { display: flex; align-items: center; gap: 8px; }
+.tb-salary-val { font-family: var(--mono); font-size: 11.5px; color: var(--sub); min-width: 48px; }
+.tb-salary input[type="range"] { width: 120px; }
 
-/* ── the carousel of gauge cards ────────────────────────────────────────────── */
-.carousel { display: flex; flex-direction: column; align-items: center; gap: 9px; }
+/* ── the job board: a no-scroll vertical carousel ───────────────────────────── */
+.carousel { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
 .gcard {
   position: relative; width: 100%; overflow: hidden; isolation: isolate; padding: 0;
-  transition: background 1400ms ease, border-color 1400ms ease, width 420ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 420ms ease, filter 420ms ease;
+  transition: background 1400ms ease, border-color 1400ms ease, width 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 380ms ease, filter 380ms ease;
 }
 .gcard .fill {
   position: absolute; inset: 0; z-index: -1; width: 0%;
@@ -183,26 +201,51 @@ button { font: inherit; cursor: pointer; }
   border-right: 2px solid color-mix(in srgb, var(--accent) 82%, transparent);
   transition: width 1000ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-.gcard.is-near { width: 88%; opacity: 0.62; filter: blur(0.6px); }
-.gcard.is-far { width: 74%; opacity: 0.34; filter: blur(2px); }
-.gcard.is-masked .gcard-head { pointer-events: none; }
-.gcard-head { width: 100%; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 15px 17px 6px; background: none; border: 0; text-align: left; color: inherit; }
-.gcard-id .role { font-weight: 650; font-size: 15px; }
-.gcard.is-focus .gcard-id .role { font-size: 16px; }
-.gcard-id .org { font-size: 12.5px; color: var(--sub); margin-top: 1px; }
+.gcard-head { width: 100%; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 15px 18px 8px; }
+.gcard-id .role { font-weight: 650; font-size: 15px; line-height: 1.25; }
+.gcard-id .org { font-size: 12.5px; color: var(--sub); margin-top: 2px; }
 .fitcorner { text-align: right; white-space: nowrap; }
 .tier { font-weight: 700; font-size: 14px; color: color-mix(in srgb, var(--accent) 72%, var(--ink)); }
 .tier.strong { color: var(--good); }
 .rank { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--sub); margin-top: 2px; }
-.why { list-style: none; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; padding: 0 17px 15px; }
+.why { list-style: none; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; padding: 0 18px 12px; }
 .why li { font-family: var(--mono); font-size: 10.5px; color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 6px; padding: 2px 7px; }
-.detail { padding: 0 17px 16px; border-top: 1px dashed var(--card-brd); margin-top: 4px; padding-top: 12px; }
-.desc { font-size: 13px; color: var(--sub); line-height: 1.6; }
-.detail-meta { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
+/* bulleted job description — only on the primary card */
+.desc-bullets { list-style: none; margin: 0; padding: 2px 18px 4px; display: flex; flex-direction: column; gap: 6px; }
+.desc-bullets li { position: relative; font-size: 13px; color: var(--ink); opacity: 0.82; line-height: 1.45; padding-left: 16px; }
+.desc-bullets li::before { content: "›"; position: absolute; left: 2px; color: var(--accent); font-weight: 700; }
+.detail-meta { display: flex; gap: 12px; flex-wrap: wrap; padding: 8px 18px 0; font-size: 12px; }
 .detail-meta .salary { color: var(--good); font-family: var(--mono); font-weight: 600; }
 .detail-meta span:empty { display: none; }
-.acts { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-.applied-q { font-size: 12.5px; color: var(--sub); width: 100%; }
+.acts { display: flex; align-items: center; gap: 8px; padding: 14px 18px 16px; flex-wrap: wrap; }
+
+/* small cards by default — title · place on the left, fit + rank on the right, with
+   salary · posted always visible. Click a card to expand the full detail. */
+.gcard { cursor: pointer; }
+.gcard .why, .gcard .desc-bullets, .gcard .acts { display: none; } /* expand-only */
+.gcard.expanded .why { display: flex; }
+.gcard.expanded .desc-bullets { display: flex; }
+.gcard.expanded .acts { display: flex; }
+.gcard.expanded { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, 0 18px 54px rgba(15, 20, 38, 0.22); }
+.gcard.expanded .role { font-size: 18px; }
+.gcard .role { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62ch; }
+.gcard.expanded .role { white-space: normal; }
+/* the compact meta (salary · posted) is ALWAYS visible on the small card */
+.detail-meta { padding: 2px 18px 14px; }
+.gcard.expanded .detail-meta { padding-top: 10px; }
+
+/* ── board mode: ONE continuous scroll surface. The chat sits centered at the top;
+   scroll down and the board flows up while the chat bar STICKS to the top; scroll back
+   to the top and the chat re-centers. ─────────────────────────────────────────────── */
+body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 48px; }
+body.board #chat-view { display: contents; } /* dissolve so the bar can stick across the whole page */
+body.board .transcript { width: min(760px, 100%); margin: 30vh auto 0; max-height: 22vh; overflow: hidden; }
+body.board .barwrap { position: sticky; top: 10px; z-index: 6; width: min(760px, 100%); margin: 8px auto 0; }
+body.board .chips { display: none; }
+body.board #results-view { margin-top: 16px; }
+/* fresh search: the results flow up beneath the chat bar as it settles into place */
+@keyframes flowUp { from { opacity: 0; transform: translateY(34px); } to { opacity: 1; transform: none; } }
+body.board #results-view.flow-up { animation: flowUp 620ms cubic-bezier(0.22, 1, 0.36, 1); }
 
 /* buttons */
 .btn { font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 8px 13px; border: 1px solid var(--card-brd); background: var(--field-bg); color: var(--ink); text-decoration: none; display: inline-block; }
@@ -298,7 +341,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #glow, #wash, .halo, .tw.on, .chat-say .cur, .spinner, .rip.run { animation: none !important; }
+  #glow, #wash, #wash::before, #wash::after, .halo, .tw.on, .chat-say .cur, .spinner, .rip.run { animation: none !important; }
   .pulse { display: none; }
   #sky, #glow, #wash, .glass, .gcard, .gcard .fill, .drawer-body, .rail-body, body { transition: none !important; }
   .gcard.flying { animation: none; opacity: 0; }
