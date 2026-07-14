@@ -100,6 +100,15 @@ sources:
     - techtree
     - adzuna
     - usajobs
+  # Adzuna is the general-market firehose (all sectors, nationwide). It caps a page
+  # at 50 results, so `pages` × 50 ≈ jobs/query before dedup. The remote lens is
+  # selective, so fetch deep enough that plenty survive it. Env override: ADZUNA_PAGES.
+  adzuna:
+    pages: 3 # 3×50 = up to 150 jobs/query/harvest; raise for more breadth
+  # USAJOBS caps a page at 500 (default 25) — one big page covers most federal
+  # queries. Env override: USAJOBS_RESULTS_PER_PAGE.
+  usajobs:
+    results_per_page: 500
   # Depth (per-company ATS) only runs when --watchlist is passed; defaults are fine.
   funnel:
     auto_grow: false # a read-only harvest never mutates a watchlist file

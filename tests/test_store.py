@@ -90,6 +90,45 @@ def test_normalize_strips_adzuna_remote_artifact():
     )
 
 
+def test_normalize_remote_from_body():
+    # The keyed sources (Adzuna/USAJOBS) carry no remote flag and lose their
+    # "(Remote)" artifact, so a genuinely-remote role reads onsite from title+loc
+    # alone. The body scan recovers it — this is the fix for empty remote searches.
+    r = store.normalize_job(
+        _job(
+            "b1",
+            "Front End Developer",
+            location="Austin, TX (Remote)",
+            text="We are hiring a front end developer. This is a fully remote position open to any US state.",
+        )
+    )
+    assert r["remote"] == "remote"
+    # explicit negation in the body keeps an on-site role onsite
+    assert (
+        store.normalize_job(
+            _job(
+                "b2",
+                "Front End Developer",
+                location="Austin, TX (Remote)",
+                text="On-site only. This is not a remote position; you must work from our Austin office.",
+            )
+        )["remote"]
+        == "onsite"
+    )
+    # incidental "remote" in prose must NOT flip an on-site job (no false positive)
+    assert (
+        store.normalize_job(
+            _job(
+                "b3",
+                "Systems Engineer",
+                location="Dayton, OH (Remote)",
+                text="You will administer remote servers and support remote teams across our data centers.",
+            )
+        )["remote"]
+        == "onsite"
+    )
+
+
 # ── upsert dedup + refresh ────────────────────────────────────────────────────
 def test_upsert_dedup_and_refresh(db):
     assert store.upsert_jobs([_job("u1", "Accountant", salary="$50k")], path=db) == 1
