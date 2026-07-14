@@ -29,6 +29,8 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from job_radar.scoring import remote_posting
+
 _ET = ZoneInfo("America/New_York")
 
 # ── config (env-overridable) ──────────────────────────────────────────────────
@@ -45,47 +47,10 @@ MAX_ROWS = int(os.environ.get("JOBFITR_MAX_ROWS", "50000"))  # LRU cap (saturati
 BODY_CAP = 2000
 
 # ── tag derivation (rule-based only — no LLM, no fabrication) ──────────────────
-# Title/location is short and unambiguous, so a liberal match is safe there.
-_REMOTE_RE = re.compile(r"remote|anywhere|work from home|\bwfh\b", re.I)
-# The description body is prose, where a bare "remote" false-positives ("remote
-# servers", "the remote teams you support"). So require phrases that actually
-# denote THIS role's remoteness. This is what recovers keyed-source jobs (Adzuna/
-# USAJOBS carry no remote flag and lose their "(Remote)" label above) that are
-# genuinely remote but never say so in the title or city.
-_REMOTE_BODY_RE = re.compile(
-    r"\b(?:fully|100%|completely|permanently)\s+remote\b"
-    r"|\bremote[- ](?:first|friendly|eligible|position|role|opportunity|work|based)\b"
-    r"|\b(?:this|the)\s+(?:is\s+a\s+)?remote\s+(?:position|role|job|opportunity)\b"
-    r"|\bwork[- ]from[- ]home\b|\bwork\s+from\s+home\b"
-    r"|\btelecommut\w*|\btelework\w*"
-    r"|\bremote\s+(?:within|in|across|throughout|anywhere)\b",
-    re.I,
-)
-# Suppress a body match when the text explicitly negates remoteness, so an
-# "on-site only" posting that mentions "remote work" in passing stays onsite.
-_REMOTE_NEG_RE = re.compile(
-    r"\bno[t]?\s+(?:a\s+)?remote\b|\bno\s+remote\b"
-    r"|\bon[- ]?site\s+only\b|\bin[- ]office\s+only\b|\bnot\s+(?:a\s+)?remote\s+(?:position|role|job)\b",
-    re.I,
-)
-
-
-# ═══════════════════════════════════════════════════════════════
-# _is_remote()
-# ═══════════════════════════════════════════════════════════════
-# True when a role is remote. Title/location match liberally; the
-# body must hit a role-remoteness phrase AND not be negated — that
-# recovers Adzuna/USAJOBS jobs that are remote but only say so in
-# the description.
-# ═══════════════════════════════════════════════════════════════
-def _is_remote(title: str, loc: str, body: str) -> bool:
-    if _REMOTE_RE.search(f"{title} {loc}"):
-        return True
-    if body and _REMOTE_BODY_RE.search(body) and not _REMOTE_NEG_RE.search(body):
-        return True
-    return False
-
-
+# Remote is detected by job_radar's shared `remote_posting` predicate (reads
+# title/location + the body, with a negation guard) — one source of truth, since
+# job_radar is where the "(Remote)" noise originates and the gate already lives.
+# seniority/salary_band are derived below.
 _SENIORITY = [
     ("lead", re.compile(r"\b(lead|principal|staff|head of|vp|director|chief)\b", re.I)),
     ("senior", re.compile(r"\bsenior\b|\bsr\.?\b", re.I)),
@@ -167,7 +132,7 @@ def normalize_job(job: dict) -> dict:
         "body": text,
         "category": _s(job.get("department")) or _s(job.get("category")),
         "employment_type": _s(job.get("employment_type")),
-        "remote": "remote" if _is_remote(title, loc, text) else "onsite",
+        "remote": "remote" if remote_posting(title, loc, text) else "onsite",
         "seniority": _seniority(title),
         "salary_band": _salary_band(salary),
     }
