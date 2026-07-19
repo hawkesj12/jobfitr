@@ -17,25 +17,24 @@ per request: your 5 answers ──▶ score the cache ──▶ ranked links
 
 ## Quickstart (local)
 
-Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/). jobfitr depends on the `job-radar` package; until it's on PyPI, install it from a local checkout next door.
+Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/). jobfitr pulls the `job-radar` engine automatically from PyPI.
 
 ```bash
-# 1. get both repos side by side
-git clone https://github.com/hawkesj12/job-radar
 git clone https://github.com/hawkesj12/jobfitr
 cd jobfitr
 
-# 2. create a venv and install (job-radar editable, then jobfitr with extras)
+# create a venv and install jobfitr + extras (job-radar comes from PyPI)
 uv venv
-uv pip install -e ../job-radar
 uv pip install -e ".[web,dev]"
 
-# 3. build the cache from the free, no-key job sources
+# build the cache from the free, no-key job sources
 jobfitr-snapshot
 
-# 4. serve the app
+# serve the app
 jobfitr-serve
 ```
+
+> **Hacking on the engine too?** To run against a local `job-radar` checkout instead of the PyPI release, clone it next door and install it editable first: `uv pip install -e ../job-radar`.
 
 Open **http://localhost:8000**, answer the five questions, and hit **Find my jobs**.
 
