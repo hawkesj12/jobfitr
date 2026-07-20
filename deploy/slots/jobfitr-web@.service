@@ -1,0 +1,37 @@
+# jobfitr web API — a SLOT template. Instantiate once per slot:
+#   systemctl enable --now jobfitr-web@blue jobfitr-web@green
+# Both slots run all the time (both "warm", like Azure App Service slots); the
+# blue-green flip only changes which one Caddy routes jobfitr.app at. %i = the
+# slot name (blue|green). Each slot is its own release dir + venv under /opt/jobfitr/%i.
+# Install: /etc/systemd/system/jobfitr-web@.service
+
+[Unit]
+Description=jobfitr web API (uvicorn) — slot %i
+After=network.target
+
+[Service]
+User=jobfitr
+Group=jobfitr
+WorkingDirectory=/opt/jobfitr/%i/jobfitr
+# jobfitr.env  = shared secrets (OpenRouter/Adzuna keys) + JOBFITR_JOBS_PATH (the
+#                shared harvest snapshot both slots seed from) + ADZUNA_DAILY_CEILING.
+# slot-%i.env  = the PER-SLOT values: SLOT_PORT (blue=8000, green=8001) AND
+#                JOBFITR_DB_PATH=/opt/jobfitr/%i/data/jobs.db — each slot gets its OWN
+#                SQLite store so a schema-changing flip/rollback can't corrupt the
+#                other slot's data. slot-%i.env is read LAST so it wins on overlap.
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+EnvironmentFile=/etc/jobfitr/slot-%i.env
+ExecStart=/opt/jobfitr/%i/jobfitr/.venv/bin/jobfitr-serve --host 127.0.0.1 --port ${SLOT_PORT}
+Restart=always
+RestartSec=3
+
+# Hardening — the web process reads/writes its OWN per-slot store dir (the live-fetch
+# hybrid upserts fetched jobs into /opt/jobfitr/%i/data/jobs.db), nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/%i/data
+
+[Install]
+WantedBy=multi-user.target
