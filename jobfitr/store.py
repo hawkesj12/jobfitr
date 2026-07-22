@@ -29,6 +29,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from job_radar.dedup import ats_from_url
 from job_radar.discover import _norm_name as _jr_norm_name
 from job_radar.scoring import remote_posting
 
@@ -375,6 +376,72 @@ def record_resolution(
                 "variant": variant,
                 "now": now,
             },
+        )
+
+
+def board_evidence(path: str | None = None) -> dict[str, set]:
+    """What each company's OWN job URLs say about which board it owns.
+
+    An independent authority we already hold and never used. When an aggregator hands
+    us a posting for company X whose apply link is jobs.ashbyhq.com/Y, that is X
+    asserting ownership of Y — not an inference we made. Crucially it works for every
+    platform, including Ashby and Lever, which expose no company name and therefore
+    cannot be checked any other way.
+
+    Returns {normalized_name: {(ats, slug), ...}}. A company can legitimately map to
+    more than one board, so callers must treat a match as agreement rather than
+    requiring a single value.
+    """
+    out: dict[str, set] = {}
+    with _conn(path) as c:
+        rows = c.execute(
+            "SELECT company, url FROM jobs WHERE company <> '' AND url <> ''"
+        ).fetchall()
+    for company, url in rows:
+        got = ats_from_url(url or "")
+        if not got:
+            continue
+        out.setdefault(norm_company(company), set()).add((got[0], got[1].lower()))
+    return out
+
+
+def audit_resolutions(path: str | None = None) -> dict:
+    """Check every resolution against the apply-URL evidence.
+
+    Returns {'checked', 'agree', 'disagree': [rows]}. A disagreement is a resolution
+    contradicted by the company's own links — the strongest false-binding signal
+    available, and the only one that reaches Ashby/Lever.
+    """
+    truth = board_evidence(path)
+    agree, disagree = 0, []
+    with _conn(path) as c:
+        rows = c.execute(
+            "SELECT name_key,name,ats,slug,matched_variant,roles FROM companies "
+            "WHERE status='resolved' AND ats IS NOT NULL AND slug IS NOT NULL"
+        ).fetchall()
+    for r in rows:
+        evidence = truth.get(r["name_key"])
+        if not evidence:
+            continue  # no URL evidence for this company — not checkable, not wrong
+        if (r["ats"], (r["slug"] or "").lower()) in evidence:
+            agree += 1
+        else:
+            disagree.append({**dict(r), "url_says": sorted(evidence)})
+    return {"checked": agree + len(disagree), "agree": agree, "disagree": disagree}
+
+
+def quarantine(name: str, reason: str = "", path: str | None = None) -> None:
+    """Retract a resolution that the evidence contradicts.
+
+    Marked 'quarantined' rather than deleted or reset to unresolved: the wrong slug
+    and the variant that produced it stay on the row, so the mistake stays legible
+    and the same bad guess is not simply made again tomorrow.
+    """
+    with _conn(path) as c:
+        c.execute(
+            "UPDATE companies SET status='quarantined', matched_variant=? "
+            "WHERE name_key=?",
+            (f"QUARANTINED:{reason}"[:120], norm_company(name)),
         )
 
 

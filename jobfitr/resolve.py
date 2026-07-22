@@ -107,6 +107,20 @@ def resolve_batch(
         if o.get("outcome") == "refused" and o.get("name") and o["name"] not in found
     }
 
+    # The apply URLs we already hold are an independent statement of who owns which
+    # board — and the ONLY ownership check that reaches Ashby and Lever, which expose
+    # no company name. A candidate contradicted by a company's own links is rejected
+    # here rather than written and audited later. Measured: this catches bindings the
+    # Greenhouse name check structurally cannot, e.g. "Runway" -> ashby/runway (4
+    # roles, an FP&A startup) when its own postings link to ashby/runway-ml (41 roles).
+    evidence = store.board_evidence(path=path)
+    contradicted = []
+    for name, e in list(found.items()):
+        seen = evidence.get(store.norm_company(name))
+        if seen and (e["ats"], (e["slug"] or "").lower()) not in seen:
+            contradicted.append((name, e, sorted(seen)))
+            del found[name]
+
     for name in names:
         entry = found.get(name)
         store.record_resolution(
@@ -121,6 +135,7 @@ def resolve_batch(
         "checked": len(names),
         "resolved": len(found),
         "dead": len(refused),
+        "contradicted": len(contradicted),
         "unresolved": len(names) - len(found) - len(refused),
     }
 
@@ -220,6 +235,16 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stats", action="store_true", help="print ledger state and exit")
+    ap.add_argument(
+        "--audit",
+        action="store_true",
+        help="re-check existing resolutions against apply-URL evidence and report",
+    )
+    ap.add_argument(
+        "--quarantine",
+        action="store_true",
+        help="with --audit: retract the contradicted resolutions",
+    )
     args = ap.parse_args(argv)
 
     load_dotenv()
@@ -233,6 +258,26 @@ def main(argv=None) -> int:
             f"resolved: {s['resolved']:,}  unresolved: {s['unresolved']:,}  "
             f"dead: {s.get('dead', 0):,}  never checked: {s['never_checked']:,}"
         )
+        return 0
+
+    if args.audit:
+        a = store.audit_resolutions()
+        print(
+            f"audit: {a['checked']:,} resolutions have apply-URL evidence -> "
+            f"{a['agree']:,} agree, {len(a['disagree']):,} CONTRADICTED"
+        )
+        for d in a["disagree"]:
+            says = ", ".join(f"{x[0]}/{x[1]}" for x in d["url_says"][:3])
+            print(
+                f"   {d['name'][:30]:32} we say {d['ats']}/{d['slug']:<22} "
+                f"its links say {says}  (variant={d['matched_variant']})"
+            )
+        if a["disagree"] and args.quarantine:
+            for d in a["disagree"]:
+                store.quarantine(d["name"], reason=f"url-says:{d['url_says'][0][1]}")
+            print(f"   -> quarantined {len(a['disagree'])} contradicted resolution(s)")
+        elif a["disagree"]:
+            print("   -> re-run with --quarantine to retract them")
         return 0
 
     if args.discover:

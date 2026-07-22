@@ -559,3 +559,88 @@ def test_cdx_failure_is_reported_not_swallowed(db, monkeypatch):
     assert out["mined"] == 0
     assert len(out["mine_errors"]) == 2, "every failing pattern must be named"
     assert "greenhouse" in out["mine_errors"][0]
+
+
+# ── apply-URL evidence: the ownership authority that reaches Ashby/Lever ──────
+def test_board_evidence_reads_ownership_out_of_stored_urls(db):
+    store.upsert_jobs(
+        [
+            _job("https://jobs.ashbyhq.com/runway-ml/abc", "Engineer", company="Runway"),
+            _job("https://boards.greenhouse.io/stripe/jobs/1", "Engineer", company="Stripe"),
+            _job("https://adzuna.com/land/ad/123", "Engineer", company="Some Agency"),
+        ],
+        path=db,
+    )
+    ev = store.board_evidence(path=db)
+    assert ev[store.norm_company("Runway")] == {("ashby", "runway-ml")}
+    assert ev[store.norm_company("Stripe")] == {("greenhouse", "stripe")}
+    assert store.norm_company("Some Agency") not in ev  # aggregator link carries none
+
+
+def test_audit_flags_a_resolution_its_own_links_contradict(db):
+    """The real one: 'Runway' resolved to ashby/runway (4 roles, an FP&A startup)
+    while its own postings link to ashby/runway-ml (41 roles, the AI video company).
+    Ashby exposes no owner name, so no other check can see this."""
+    store.upsert_jobs(
+        [_job("https://jobs.ashbyhq.com/runway-ml/abc", "Engineer", company="Runway")],
+        path=db,
+    )
+    store.record_resolution(
+        "Runway", {"ats": "ashby", "slug": "runway", "roles": 4}, variant="runway", path=db
+    )
+    a = store.audit_resolutions(path=db)
+    assert a["checked"] == 1 and a["agree"] == 0
+    assert a["disagree"][0]["slug"] == "runway"
+    assert ("ashby", "runway-ml") in a["disagree"][0]["url_says"]
+
+
+def test_audit_passes_a_resolution_the_links_confirm(db):
+    store.upsert_jobs(
+        [_job("https://boards.greenhouse.io/stripe/jobs/1", "Eng", company="Stripe")],
+        path=db,
+    )
+    store.record_resolution(
+        "Stripe", {"ats": "greenhouse", "slug": "stripe", "roles": 9}, path=db
+    )
+    a = store.audit_resolutions(path=db)
+    assert (a["agree"], a["disagree"]) == (1, [])
+
+
+def test_audit_ignores_companies_with_no_url_evidence(db):
+    """No evidence is not evidence of wrongness — most companies arrive via
+    aggregators whose links point at themselves."""
+    store.upsert_jobs(
+        [_job("https://adzuna.com/x", "Eng", company="Opaque Co")], path=db
+    )
+    store.record_resolution(
+        "Opaque Co", {"ats": "ashby", "slug": "opaque", "roles": 3}, path=db
+    )
+    assert store.audit_resolutions(path=db)["checked"] == 0
+
+
+def test_a_company_may_legitimately_own_several_boards(db):
+    store.upsert_jobs(
+        [
+            _job("https://jobs.ashbyhq.com/acme/1", "Eng", company="Acme"),
+            _job("https://boards.greenhouse.io/acme/jobs/2", "Eng", company="Acme"),
+        ],
+        path=db,
+    )
+    store.record_resolution("Acme", {"ats": "ashby", "slug": "acme", "roles": 2}, path=db)
+    assert store.audit_resolutions(path=db)["agree"] == 1
+
+
+def test_quarantine_retracts_but_keeps_the_evidence(db):
+    """Marked, not deleted — the wrong slug and the variant that produced it stay
+    legible, and the same bad guess is not simply remade tomorrow."""
+    store.upsert_jobs([_job("u1", "Eng", company="Runway")], path=db)
+    store.record_resolution(
+        "Runway", {"ats": "ashby", "slug": "runway", "roles": 4}, path=db
+    )
+    store.quarantine("Runway", reason="url-says:runway-ml", path=db)
+    assert store.resolved_companies(path=db) == []
+    assert store.unresolved_companies(path=db) == []  # terminal, not re-probed
+    with store._conn(db) as c:
+        row = c.execute("SELECT status,slug,matched_variant FROM companies").fetchone()
+    assert row["status"] == "quarantined" and row["slug"] == "runway"
+    assert "runway-ml" in row["matched_variant"]
