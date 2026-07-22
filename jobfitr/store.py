@@ -378,6 +378,44 @@ def record_resolution(
         )
 
 
+def seed_companies_from_watchlist(
+    watchlist_path: str | os.PathLike, path: str | None = None
+) -> int:
+    """Import a curated watchlist as already-resolved companies.
+
+    The 94 hand-verified entries in deploy/tech-watchlist.json were each live-probed
+    before being committed, so re-probing them would spend requests to re-learn a fact
+    we already trust. Seeding them also stops them appearing as 'unresolved' work and
+    crowding out the companies that genuinely need discovery.
+
+    Idempotent: re-seeding refreshes the same rows rather than duplicating them.
+    """
+    try:
+        with open(watchlist_path, encoding="utf-8") as f:
+            companies = json.load(f).get("companies", [])
+    except (OSError, json.JSONDecodeError):
+        return 0
+    n = 0
+    for c in companies:
+        name, ats, slug = c.get("name"), c.get("ats"), c.get("slug")
+        if not (name and ats and slug):
+            continue
+        record_resolution(
+            name,
+            {
+                "ats": ats,
+                "slug": slug,
+                "host": c.get("host"),
+                "site": c.get("site"),
+                "roles": None,
+            },
+            variant="curated",
+            path=path,
+        )
+        n += 1
+    return n
+
+
 def resolved_companies(path: str | None = None) -> list[dict]:
     """Every resolved board, richest first — the rows that graduate into a watchlist."""
     with _conn(path) as c:

@@ -58,13 +58,34 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
 
     `cfg` should be a permissive Config (broad titles, remote_only False, no
     excludes) so the cache holds the broad universe; the per-user narrow lens is
-    applied later at request time. `watchlist_path` may be None (skips ATS depth
-    sources — breadth boards still run).
+    applied later at request time.
+
+    The company universe comes from the STORE, not a file. `watchlist_path` is now
+    only a seed: its curated entries are imported into the ledger once, and from then
+    on the ledger — which also holds everything resolution discovered — is the source
+    of truth. That is what makes resolving a company actually produce jobs; without
+    this the ledger was a table nothing read.
     """
     # Source fetchers read config.active() for UA/timeout; set it once here. Safe:
     # the harvester is a single-threaded batch job, unlike the concurrent server.
     config.set_active(cfg)
-    rows, _discovered, errors = engine.harvest(cfg, watchlist_path)
+
+    companies = _harvest_universe(watchlist_path)
+    rows, discovered, errors = engine.harvest(cfg, companies=companies)
+
+    # Discovery now RETURNS candidates instead of appending to a file, so the store
+    # is where they land. Best-effort: a ledger hiccup must not fail the harvest.
+    if discovered:
+        try:
+            from . import store
+
+            for d in discovered:
+                store.record_resolution(
+                    d.get("name") or d.get("slug", ""), d, variant="funnel"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     jobs = [_clean_row(r) for r in rows]
 
     source_ids = sorted({s for r in jobs for s in _as_list(r.get("sources"))})
@@ -95,6 +116,36 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
     tmp.write_text(json.dumps(snapshot, default=_json_default) + "\n")
     os.replace(tmp, out)  # atomic on POSIX — an interrupted write leaves the old file
     return meta
+
+
+def _harvest_universe(watchlist_path) -> list[dict]:
+    """The companies to poll: the ledger, seeded once from the curated watchlist.
+
+    Falls back to reading the watchlist directly if the store is unavailable, so a
+    harvest never silently loses its whole depth lane over a store problem — the
+    depth lane is ~40% of the corpus and 23x more productive per company than breadth.
+    """
+    try:
+        from . import store
+
+        store.init()
+        if watchlist_path and not store.resolved_companies():
+            n = store.seed_companies_from_watchlist(watchlist_path)
+            if n:
+                print(f"seeded {n} curated companies into the resolution ledger")
+        universe = store.resolved_companies()
+        if universe:
+            return universe
+    except Exception as e:  # noqa: BLE001
+        print(f"note: ledger unavailable ({type(e).__name__}) — reading the watchlist")
+
+    if not watchlist_path:
+        return []
+    try:
+        with open(watchlist_path, encoding="utf-8") as f:
+            return json.load(f).get("companies", [])
+    except (OSError, json.JSONDecodeError):
+        return []
 
 
 def _as_list(v):

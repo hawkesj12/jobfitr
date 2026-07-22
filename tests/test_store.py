@@ -478,3 +478,67 @@ def test_unresolved_still_expires_but_dead_does_not(db):
         stale = time.time() - (store.UNRESOLVED_RETRY_DAYS + 1) * 86400
         c.execute("UPDATE companies SET checked_at=?", (stale,))
     assert store.unresolved_companies(path=db) == ["Late Adopter"]
+
+
+# ── seeding + the ledger->harvest wiring ─────────────────────────────────────
+def test_seed_imports_the_curated_watchlist_as_resolved(db, tmp_path):
+    """The 94 curated entries were each live-probed before being committed. Seeding
+    them stops us spending requests to re-learn a fact we already trust, and stops
+    them crowding the discovery queue."""
+    wl = tmp_path / "watchlist.json"
+    wl.write_text(
+        json.dumps(
+            {
+                "companies": [
+                    {"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"},
+                    {
+                        "name": "Barry-Wehmiller",
+                        "ats": "workday",
+                        "slug": "barrywehmiller",
+                        "host": "wd1",
+                        "site": "BWCareers",
+                    },
+                    {"name": "Broken", "ats": "greenhouse"},  # no slug -> skipped
+                ]
+            }
+        )
+    )
+    assert store.seed_companies_from_watchlist(wl, path=db) == 2
+    got = {c["name"]: c for c in store.resolved_companies(path=db)}
+    assert set(got) == {"Anthropic", "Barry-Wehmiller"}
+    assert (got["Barry-Wehmiller"]["host"], got["Barry-Wehmiller"]["site"]) == (
+        "wd1",
+        "BWCareers",
+    )
+    assert got["Anthropic"]["matched_variant"] == "curated"
+
+
+def test_seeding_is_idempotent(db, tmp_path):
+    wl = tmp_path / "w.json"
+    wl.write_text(
+        json.dumps(
+            {"companies": [{"name": "Acme", "ats": "ashby", "slug": "acme"}]}
+        )
+    )
+    store.seed_companies_from_watchlist(wl, path=db)
+    store.seed_companies_from_watchlist(wl, path=db)
+    assert len(store.resolved_companies(path=db)) == 1
+
+
+def test_a_seeded_company_is_never_queued_for_discovery(db, tmp_path):
+    _seed_companies(db, [("Anthropic", 5), ("Unknown Co", 3)])
+    wl = tmp_path / "w.json"
+    wl.write_text(
+        json.dumps(
+            {"companies": [{"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"}]}
+        )
+    )
+    store.seed_companies_from_watchlist(wl, path=db)
+    assert store.unresolved_companies(path=db) == ["Unknown Co"]
+
+
+def test_missing_or_corrupt_watchlist_seeds_nothing(db, tmp_path):
+    assert store.seed_companies_from_watchlist(tmp_path / "absent.json", path=db) == 0
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    assert store.seed_companies_from_watchlist(bad, path=db) == 0

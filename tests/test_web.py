@@ -127,7 +127,7 @@ def test_snapshot_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(
         snapshot.engine,
         "harvest",
-        lambda cfg, wl: (rows, [], ["boom: himalayas timed out"]),
+        lambda cfg, *a, **kw: (rows, [], ["boom: himalayas timed out"]),
     )
     out = tmp_path / "jobs.json"
     meta = snapshot.build_snapshot(Config(), None, str(out))
@@ -350,3 +350,67 @@ def test_static_front_end_is_served():
     assert "text/html" in root.headers["content-type"]
     assert "jobfitr" in root.text
     assert c.get("/api/health").json()["ok"] is True
+
+
+# ── the ledger drives the harvest (the wiring that makes resolution pay) ─────
+def test_harvest_polls_the_LEDGER_not_the_watchlist_file(tmp_path, monkeypatch):
+    """REGRESSION: the resolution ledger was a table nothing read. Resolving a company
+    produced zero extra jobs until build_snapshot fed the ledger to the engine."""
+    from job_radar.config import Config
+
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "led.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    store.init()
+    store.record_resolution(
+        "Discovered Co", {"ats": "greenhouse", "slug": "discovered", "roles": 9}
+    )
+
+    seen = {}
+    monkeypatch.setattr(
+        snapshot.engine,
+        "harvest",
+        lambda cfg, *a, **kw: (seen.update(kw) or ([], [], [])),
+    )
+    snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
+    assert [c["slug"] for c in seen["companies"]] == ["discovered"]
+
+
+def test_discovered_companies_flow_back_into_the_ledger(tmp_path, monkeypatch):
+    """Discovery RETURNS candidates now instead of appending to a file, so the store
+    has to catch them or they are lost."""
+    from job_radar.config import Config
+
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "led2.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    store.init()
+    found = [{"name": "Fresh Co", "ats": "ashby", "slug": "freshco", "roles": 4}]
+    monkeypatch.setattr(
+        snapshot.engine, "harvest", lambda cfg, *a, **kw: ([], found, [])
+    )
+    snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
+    assert [c["slug"] for c in store.resolved_companies()] == ["freshco"]
+
+
+def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
+    tmp_path, monkeypatch
+):
+    """The depth lane is ~40% of the corpus and 23x more productive per company than
+    breadth — it must never silently vanish because the store had a bad day."""
+    import json as _json
+
+    from job_radar.config import Config
+
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "led3.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    wl = tmp_path / "wl.json"
+    wl.write_text(
+        _json.dumps({"companies": [{"name": "Seed Co", "ats": "lever", "slug": "seedco"}]})
+    )
+    seen = {}
+    monkeypatch.setattr(
+        snapshot.engine,
+        "harvest",
+        lambda cfg, *a, **kw: (seen.update(kw) or ([], [], [])),
+    )
+    snapshot.build_snapshot(Config(), str(wl), str(tmp_path / "out.json"))
+    assert [c["slug"] for c in seen["companies"]] == ["seedco"]
