@@ -506,3 +506,20 @@ def test_load_dotenv_still_reads_a_readable_file(tmp_path):
     _os.environ.pop("BETA", None)
     assert snapshot.load_dotenv(str(env)) == 2
     assert _os.environ["ALPHA"] == "1" and _os.environ["BETA"] == "2"
+
+
+def test_missing_harvest_config_warns_loudly(tmp_path, monkeypatch, capsys):
+    """REGRESSION: the config is resolved relative to the CWD, and falling through to
+    job_radar's built-in defaults is a cliff, not a soft default — those defaults are
+    narrow and tech-only. A harvest launched from the wrong directory silently
+    returned ~1,700 jobs instead of ~20,000, with no error at all."""
+    monkeypatch.chdir(tmp_path)
+    assert snapshot._resolve_config(None) is None
+    assert "NARROW" in capsys.readouterr().out
+
+
+def test_harvest_config_is_found_from_the_repo_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "web-harvest.example.yaml").write_text("profile: {}\n")
+    assert snapshot._resolve_config(None) == "web-harvest.example.yaml"
+    assert "NARROW" not in capsys.readouterr().out

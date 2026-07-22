@@ -221,12 +221,24 @@ def load_dotenv(path: str | os.PathLike = ".env") -> int:
 
 
 def _resolve_config(explicit: str | None) -> str | None:
+    """Find the harvest config, relative to the CURRENT WORKING DIRECTORY.
+
+    Falling through to None is a real cliff, not a soft default: job_radar's built-in
+    config is narrow and tech-only, so a harvest launched from the wrong directory
+    silently returns ~1,700 jobs instead of ~20,000 — no error, no warning, just a
+    much smaller corpus. Measured on the box 2026-07-22. Hence the loud note below.
+    """
     if explicit:
         return explicit
     for c in _CONFIG_CANDIDATES:
         if Path(c).exists():
             return c
-    return None  # pure defaults (still a valid, if narrow, harvest)
+    print(
+        f"⚠ no harvest config found in {Path.cwd()} (looked for "
+        f"{', '.join(_CONFIG_CANDIDATES)}) — falling back to job_radar's NARROW "
+        "defaults. Expect a much smaller harvest; run from the repo root."
+    )
+    return None
 
 
 def main(argv=None) -> int:

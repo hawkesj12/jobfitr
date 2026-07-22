@@ -28,7 +28,14 @@ if [[ ! -x "$bin" ]]; then
 	exit 1
 fi
 
-# --watchlist turns on the DEPTH lane: ~94 verified tech companies' ATS feeds
-# (Greenhouse/Lever/Ashby/SmartRecruiters). Read from the SAME slot as the binary so
-# the watchlist and the harvester that reads it are always the same release.
+# MUST run from the slot root. jobfitr-snapshot resolves its harvest config
+# (web-harvest.yaml, then web-harvest.example.yaml) RELATIVE TO THE WORKING DIRECTORY,
+# and falls back to job_radar's built-in defaults when it finds neither. Those defaults
+# are narrow and tech-only — a harvest that ran from anywhere else quietly produced
+# ~1,700 jobs instead of ~20,000, with no error and no warning. Measured 2026-07-22.
+cd "$root"
+
+# --watchlist is now only a SEED for the resolution ledger, which is the real company
+# universe (see jobfitr/snapshot.py:_harvest_universe). Read from the SAME slot as the
+# binary so the seed and the harvester that reads it are always the same release.
 exec "$bin" --out "$OUT" --watchlist "${root}/deploy/tech-watchlist.json"
