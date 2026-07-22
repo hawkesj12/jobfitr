@@ -50,6 +50,7 @@ bakeoff = [
 jobfitr-snapshot = "jobfitr.snapshot:main"
 jobfitr-serve = "jobfitr.server:main"
 jobfitr-evict = "jobfitr.store:main"
+jobfitr-resolve = "jobfitr.resolve:main"
 
 [project.urls]
 Homepage = "https://github.com/hawkesj12/jobfitr"

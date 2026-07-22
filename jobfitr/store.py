@@ -29,6 +29,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from job_radar.discover import _norm_name as _jr_norm_name
 from job_radar.scoring import remote_posting
 
 _ET = ZoneInfo("America/New_York")
@@ -185,6 +186,43 @@ END;
 CREATE TABLE IF NOT EXISTS searches(key TEXT PRIMARY KEY, fetched_at REAL);
 
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+
+-- The company->ATS resolution ledger. One row per distinct employer seen in `jobs`,
+-- recording whether we found a live ATS board for it. Two things make this pay:
+--
+--   1. It CACHES THE NEGATIVE. 'checked, nothing found' is a real answer worth
+--      storing — without it, every run re-probes the same ~3k dead-end employers
+--      (federal agencies, hospitals, staffing firms) forever. With it, a run only
+--      probes companies it has never seen, so resolution can ride along with every
+--      harvest instead of needing a separate monthly job.
+--   2. It KEEPS THE EVIDENCE. A wrong slug is worse than no slug — it is sticky and
+--      silent, and would file a stranger's postings under this company forever
+--      (measured: 'Capital One' -> the unrelated `capital` board). Storing the
+--      variant that matched, the role count that proved it, and when, makes a bad
+--      resolution auditable and reversible instead of folklore.
+--
+-- Keyed on a NORMALIZED name, not the raw string. Measured on the live store: 43
+-- collision groups across 3,162 company strings ('Westhab Inc.' / 'Westhab' /
+-- 'Westhab, Inc.'; 'Celsius' / 'CELSIUS'). Keying on the raw string gave each
+-- spelling its own row, its own probe budget, and — worst — its own independent
+-- answer, so one employer could be 'resolved' and 'unresolved' at the same time.
+--
+-- status:
+--   resolved   — ats+slug confirmed live AND (where checkable) confirmed to belong
+--   unresolved — probed, nothing found; retried after UNRESOLVED_RETRY_DAYS
+--   dead       — the board answers but refuses us (e.g. a 403 Workday tenant).
+--                Distinct from unresolved so it is never retried on a schedule;
+--                retrying a deliberate refusal nightly is both futile and rude.
+CREATE TABLE IF NOT EXISTS companies(
+  name_key TEXT PRIMARY KEY,      -- normalized: lowercased, depunctuated, suffix-free
+  name TEXT NOT NULL,             -- the raw string as jobs.company holds it (display)
+  ats TEXT, slug TEXT,            -- the resolved board (NULL when unresolved)
+  host TEXT, site TEXT,           -- workday's extra two-thirds of its key
+  status TEXT NOT NULL,
+  roles INTEGER,                  -- roles the board returned when verified
+  matched_variant TEXT,           -- WHICH string manipulation won — the audit trail
+  checked_at REAL, attempts INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status, checked_at);
 """
 
 
@@ -244,6 +282,136 @@ def sync_snapshot(path: str | None = None) -> int:
         upsert_jobs(rows, path=path)
     _meta_set(SNAPSHOT_MTIME_KEY, repr(mtime), path)
     return len(rows)
+
+
+# ── the company -> ATS resolution ledger ──────────────────────────────────────
+# How long a NEGATIVE stays trusted. A company with no board today may adopt one
+# next quarter, so 'unresolved' expires — but slowly, because re-probing 3k
+# dead-ends is the exact cost this ledger exists to avoid.
+UNRESOLVED_RETRY_DAYS = int(os.environ.get("JOBFITR_UNRESOLVED_RETRY_DAYS", "90"))
+
+
+def norm_company(name: str) -> str:
+    """The ledger's primary key. Delegates to job_radar's normalizer so slug
+    generation, identity comparison, and this key can never disagree about whether
+    'Westhab Inc.' and 'Westhab' are the same employer."""
+    return _jr_norm_name(name)
+
+
+def unresolved_companies(limit: int = 500, path: str | None = None) -> list[str]:
+    """Companies needing an ATS probe: never checked, or checked long enough ago
+    that the negative has expired. Ordered by job count so the employers that
+    actually matter to users get resolved first.
+
+    The dedupe happens on the NORMALIZED name, so 'Westhab Inc.' and 'Westhab' are one
+    company needing one probe, not two racing to disagree. Done in Python rather than
+    SQL because the normalizer is job_radar's — sharing the function is what keeps the
+    two sides from drifting into different answers.
+    """
+    cutoff = time.time() - UNRESOLVED_RETRY_DAYS * 86400
+    with _conn(path) as c:
+        counts = c.execute(
+            "SELECT company, COUNT(*) n FROM jobs WHERE company <> '' "
+            "GROUP BY company ORDER BY n DESC"
+        ).fetchall()
+        known = {
+            r["name_key"]: (r["status"], r["checked_at"] or 0)
+            for r in c.execute(
+                "SELECT name_key, status, checked_at FROM companies"
+            ).fetchall()
+        }
+
+    out, seen = [], set()
+    for company, _n in counts:
+        key = norm_company(company)
+        if not key or key in seen:
+            continue
+        status, checked = known.get(key, (None, 0))
+        # never checked, or a negative old enough to be worth one more look. 'dead'
+        # and 'resolved' are both terminal — a refusal is not a maybe.
+        if status is None or (status == "unresolved" and checked < cutoff):
+            seen.add(key)
+            out.append(company)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def record_resolution(
+    name: str,
+    entry: dict | None = None,
+    variant: str = "",
+    status: str | None = None,
+    path: str | None = None,
+) -> None:
+    """Write one company's outcome. `entry` None/empty = a cached NEGATIVE.
+
+    `status` overrides the derived value — pass 'dead' for a board that answers but
+    refuses us (a 403 Workday tenant), so the scheduler stops asking. `attempts`
+    increments across runs so a company that keeps failing stays visible.
+    """
+    now = time.time()
+    e = entry or {}
+    with _conn(path) as c:
+        c.execute(
+            """INSERT INTO companies(name_key,name,ats,slug,host,site,status,roles,
+                                     matched_variant,checked_at,attempts)
+               VALUES(:key,:name,:ats,:slug,:host,:site,:status,:roles,:variant,:now,1)
+               ON CONFLICT(name_key) DO UPDATE SET
+                 name=excluded.name,
+                 ats=excluded.ats, slug=excluded.slug, host=excluded.host,
+                 site=excluded.site, status=excluded.status, roles=excluded.roles,
+                 matched_variant=excluded.matched_variant, checked_at=excluded.checked_at,
+                 attempts=companies.attempts+1""",
+            {
+                "key": norm_company(name),
+                "name": name,
+                "ats": e.get("ats"),
+                "slug": e.get("slug"),
+                "host": e.get("host"),
+                "site": e.get("site"),
+                "status": status or ("resolved" if e else "unresolved"),
+                "roles": e.get("roles"),
+                "variant": variant,
+                "now": now,
+            },
+        )
+
+
+def resolved_companies(path: str | None = None) -> list[dict]:
+    """Every resolved board, richest first — the rows that graduate into a watchlist."""
+    with _conn(path) as c:
+        rows = c.execute(
+            """SELECT name,ats,slug,host,site,roles,matched_variant FROM companies
+               WHERE status='resolved' AND ats IS NOT NULL AND slug IS NOT NULL
+               ORDER BY COALESCE(roles,0) DESC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolution_stats(path: str | None = None) -> dict:
+    """Ledger state. `companies_in_store` counts DISTINCT NORMALIZED employers, so it
+    is comparable with the ledger's own row count rather than inflated by spellings."""
+    with _conn(path) as c:
+        rows = dict(
+            c.execute(
+                "SELECT status, COUNT(*) FROM companies GROUP BY status"
+            ).fetchall()
+        )
+        names = [
+            r[0]
+            for r in c.execute(
+                "SELECT DISTINCT company FROM jobs WHERE company <> ''"
+            ).fetchall()
+        ]
+    total = len({norm_company(n) for n in names if norm_company(n)})
+    return {
+        "companies_in_store": total,
+        "resolved": rows.get("resolved", 0),
+        "unresolved": rows.get("unresolved", 0),
+        "dead": rows.get("dead", 0),
+        "never_checked": max(0, total - sum(rows.values())),
+    }
 
 
 def snapshot_imported_at(path: str | None = None) -> str | None:

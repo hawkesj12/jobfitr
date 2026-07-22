@@ -315,3 +315,166 @@ def test_missing_snapshot_is_a_noop(tmp_path, monkeypatch):
     store.init(p)
     assert store.pool_size(p) == 0
     assert store.snapshot_imported_at(p) is None
+
+
+# ── the company -> ATS resolution ledger ──────────────────────────────────────
+def _seed_companies(db, pairs):
+    """pairs = [(company, n_jobs)] — job count drives resolution priority."""
+    store.upsert_jobs(
+        [
+            _job(f"{name}-{i}", "Engineer", company=name)
+            for name, n in pairs
+            for i in range(n)
+        ],
+        path=db,
+    )
+
+
+def test_unresolved_lists_never_checked_companies_busiest_first(db):
+    _seed_companies(db, [("Small Co", 1), ("Big Co", 5), ("Mid Co", 3)])
+    assert store.unresolved_companies(path=db) == ["Big Co", "Mid Co", "Small Co"]
+
+
+def test_a_cached_negative_stops_the_company_being_reprobed(db):
+    """The whole economics of the ledger: 'checked, found nothing' is an ANSWER.
+    Without it every run re-probes ~3k dead-end employers forever."""
+    _seed_companies(db, [("Veterans Health Administration", 4)])
+    assert store.unresolved_companies(path=db) == ["Veterans Health Administration"]
+    store.record_resolution("Veterans Health Administration", None, path=db)
+    assert store.unresolved_companies(path=db) == []
+
+
+def test_a_negative_expires_so_a_late_adopter_is_found(db, monkeypatch):
+    """A company with no board today may adopt one next quarter — but slowly, so
+    the retry window is long."""
+    _seed_companies(db, [("Late Adopter", 2)])
+    store.record_resolution("Late Adopter", None, path=db)
+    assert store.unresolved_companies(path=db) == []
+    with store._conn(db) as c:  # age the check past the retry window
+        stale = time.time() - (store.UNRESOLVED_RETRY_DAYS + 1) * 86400
+        c.execute("UPDATE companies SET checked_at=?", (stale,))
+    assert store.unresolved_companies(path=db) == ["Late Adopter"]
+
+
+def test_a_resolved_company_is_never_reprobed(db):
+    _seed_companies(db, [("Stripe", 2)])
+    store.record_resolution(
+        "Stripe",
+        {"ats": "greenhouse", "slug": "stripe", "roles": 516},
+        variant="stripe",
+        path=db,
+    )
+    assert store.unresolved_companies(path=db) == []
+    got = store.resolved_companies(path=db)
+    assert got[0]["slug"] == "stripe" and got[0]["roles"] == 516
+
+
+def test_resolution_keeps_the_evidence_that_proved_it(db):
+    """A wrong slug is sticky and silent, so the variant that won is recorded —
+    that is what makes a bad resolution findable and reversible."""
+    _seed_companies(db, [("LevelTen Energy", 1)])
+    store.record_resolution(
+        "LevelTen Energy",
+        {"ats": "greenhouse", "slug": "leveltenenergy", "roles": 5},
+        variant="leveltenenergy",
+        path=db,
+    )
+    assert store.resolved_companies(path=db)[0]["matched_variant"] == "leveltenenergy"
+
+
+def test_workday_triple_round_trips(db):
+    _seed_companies(db, [("Barry-Wehmiller", 1)])
+    store.record_resolution(
+        "Barry-Wehmiller",
+        {
+            "ats": "workday",
+            "slug": "barrywehmiller",
+            "host": "wd1",
+            "site": "BWCareers",
+            "roles": 455,
+        },
+        path=db,
+    )
+    e = store.resolved_companies(path=db)[0]
+    assert (e["host"], e["site"]) == ("wd1", "BWCareers")
+
+
+def test_reresolution_updates_in_place_and_counts_attempts(db):
+    _seed_companies(db, [("Acme", 1)])
+    store.record_resolution("Acme", None, path=db)
+    store.record_resolution(
+        "Acme", {"ats": "ashby", "slug": "acme", "roles": 9}, path=db
+    )
+    assert len(store.resolved_companies(path=db)) == 1
+    with store._conn(db) as c:
+        assert c.execute("SELECT attempts FROM companies").fetchone()[0] == 2
+
+
+def test_resolution_stats_counts_each_bucket(db):
+    _seed_companies(db, [("A", 1), ("B", 1), ("C", 1)])
+    store.record_resolution("A", {"ats": "ashby", "slug": "a", "roles": 1}, path=db)
+    store.record_resolution("B", None, path=db)
+    s = store.resolution_stats(path=db)
+    assert (s["resolved"], s["unresolved"], s["never_checked"]) == (1, 1, 1)
+
+
+# ── normalized key: one employer, one row, one answer ────────────────────────
+def test_name_variants_collapse_to_one_company(db):
+    """MEASURED on the live store: 43 collision groups in 3,162 strings. Keying on the
+    raw string gave 'Westhab Inc.' / 'Westhab' / 'Westhab, Inc.' three rows, three
+    probe budgets, and three independent answers for one employer."""
+    _seed_companies(db, [("Westhab Inc.", 3), ("Westhab", 2), ("Westhab, Inc.", 1)])
+    pending = store.unresolved_companies(path=db)
+    assert len(pending) == 1, f"expected one company to probe, got {pending}"
+
+    store.record_resolution(
+        pending[0], {"ats": "greenhouse", "slug": "westhab", "roles": 4}, path=db
+    )
+    # every spelling is now answered — none comes back for another probe
+    assert store.unresolved_companies(path=db) == []
+    assert len(store.resolved_companies(path=db)) == 1
+
+
+def test_case_only_differences_collapse(db):
+    _seed_companies(db, [("Celsius", 2), ("CELSIUS", 1)])
+    assert len(store.unresolved_companies(path=db)) == 1
+
+
+def test_resolution_stats_counts_normalized_employers(db):
+    _seed_companies(db, [("Westhab Inc.", 1), ("Westhab", 1), ("Acme", 1)])
+    assert store.resolution_stats(path=db)["companies_in_store"] == 2
+
+
+def test_raw_name_is_preserved_for_display(db):
+    _seed_companies(db, [("LevelTen Energy, Inc.", 1)])
+    store.record_resolution(
+        "LevelTen Energy, Inc.",
+        {"ats": "greenhouse", "slug": "leveltenenergy", "roles": 5},
+        path=db,
+    )
+    assert store.resolved_companies(path=db)[0]["name"] == "LevelTen Energy, Inc."
+
+
+# ── dead: a refusal is not a maybe ───────────────────────────────────────────
+def test_a_refused_board_is_dead_and_never_retried(db, monkeypatch):
+    """A 403 tenant EXISTS and has said no. Unlike 'unresolved' it must not come back
+    when the retry window lapses — asking again nightly is futile and impolite."""
+    _seed_companies(db, [("Fortress Corp", 2)])
+    store.record_resolution("Fortress Corp", None, status="dead", path=db)
+    assert store.unresolved_companies(path=db) == []
+
+    with store._conn(db) as c:  # age it far past the unresolved retry window
+        stale = time.time() - (store.UNRESOLVED_RETRY_DAYS + 400) * 86400
+        c.execute("UPDATE companies SET checked_at=?", (stale,))
+    assert store.unresolved_companies(path=db) == [], "dead must stay dead"
+    assert store.resolution_stats(path=db)["dead"] == 1
+
+
+def test_unresolved_still_expires_but_dead_does_not(db):
+    _seed_companies(db, [("Late Adopter", 2), ("Refuser", 1)])
+    store.record_resolution("Late Adopter", None, path=db)
+    store.record_resolution("Refuser", None, status="dead", path=db)
+    with store._conn(db) as c:
+        stale = time.time() - (store.UNRESOLVED_RETRY_DAYS + 1) * 86400
+        c.execute("UPDATE companies SET checked_at=?", (stale,))
+    assert store.unresolved_companies(path=db) == ["Late Adopter"]
