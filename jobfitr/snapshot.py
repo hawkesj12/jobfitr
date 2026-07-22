@@ -187,16 +187,26 @@ def load_snapshot(path: str | os.PathLike = DEFAULT_JOBS_PATH) -> dict:
 def load_dotenv(path: str | os.PathLike = ".env") -> int:
     """Load KEY=VALUE lines from a .env into os.environ (no dependency).
 
-    Existing environment variables win — an explicit `export` or the launchd
-    plist's EnvironmentVariables is never clobbered by the file. Blank lines,
-    `#` comments, and a leading `export ` are tolerated; missing file is a no-op.
-    Returns the number of keys set (for the CLI to report).
+    Existing environment variables win — an explicit `export` or systemd's
+    EnvironmentFile is never clobbered by the file. Blank lines, `#` comments, and a
+    leading `export ` are tolerated. Returns the number of keys set.
+
+    A .env that is missing OR unreadable is a no-op. Both matter: this reads from the
+    CURRENT WORKING DIRECTORY, and the CLI is routinely run as the `jobfitr` service
+    user from a directory that user cannot stat (an admin's home, say). Letting that
+    raise took down a whole resolution run before it read a single company — over an
+    optional convenience file that production does not even use, since systemd
+    supplies the environment.
     """
     p = Path(path)
-    if not p.exists():
+    try:
+        if not p.exists():
+            return 0
+        contents = p.read_text()
+    except OSError:
         return 0
     set_count = 0
-    for line in p.read_text().splitlines():
+    for line in contents.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

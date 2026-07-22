@@ -479,3 +479,30 @@ def test_score_endpoint_spreads_across_companies(client):
     assert companies[: server.MAX_PER_COMPANY] == ["MegaCorp"] * server.MAX_PER_COMPANY
     assert companies[server.MAX_PER_COMPANY] == "Tiny Inc"
     assert len(d["jobs"]) == 21, "nothing dropped — demoted, not filtered"
+
+
+def test_load_dotenv_survives_an_unreadable_directory(tmp_path, monkeypatch):
+    """REGRESSION: load_dotenv stat'd .env in the CWD and let PermissionError escape.
+    The CLI runs as the `jobfitr` service user, often from a directory that user
+    cannot stat — which killed a whole resolution run before it read one company,
+    over an optional file production does not even use (systemd supplies the env)."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / ".env").write_text("FOO=bar\n")
+    locked.chmod(0o000)
+    try:
+        monkeypatch.chdir(tmp_path)
+        assert snapshot.load_dotenv(str(locked / ".env")) == 0
+    finally:
+        locked.chmod(0o755)
+
+
+def test_load_dotenv_still_reads_a_readable_file(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("# comment\nexport ALPHA=1\nBETA=2\n\n")
+    import os as _os
+
+    _os.environ.pop("ALPHA", None)
+    _os.environ.pop("BETA", None)
+    assert snapshot.load_dotenv(str(env)) == 2
+    assert _os.environ["ALPHA"] == "1" and _os.environ["BETA"] == "2"
