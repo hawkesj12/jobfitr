@@ -1,0 +1,39 @@
+# jobfitr resolve — turn company NAMES into pollable ATS boards.
+#
+# The depth lane needs an (ats, slug) key before it can pull a company's whole board,
+# and a company with one is worth ~23x one without (~86 jobs vs ~3.7). This is what
+# mints those keys: it walks employers in the store that have no board yet, tries to
+# find one, and records the outcome — including the failures, which is what keeps it
+# cheap enough to run nightly.
+#
+# Runs BEFORE jobfitr-harvest: resolution decides which companies the harvest polls.
+# Writes the SHARED store; the ledger is knowledge about the world, not per-slot state.
+# Install: /etc/systemd/system/jobfitr-resolve.service (+ /opt/jobfitr/bin/resolve-active.sh)
+
+[Unit]
+Description=jobfitr resolve (company -> ATS board discovery)
+After=network-online.target
+Wants=network-online.target
+# Advisory only — systemd cannot order two independently-timed units. The real
+# spacing is the timers (03:00 vs 04:07); this just keeps them from racing if both
+# are ever started by hand at once.
+Before=jobfitr-harvest.service
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+ExecStart=/opt/jobfitr/bin/resolve-active.sh
+
+# Bounded so a slow upstream (or a Common Crawl stall) cannot still be running when
+# the harvest starts at 04:07. Safe to kill: every company resolved before the cut is
+# already committed to the ledger, and the rest are simply picked up tomorrow.
+TimeoutStartSec=45min
+
+# Hardening — writes only the shared store directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/data

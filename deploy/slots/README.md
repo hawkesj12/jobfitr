@@ -1,6 +1,6 @@
 # jobfitr — blue-green deployment slots (Azure-slot-swap on one VPS)
 
-**Version:** 0.3.0 · **Date:** 2026-07-22 · **Status:** live on the box — both slots warm, blue is production. Per-slot eviction + the mtime-gated snapshot sync land with this version (see "The SQLite store under slots").
+**Version:** 0.4.0 · **Date:** 2026-07-22 · **Status:** live on the box — both slots warm, blue is production. This version adds the **company-universe release**: the resolution ledger, nightly `jobfitr-resolve`, per-slot eviction, the mtime-gated snapshot sync, and a pre-flip verification gate (`verify-slot.sh`). See "The go-live runbook" below.
 
 This is the open-source cousin of **Azure App Service deployment slots** — two warm copies of jobfitr on the one VPS, a public **preview URL**, and an atomic **flip** that promotes the preview to production with instant rollback. Zero new services beyond what the box already runs (Caddy + systemd + uv). No Docker.
 
@@ -105,6 +105,83 @@ The harvest itself stays single (one snapshot, no doubled job-API traffic) but n
    ```
 
    Then confirm the inflow works: `curl -s localhost:8000/api/health | jq .snapshot_imported_at` should match the last harvest, and keep matching after the next one without a restart.
+
+## The go-live runbook (the company-universe release)
+
+Ships the resolution ledger, the Workday adapter, Common Crawl discovery, the
+per-company diversity cap, and the frozen-pool fix — in one flip, reversible at every
+step. **Blue is production; green is the spare.** Nothing below touches blue until step 8.
+
+**Before you start:** job-radar must be on PyPI at the pinned version, because
+`deploy-slot.sh` runs `uv pip install` and will resolve it from there. Publishing is a
+separate, earlier decision — see the dry-run gate in `scripts/dry_run.py`.
+
+```bash
+cd /opt/jobfitr/blue/jobfitr/deploy/slots     # or whichever slot is live
+
+# 1. build the release onto GREEN (production untouched)
+sudo bash deploy-slot.sh <branch-or-tag>
+
+# 2. install the wrapper AND its unit TOGETHER — /opt/jobfitr/bin does not exist yet,
+#    and installing the unit alone leaves the harvest broken until the script lands.
+sudo install -D -m 755 harvest-active.sh  /opt/jobfitr/bin/harvest-active.sh
+sudo install -D -m 755 resolve-active.sh  /opt/jobfitr/bin/resolve-active.sh
+sudo install -m 644 ../jobfitr-harvest.service ../jobfitr-resolve.service \
+                    ../jobfitr-resolve.timer /etc/systemd/system/
+
+# 3. per-slot eviction replaces the single-store timer
+sudo install -m 644 ../jobfitr-evict@.service ../jobfitr-evict@.timer /etc/systemd/system/
+sudo systemctl disable --now jobfitr-evict.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now jobfitr-evict@blue.timer jobfitr-evict@green.timer jobfitr-resolve.timer
+
+# 4. seed + resolve the universe. FIRST pass only — every later night is minutes,
+#    because a company that fails is remembered as a negative and never re-probed.
+sudo -u jobfitr /opt/jobfitr/green/jobfitr/.venv/bin/jobfitr-resolve --stats
+sudo -u jobfitr /opt/jobfitr/bin/resolve-active.sh          # ~25 min
+
+# 5. harvest the expanded universe (~25-40 min: more boards + Workday descriptions)
+sudo systemctl start jobfitr-harvest.service
+journalctl -u jobfitr-harvest -f
+
+# 6. let green ingest the new snapshot (it polls every 15 min) or force it
+sudo systemctl restart jobfitr-web@green
+
+# 7. VERIFY GREEN — this is the gate, not the flip
+sudo bash verify-slot.sh green
+
+# 8. go live
+sudo bash flip.sh
+
+# 9. bring blue up to the same build so rollback stays available
+sudo bash deploy-slot.sh <branch-or-tag>    # now targets blue (the inactive slot)
+```
+
+### What verify-slot.sh is checking, and why each one bit us
+
+| Check                   | The failure it catches                                                                                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot ingested`     | A slot serving a pool frozen days ago while every dashboard says healthy. This is exactly what production did from 2026-07-20 — the harvest ran green nightly into a database no slot read. |
+| `no employer dominates` | One employer owning the board. Measured on live blue: a "nurse" search returned 46 of 50 rows from Veterans Health Administration.                                                          |
+| `results are readable`  | Workday jobs arriving with no description — unrankable (boosts match title+body) and unreadable (the UI renders its snippet from the body).                                                 |
+| `pool size` / `adzuna`  | A slot that started fine but ingested nothing, or lost the live-fetch lane to a missing key.                                                                                                |
+
+Running it against **live blue today fails on two of these**, which is the honest
+measure of why this release exists.
+
+### Rollback
+
+- **After the flip:** `sudo bash flip.sh` again. Each slot keeps its own `jobs.db`, so
+  a bad flip cannot corrupt the other's store — that is the whole reason they are separate.
+- **A bad resolution** (a slug bound to the wrong company): every row records
+  `matched_variant`, `roles` and `checked_at`, so it is findable. Recovery is delete
+  the company's jobs and re-harvest. Board-ownership verification exists to make this
+  rare, but it only covers Greenhouse.
+- **A bad job-radar release:** the pin in `pyproject.toml` is a range — narrow it back
+  and re-run `deploy-slot.sh`.
+- **Discovery found nothing:** check the log for `Common Crawl unreachable`. It
+  rate-limits by IP after a heavy sweep; the harvest still runs from the existing
+  ledger, so this degrades rather than breaks.
 
 ## The portfolio angle
 

@@ -1,0 +1,19 @@
+# Fire resolution nightly at 03:00 — an hour before the harvest at 04:07, because
+# resolution decides which companies the harvest polls. The gap is deliberate
+# headroom: the FIRST pass over a cold ledger takes ~25 min, every night after that
+# is a few minutes because the negative cache means only unseen companies get probed.
+#
+# Persistent=true runs a missed pass after downtime rather than skipping it — a
+# skipped night means the newly-seen employers stay unresolved for another day.
+# Install: /etc/systemd/system/jobfitr-resolve.timer
+
+[Unit]
+Description=Resolve jobfitr companies to ATS boards nightly
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
