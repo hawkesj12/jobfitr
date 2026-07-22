@@ -1,0 +1,33 @@
+# jobfitr evict — the pool's OUTFLOW (the control-loop garbage collector), PER SLOT.
+# Deletes jobs unseen > 14d or posted > 60d, and enforces an LRU row cap, so the
+# SQLite store reaches a bounded steady state instead of growing without limit.
+# Eviction age (14d) >> the search TTL (24h): that timescale gap is the damping
+# that stops a re-fetched job from thrashing in and out of the pool.
+#
+# This is the SLOT TEMPLATE (%i = blue|green), replacing the old single-store
+# jobfitr-evict.service. Under blue-green each slot owns its OWN jobs.db, so a
+# single-store eviction pruned a database no slot actually serves while both slots'
+# real stores grew unbounded. Instantiate once per slot:
+#   systemctl enable --now jobfitr-evict@blue.timer jobfitr-evict@green.timer
+# Install: /etc/systemd/system/jobfitr-evict@.service
+
+[Unit]
+Description=jobfitr evict (garbage-collect the stale job pool) — slot %i
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+WorkingDirectory=/opt/jobfitr/%i/jobfitr
+# slot-%i.env is read LAST so its JOBFITR_DB_PATH wins over the shared default —
+# the same precedence jobfitr-web@.service relies on.
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+EnvironmentFile=/etc/jobfitr/slot-%i.env
+ExecStart=/opt/jobfitr/%i/jobfitr/.venv/bin/jobfitr-evict
+
+# Hardening — may write only THIS slot's store directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/%i/data

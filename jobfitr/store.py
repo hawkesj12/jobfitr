@@ -35,8 +35,9 @@ _ET = ZoneInfo("America/New_York")
 
 # ── config (env-overridable) ──────────────────────────────────────────────────
 DB_PATH = os.environ.get("JOBFITR_DB_PATH", "jobs.db")
-# Where the legacy flat snapshot lives — imported ONCE on first init so the live
-# box migrates seamlessly (and rollback to the old code still reads it).
+# Where the shared harvest snapshot lives. Re-imported whenever the harvest rewrites
+# it (see sync_snapshot) — this is how a per-slot store stays current, and it's also
+# the rollback artifact old code reads.
 JOBS_JSON_PATH = os.environ.get("JOBFITR_JOBS_PATH", "jobs.json")
 
 SEARCH_TTL_SECONDS = int(os.environ.get("JOBFITR_SEARCH_TTL", str(24 * 3600)))  # 24h
@@ -182,21 +183,57 @@ CREATE TRIGGER IF NOT EXISTS jobs_au AFTER UPDATE ON jobs BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS searches(key TEXT PRIMARY KEY, fetched_at REAL);
+
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
 
 def init(path: str | None = None) -> None:
-    """Create the schema if missing and import the legacy jobs.json ONCE."""
+    """Create the schema if missing, then pull in the current jobs.json snapshot."""
     with _conn(path) as c:
         c.executescript(_SCHEMA)
-        empty = c.execute("SELECT 1 FROM jobs LIMIT 1").fetchone() is None
-    if empty:
-        _import_jobs_json(path)
+    sync_snapshot(path)
 
 
-def _import_jobs_json(path: str | None = None) -> int:
+def _meta_get(key: str, path: str | None = None) -> str | None:
+    with _conn(path) as c:
+        row = c.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _meta_set(key: str, value: str, path: str | None = None) -> None:
+    with _conn(path) as c:
+        c.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+# ── the baseline inflow: import the harvest snapshot whenever it's newer ──────
+# The nightly harvest writes ONE shared jobs.json; every slot's store pulls from it.
+# Gating on the file's mtime (not "is the table empty?") is what makes a long-lived
+# slot keep up: the old import-once rule meant a slot built yesterday served that
+# day's pool forever, because its table was never empty again. Mtime-gated + an
+# upsert that dedups by url makes re-importing cheap and idempotent, and a brand-new
+# slot still seeds itself on first init.
+SNAPSHOT_MTIME_KEY = "jobs_json_mtime"
+
+
+def sync_snapshot(path: str | None = None) -> int:
+    """Import jobs.json if it's newer than the copy this store last ingested.
+
+    Returns the number of rows imported (0 when already current or absent). The
+    mtime is recorded only AFTER a successful upsert, so an interrupted import is
+    retried on the next call rather than silently skipped.
+    """
     p = Path(JOBS_JSON_PATH)
-    if not p.exists():
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return 0
+    seen = _meta_get(SNAPSHOT_MTIME_KEY, path)
+    if seen is not None and float(seen) >= mtime:
         return 0
     try:
         snap = json.loads(p.read_text())
@@ -205,7 +242,16 @@ def _import_jobs_json(path: str | None = None) -> int:
     rows = snap.get("jobs", []) if isinstance(snap, dict) else []
     if rows:
         upsert_jobs(rows, path=path)
+    _meta_set(SNAPSHOT_MTIME_KEY, repr(mtime), path)
     return len(rows)
+
+
+def snapshot_imported_at(path: str | None = None) -> str | None:
+    """ET timestamp of the harvest snapshot this store last ingested (None if never)."""
+    seen = _meta_get(SNAPSHOT_MTIME_KEY, path)
+    if seen is None:
+        return None
+    return datetime.fromtimestamp(float(seen), _ET).isoformat(timespec="seconds")
 
 
 # ── writes ────────────────────────────────────────────────────────────────────

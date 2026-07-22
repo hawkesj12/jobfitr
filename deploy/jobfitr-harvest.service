@@ -1,8 +1,16 @@
-# jobfitr harvest — the demoted BASELINE inflow. Builds the broad jobs.json snapshot
-# AND upserts it into the SQLite store, so the pool has a floor even for searches
-# nobody has run live yet. Live per-search fetches (on /api/score) own freshness now;
-# this just keeps a broad baseline warm. Oneshot; fired by jobfitr-harvest.timer.
+# jobfitr harvest — the demoted BASELINE inflow. Builds the broad jobs.json snapshot,
+# so the pool has a floor even for searches nobody has run live yet. Live per-search
+# fetches (on /api/score) own freshness now; this just keeps a broad baseline warm.
+# Oneshot; fired by jobfitr-harvest.timer.
 # Install: /etc/systemd/system/jobfitr-harvest.service (done by bootstrap.sh).
+#
+# Under blue-green the harvest runs from whichever slot is PRODUCTION — harvest-active.sh
+# resolves /etc/jobfitr/active-slot at run time, because a unit file can't. It writes only
+# the SHARED /opt/jobfitr/data/jobs.json; each slot's own jobs.db then pulls that snapshot
+# in via store.sync_snapshot() (the background sync in the web process). One harvest, no
+# doubled job-API traffic, and every slot stays current without a restart. The --watchlist
+# (the ~94-company ATS depth lane) comes from the same slot, so harvester and list always
+# ship together — see harvest-active.sh.
 
 [Unit]
 Description=jobfitr harvest (build the jobs.json snapshot)
@@ -13,15 +21,11 @@ Wants=network-online.target
 Type=oneshot
 User=jobfitr
 Group=jobfitr
-WorkingDirectory=/opt/jobfitr/jobfitr
 EnvironmentFile=/etc/jobfitr/jobfitr.env
-# --watchlist turns on the DEPTH lane: ~94 verified tech companies' ATS feeds
-# (Greenhouse/Lever/Ashby/SmartRecruiters), ~2.8k tech roles/harvest. The list is
-# read-only here (funnel auto_grow stays off — the hardening below only lets the
-# harvest write /opt/jobfitr/data, not the repo).
-ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-snapshot --out /opt/jobfitr/data/jobs.json --watchlist /opt/jobfitr/jobfitr/deploy/tech-watchlist.json
+ExecStart=/opt/jobfitr/bin/harvest-active.sh
 
-# Hardening — may write only the snapshot directory.
+# Hardening — may write only the shared snapshot directory. (The harvest's best-effort
+# store upsert lands in the shared jobs.db named by jobfitr.env, which lives here too.)
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

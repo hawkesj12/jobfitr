@@ -13,7 +13,10 @@ The only metered LLM path is /api/chat.
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from datetime import datetime
@@ -39,8 +42,52 @@ _ET = ZoneInfo("America/New_York")
 # NOT already set, so it never overrides the deployed secrets — a safe no-op there.
 load_dotenv()
 
-# Build the SQLite store schema + one-time import of any legacy jobs.json.
+log = logging.getLogger("jobfitr")
+
+# Build the SQLite store schema + pull in the current harvest snapshot.
 store.init()
+
+# How often a running slot re-checks the shared jobs.json for a newer harvest.
+# The harvest is nightly, so this is a cheap stat() ~96x/day; the import itself only
+# runs when the mtime actually moved. 0 disables the poller (tests, one-off runs).
+SNAPSHOT_SYNC_SECONDS = int(os.environ.get("JOBFITR_SNAPSHOT_SYNC_SECONDS", "900"))
+_sync_stop = threading.Event()
+
+
+def _snapshot_sync_loop() -> None:
+    """Re-import the harvest snapshot on an interval, off the request path.
+
+    Without this a slot only picked up new jobs on restart: the nightly harvest
+    rewrites the SHARED jobs.json, but each slot serves its OWN SQLite store. Doing
+    it on a background thread (not lazily in a request) means no user ever eats the
+    multi-second import.
+    """
+    while not _sync_stop.wait(SNAPSHOT_SYNC_SECONDS):
+        try:
+            n = store.sync_snapshot()
+            if n:
+                log.info(
+                    "snapshot sync: imported %d jobs (pool %d)", n, store.pool_size()
+                )
+        except Exception:  # noqa: BLE001 — a sync failure must never kill the server
+            log.exception("snapshot sync failed")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    thread = None
+    if SNAPSHOT_SYNC_SECONDS > 0:
+        thread = threading.Thread(
+            target=_snapshot_sync_loop, name="jobfitr-snapshot-sync", daemon=True
+        )
+        thread.start()
+    try:
+        yield
+    finally:
+        _sync_stop.set()
+        if thread:
+            thread.join(timeout=5)
+
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
@@ -72,7 +119,7 @@ SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
 # we serve the cache with a `degraded` banner instead of burning the free quota.
 ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "800"))
 
-app = FastAPI(title="jobfitr", version="0.1.0")
+app = FastAPI(title="jobfitr", version="0.1.0", lifespan=lifespan)
 
 # Per-IP rate limiting.
 limiter = Limiter(key_func=get_remote_address)
@@ -327,6 +374,10 @@ def health() -> dict:
         "daily_fetch_ceiling": ADZUNA_DAILY_CEILING,
         "pool_size": store.pool_size(),
         "last_successful_fetch": _last_fetch_ok["at"],
+        # The harvest snapshot this slot has actually ingested. Stale here means the
+        # slot is serving an aging pool even while the nightly harvest is green — the
+        # exact failure the background sync exists to prevent, so it's worth surfacing.
+        "snapshot_imported_at": store.snapshot_imported_at(),
     }
 
 

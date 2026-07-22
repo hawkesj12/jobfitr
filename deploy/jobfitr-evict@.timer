@@ -1,0 +1,17 @@
+# Fire slot %i's eviction nightly at 03:30 (with a small randomized delay so the two
+# slots never land on the same second, or on top of the harvest). Persistent=true runs
+# a missed eviction after downtime instead of skipping it.
+# Install: /etc/systemd/system/jobfitr-evict@.timer
+#   systemctl enable --now jobfitr-evict@blue.timer jobfitr-evict@green.timer
+
+[Unit]
+Description=Run slot %i's jobfitr pool eviction nightly
+
+[Timer]
+Unit=jobfitr-evict@%i.service
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

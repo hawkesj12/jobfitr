@@ -45,7 +45,7 @@ Copy this repo's `deploy/bootstrap.sh` to the box (or let it clone the repo itse
 sudo bash bootstrap.sh
 ```
 
-It's idempotent: installs Caddy + uv, clones `job-radar` + `jobfitr`, builds the venv, installs the units + Caddyfile, enables the web service + harvest timer + **evict timer**, and runs a first harvest. On first request the app **auto-imports any existing `jobs.json` into the new SQLite store once** (the migration is seamless — no manual step). It does **not** touch SSH or the firewall yet.
+It's idempotent: installs Caddy + uv, clones `jobfitr` (the job-radar engine comes from PyPI — see below), builds the venv, installs the units + Caddyfile, enables the web service + harvest timer + **evict timer**, and runs a first harvest. The app **imports `jobs.json` into the SQLite store on startup and re-imports it after every harvest** (no manual step, no restart needed). It does **not** touch SSH or the firewall yet.
 
 ### 3. Add the real keys
 
@@ -115,15 +115,22 @@ sudo systemctl enable --now jobfitr-evict.timer
 sudo systemctl restart jobfitr-web
 ```
 
-On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json` **once**, so the pool is never empty during the cutover.
+On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json`, so the pool is never empty during the cutover. From then on the web process re-imports it whenever the harvest rewrites it — see `store.sync_snapshot()`.
+
+## Where the job-radar engine comes from (settled 2026-07-22)
+
+**The box tracks PyPI, like any other dependency.** `pyproject.toml` pins `job-radar>=0.2,<0.3`; `uv pip install` resolves it from PyPI into each slot's venv. An engine change reaches production through a **job-radar release + a version bump here**, not a `git pull` on the box.
+
+This resolves the open question left by the 2026-07-19 handoff (which removed the old `[tool.uv.sources]` local-path override). The slots were already built this way — both blue and green run job-radar **0.2.0 from PyPI** — so this section documents what's true rather than changing it. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
+
+> **To hack on the engine against the live box anyway** (rare, and it makes that slot stop matching how everyone else installs jobfitr): `uv pip install -e /opt/jobfitr/job-radar` inside that slot's venv, and remember the next `uv pip install` for the app will resolve job-radar back to PyPI.
 
 ## Updating a live box (routine day-2 pull)
 
-The everyday "I merged a change, get it on the box" flow. jobfitr and the job-radar engine it imports are both **editable git checkouts** on the VPS (`/opt/jobfitr/jobfitr`, `/opt/jobfitr/job-radar`), so an update is a `git pull` — no PyPI, no version bump. Do all four steps, in order:
+The everyday "I merged a change, get it on the box" flow. Under blue-green you don't update production in place — you build the **inactive** slot and flip (`deploy/slots/README.md`). The steps below are the single-slot form, kept for a plain self-hosted install:
 
 ```bash
-# 1. pull both repos — the app AND the engine it imports (a change may span both)
-sudo -u jobfitr git -C /opt/jobfitr/job-radar pull --ff-only
+# 1. pull the app. The engine is a PyPI dependency — bump the pin, don't pull a clone.
 sudo -u jobfitr git -C /opt/jobfitr/jobfitr   pull --ff-only
 
 # 2. ALWAYS reinstall after a pull — even for a pure-.py change (see the gotcha below)

@@ -5,6 +5,10 @@
 # that stops a re-fetched job from thrashing in and out of the pool.
 # Oneshot; fired nightly by jobfitr-evict.timer.
 # Install: /etc/systemd/system/jobfitr-evict.service (done by bootstrap.sh).
+#
+# SINGLE-SLOT ONLY. Under blue-green each slot owns its own jobs.db, so this unit
+# would prune a store no slot serves — use jobfitr-evict@.service (+ @.timer) instead,
+# enabled once per slot. bootstrap.sh installs this one; the slots setup replaces it.
 
 [Unit]
 Description=jobfitr evict (garbage-collect the stale job pool)

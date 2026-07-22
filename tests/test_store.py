@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import time
 
 import pytest
@@ -244,21 +246,72 @@ def test_facet_counts():
     assert "" not in f["salary_band"]  # empty bands not counted
 
 
-# ── one-time jobs.json import on init ─────────────────────────────────────────
-def test_imports_jobs_json_once(tmp_path, monkeypatch):
+# ── jobs.json import: seeded on init, re-imported when the harvest rewrites it ──
+def _write_snapshot(path, jobs, mtime=None):
+    path.write_text(json.dumps({"meta": {"count": len(jobs)}, "jobs": jobs}))
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+
+
+def test_imports_jobs_json_on_init(tmp_path, monkeypatch):
     jj = tmp_path / "jobs.json"
-    jj.write_text(
-        json.dumps(
-            {
-                "meta": {"count": 2},
-                "jobs": [_job("i1", "Imported One"), _job("i2", "Imported Two")],
-            }
-        )
-    )
+    _write_snapshot(jj, [_job("i1", "Imported One"), _job("i2", "Imported Two")])
     monkeypatch.setattr(store, "JOBS_JSON_PATH", str(jj))
     p = str(tmp_path / "imp.db")
     store.init(p)
     assert store.pool_size(p) == 2
-    # init again → does NOT double-import (pool already non-empty)
-    store.init(p)
+    # init again with an UNCHANGED snapshot → no re-import work
+    assert store.sync_snapshot(p) == 0
     assert store.pool_size(p) == 2
+
+
+def test_resyncs_when_the_harvest_rewrites_the_snapshot(tmp_path, monkeypatch):
+    """The live bug: a slot built yesterday served that pool forever, because the old
+    import-once rule only fired on an EMPTY table. A newer jobs.json must flow in."""
+    jj = tmp_path / "jobs.json"
+    _write_snapshot(jj, [_job("i1", "Imported One")], mtime=1_000_000)
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(jj))
+    p = str(tmp_path / "resync.db")
+    store.init(p)
+    assert store.pool_size(p) == 1
+
+    # the nightly harvest rewrites it with more jobs, a newer mtime
+    _write_snapshot(
+        jj, [_job("i1", "Imported One"), _job("i2", "Fresh Two")], mtime=2_000_000
+    )
+    assert store.sync_snapshot(p) == 2  # imported (dedup by url keeps i1 single)
+    assert store.pool_size(p) == 2
+    # ...and it's idempotent at the same mtime
+    assert store.sync_snapshot(p) == 0
+    assert store.pool_size(p) == 2
+
+
+def test_sync_records_mtime_only_after_a_successful_import(tmp_path, monkeypatch):
+    """A crash mid-import must retry next time, not mark the snapshot as ingested."""
+    jj = tmp_path / "jobs.json"
+    _write_snapshot(jj, [_job("i1", "One")], mtime=1_000_000)
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(jj))
+    p = str(tmp_path / "boom.db")
+    with store._conn(p) as c:
+        c.executescript(store._SCHEMA)
+
+    def _boom(*a, **kw):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "upsert_jobs", _boom)
+    with pytest.raises(sqlite3.OperationalError):
+        store.sync_snapshot(p)
+    assert store.snapshot_imported_at(p) is None  # not recorded
+
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(jj))
+    assert store.sync_snapshot(p) == 1  # retried and succeeded
+    assert store.snapshot_imported_at(p) is not None
+
+
+def test_missing_snapshot_is_a_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "absent.json"))
+    p = str(tmp_path / "none.db")
+    store.init(p)
+    assert store.pool_size(p) == 0
+    assert store.snapshot_imported_at(p) is None

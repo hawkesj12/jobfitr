@@ -4,9 +4,10 @@
 #
 # Run as root on the VPS:   sudo bash bootstrap.sh
 #
-# Idempotent: safe to re-run. It installs Caddy + uv + git, clones job-radar and
-# jobfitr under a non-root user, builds the venv, installs the systemd units and
-# Caddyfile, enables the web service + harvest timer, and runs a first harvest.
+# Idempotent: safe to re-run. It installs Caddy + uv + git, clones jobfitr under a
+# non-root user, builds the venv (the job-radar engine resolves from PyPI, per the
+# pin in pyproject.toml), installs the systemd units and Caddyfile, enables the web
+# service + harvest timer, and runs a first harvest.
 #
 # It does NOT wipe the box, NOT change SSH auth, and NOT enable the firewall by
 # default — hardening is a separate, opt-in step at the bottom (HARDEN=1) so this
@@ -18,12 +19,10 @@ set -euo pipefail
 APP_USER="jobfitr"
 BASE="/opt/jobfitr"
 APP_DIR="$BASE/jobfitr"
-ENGINE_DIR="$BASE/job-radar"
 DATA_DIR="$BASE/data"
 ENV_DIR="/etc/jobfitr"
 ENV_FILE="$ENV_DIR/jobfitr.env"
 JOBFITR_REPO="${JOBFITR_REPO:-https://github.com/hawkesj12/jobfitr}"
-ENGINE_REPO="${ENGINE_REPO:-https://github.com/hawkesj12/job-radar}"
 
 log() { printf '\n\033[1;34m▸ %s\033[0m\n' "$*"; }
 
@@ -80,12 +79,14 @@ clone_or_pull() {
 		sudo -u "$APP_USER" git clone --depth 1 "$repo" "$dir"
 	fi
 }
-clone_or_pull "$ENGINE_REPO" "$ENGINE_DIR"
 clone_or_pull "$JOBFITR_REPO" "$APP_DIR"
 
-# ── 6. venv + install (job-radar editable, then jobfitr[web]) ────────────────
+# ── 6. venv + install ────────────────────────────────────────────────────────
+# job-radar is an ordinary PyPI dependency (pinned >=0.2,<0.3 in pyproject.toml), not
+# a sibling checkout — an engine change reaches the box via a release + a version bump.
+# See deploy/README.md → "Where the job-radar engine comes from".
 log "Building the virtualenv"
-sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && '$UV' venv --clear && '$UV' pip install -e '$ENGINE_DIR' && '$UV' pip install -e '.[web]'"
+sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && '$UV' venv --clear && '$UV' pip install -e '.[web]'"
 
 # ── 7. server EnvironmentFile (placeholders — real keys added by hand) ───────
 mkdir -p "$ENV_DIR"

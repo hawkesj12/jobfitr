@@ -1,6 +1,6 @@
 # jobfitr — blue-green deployment slots (Azure-slot-swap on one VPS)
 
-**Version:** 0.2.0 · **Date:** 2026-07-20 · **Status:** in the repo (committed) — Phase-F-aware; NOT yet set up on the box (the live box runs single-slot)
+**Version:** 0.3.0 · **Date:** 2026-07-22 · **Status:** live on the box — both slots warm, blue is production. Per-slot eviction + the mtime-gated snapshot sync land with this version (see "The SQLite store under slots").
 
 This is the open-source cousin of **Azure App Service deployment slots** — two warm copies of jobfitr on the one VPS, a public **preview URL**, and an atomic **flip** that promotes the preview to production with instant rollback. Zero new services beyond what the box already runs (Caddy + systemd + uv). No Docker.
 
@@ -55,17 +55,24 @@ sudo bash flip.sh
 
 ## The SQLite store under slots (Phase F)
 
-jobfitr is a **live-fetch-on-search hybrid**: the web process doesn't just read a cache, it **writes** — every live search upserts fetched jobs into a SQLite/FTS5 store at `JOBFITR_DB_PATH` (`store.py`), and `store.init()` imports the shared `jobs.json` **once** on an empty db. That writable store is what makes the slot model need one deliberate decision.
+jobfitr is a **live-fetch-on-search hybrid**: the web process doesn't just read a cache, it **writes** — every live search upserts fetched jobs into a SQLite/FTS5 store at `JOBFITR_DB_PATH` (`store.py`), and it pulls the shared `jobs.json` in whenever the harvest rewrites it (`store.sync_snapshot()`). That writable store is what makes the slot model need one deliberate decision.
 
 **Decision: each slot gets its OWN `jobs.db`.** `slot-blue.env` sets `JOBFITR_DB_PATH=/opt/jobfitr/blue/data/jobs.db`, `slot-green.env` → `/opt/jobfitr/green/data/jobs.db`. Never share one db across the two slots.
 
 **Why (this is the whole point of blue-green).** If both slots shared one `jobs.db` and you staged a release that changes the store schema (a new column, a different FTS config), the staging slot would migrate/write the db while the production slot's older code is still reading it — and a flip-back (rollback) would read a db its code doesn't understand. That's the exact failure blue-green exists to prevent, so the data store must be isolated per slot, not just the code. Per-slot `jobs.db` makes a flip and a rollback both schema-safe: each slot only ever touches its own store.
 
-**The shared `jobs.json` still works — as a seed.** One harvest writes the single `data/jobs.json`; each slot's `store.init()` imports it into that slot's own db on first request. One harvest, no doubled job-API traffic, but two independent stores.
+**The shared `jobs.json` is the common inflow.** One harvest writes the single `data/jobs.json`; each slot imports it into its own db on init and again on every rewrite (`sync_snapshot`, background thread). One harvest, no doubled job-API traffic, two independent stores that both stay current.
 
 **Systemd implication.** The template unit (`jobfitr-web@.service`) sets `ReadWritePaths=/opt/jobfitr/%i/data` so each slot can write its own store under `ProtectSystem=strict` — mirroring the single-slot `jobfitr-web.service`. Create `/opt/jobfitr/{blue,green}/data/` (owned `jobfitr:jobfitr`) during setup.
 
-**Known limitation — the ongoing baseline feed / eviction is single-store (follow-up, not built).** Phase F's harvest _also_ upserts into `store.DB_PATH`, and `jobfitr-evict.timer` evicts one `DB_PATH`. Under slots those target a single db, so a long-warm slot won't get the harvest's ongoing baseline top-up or nightly eviction into its own store — it grows purely from its own live-fetches and its one-time `jobs.json` seed. That's an **optimization gap, not a correctness bug** (schema-safety holds regardless). When slots are actually adopted, resolve it with per-slot template units (`jobfitr-evict@.service`, a per-slot harvest) — deferred until then.
+**RESOLVED 2026-07-22 — and it was worse than this doc claimed.** This section used to call the single-store baseline feed and eviction "an optimization gap, not a correctness bug." That was wrong, and production proved it: because `store.init()` imported `jobs.json` only into an **empty** table, slot blue served the pool it was built with on 2026-07-20 and never took another harvest. Users saw a job board frozen two days back and aging, while the nightly harvest ran green into a database nothing served. A pool that silently stops updating is a correctness bug, not a missed optimization.
+
+The fix has two halves, both live in this folder:
+
+- **Inflow** — `store.sync_snapshot()` replaces import-once-if-empty with **import-when-the-snapshot-is-newer**, gated on `jobs.json`'s mtime recorded in a `meta` table. The web process runs it on a background thread every `JOBFITR_SNAPSHOT_SYNC_SECONDS` (default 900), so a slot picks up each nightly harvest **without a restart** and never makes a user wait on the import. Idempotent (`upsert_jobs` dedups by url) and slot-agnostic — a brand-new slot seeds itself the same way, and a flip needs no coordination. `/api/health` now reports `snapshot_imported_at` so a stuck slot is visible instead of silent.
+- **Outflow** — `jobfitr-evict@.service` + `jobfitr-evict@.timer` replace the single-store evict unit, enabled once per slot so each prunes its **own** store under `ReadWritePaths=/opt/jobfitr/%i/data`.
+
+The harvest itself stays single (one snapshot, no doubled job-API traffic) but now runs from the **active** slot via `harvest-active.sh`, so harvester and watchlist ship with the release instead of rotting in a checkout nothing else uses.
 
 ## Why this is safe / the gotchas
 
@@ -83,7 +90,21 @@ jobfitr is a **live-fetch-on-search hybrid**: the web process doesn't just read 
 3. Install the template unit: `jobfitr-web@.service` → `/etc/systemd/system/`; `systemctl enable --now jobfitr-web@blue jobfitr-web@green`.
 4. Install `Caddyfile.blue-green` → `/etc/caddy/Caddyfile`; seed `active-slot` with `blue`; run `flip.sh` once to generate the snippet; `systemctl reload caddy`.
 5. Add the `staging.jobfitr.app` DNS record.
-6. **Harvest + evict timers stay single-store for now** (the documented follow-up): the existing `jobfitr-harvest.timer` refreshes the shared `jobs.json` seed; `jobfitr-evict.timer` targets one `DB_PATH`. Per-slot `jobfitr-evict@` / harvest units are the follow-up if a warm slot's own store needs ongoing top-up + eviction.
+6. **Move the timers onto the slot model** (this replaces the old single-store step):
+
+   ```bash
+   # the harvest runs from whichever slot is production
+   install -D -m 755 -o root -g root harvest-active.sh /opt/jobfitr/bin/harvest-active.sh
+   install -m 644 ../jobfitr-harvest.service /etc/systemd/system/
+
+   # eviction fans out — one timer per slot, each pruning its own store
+   install -m 644 ../jobfitr-evict@.service ../jobfitr-evict@.timer /etc/systemd/system/
+   systemctl disable --now jobfitr-evict.timer          # the single-store one
+   systemctl daemon-reload
+   systemctl enable --now jobfitr-evict@blue.timer jobfitr-evict@green.timer
+   ```
+
+   Then confirm the inflow works: `curl -s localhost:8000/api/health | jq .snapshot_imported_at` should match the last harvest, and keep matching after the next one without a restart.
 
 ## The portfolio angle
 
