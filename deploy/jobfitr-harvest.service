@@ -24,6 +24,14 @@ Group=jobfitr
 EnvironmentFile=/etc/jobfitr/jobfitr.env
 ExecStart=/opt/jobfitr/bin/harvest-active.sh
 
+# The harvest was ~8 min against 94 companies. With the resolved universe (several
+# hundred boards) plus Workday's per-job description fetches it is expected to run
+# 25-40 min. Bound it: a single hung upstream fetch must not leave the job running
+# into tomorrow and block the next night's harvest. 90 min is generous headroom over
+# the expected worst case, and a kill here is recoverable — jobs.json is written
+# atomically, so a timeout leaves yesterday's snapshot intact rather than a partial one.
+TimeoutStartSec=90min
+
 # Hardening — may write only the shared snapshot directory. (The harvest's best-effort
 # store upsert lands in the shared jobs.db named by jobfitr.env, which lives here too.)
 NoNewPrivileges=true

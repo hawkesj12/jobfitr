@@ -105,6 +105,9 @@ MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
 # questions. Start tight (fresh + strong), relax only as far as needed to reach TARGET
 # results; cap the shown set at TARGET. (max_age_days, min_score), tight → loose.
 TARGET_RESULTS = 50
+# Most results one employer may contribute to the front of the board. See
+# _spread_companies — this is a reordering, not a filter, so nothing is ever hidden.
+MAX_PER_COMPANY = int(os.environ.get("JOBFITR_MAX_PER_COMPANY", "4"))
 RESULT_LADDER = [
     (15, "strong"),
     (30, "strong"),
@@ -199,6 +202,33 @@ def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
     }
 
 
+def _spread_companies(scored: list, cap: int | None = None) -> list:
+    """Reorder so no single employer monopolises the top of the board.
+
+    Ranking by score alone is fine when the biggest employer has a handful of roles.
+    It stops being fine at scale: the pool now carries employers with 900+ open jobs
+    (Veterans Health Administration) and 600+ (Accenture Federal Services), and a
+    title that matches them well would hand a user fifty near-identical rows from one
+    company. That reads as a broken search, not a thorough one.
+
+    Each company's best `cap` roles keep their natural rank; the rest are demoted
+    behind everything else rather than dropped. Demoting instead of dropping matters:
+    for a niche search where one employer genuinely IS the market, the user still
+    sees every role — just after they have seen who else is hiring.
+    """
+    cap = MAX_PER_COMPANY if cap is None else cap
+    if cap <= 0:
+        return scored
+    seen: dict[str, int] = {}
+    keep, overflow = [], []
+    for item in scored:
+        company = (item[0].get("company") or "").strip().lower()
+        n = seen.get(company, 0) + 1
+        seen[company] = n
+        (keep if n <= cap else overflow).append(item)
+    return keep + overflow
+
+
 def _rank(
     candidates,
     titles,
@@ -230,6 +260,7 @@ def _rank(
         why = ", ".join([t for t in why_terms if t in blob][:4])
         scored.append((c, final, why))
     scored.sort(key=lambda t: t[1], reverse=True)
+    scored = _spread_companies(scored)
     top = scored[0][1] if scored else 0.0
     floor = top * MIN_SCORE_FRAC.get(min_score_key, 0.35) if top > 0 else -1e18
     return [x for x in scored if x[1] >= floor][:limit], top

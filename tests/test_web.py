@@ -414,3 +414,68 @@ def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
     )
     snapshot.build_snapshot(Config(), str(wl), str(tmp_path / "out.json"))
     assert [c["slug"] for c in seen["companies"]] == ["seedco"]
+
+
+# ── per-company diversity (the guard the 3x corpus needs) ────────────────────
+def _many(company, n, score_from=100):
+    return [(
+        {"company": company, "title": f"{company} Role {i}"},
+        float(score_from - i),
+        "",
+    ) for i in range(n)]
+
+
+def test_one_employer_cannot_monopolise_the_front_of_the_board():
+    """At 3x corpus the pool carries employers with 900+ open roles (Veterans Health)
+    and 600+ (Accenture Federal). Ranking by score alone would hand a user fifty
+    near-identical rows from one company, which reads as a broken search."""
+    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
+    out = server._spread_companies(scored, cap=4)
+    companies = [c["company"] for c, _, _ in out]
+    # every SmallCo role must appear before BigCo's 5th — that is the whole point
+    fifth_bigco = [i for i, c in enumerate(companies) if c == "BigCo"][4]
+    assert all(
+        i < fifth_bigco for i, c in enumerate(companies) if c == "SmallCo"
+    ), f"a smaller employer got buried: {companies[:10]}"
+    assert companies[:4] == ["BigCo"] * 4  # its best 4 keep their natural rank
+
+
+def test_spreading_demotes_rather_than_drops():
+    """For a niche search where one employer genuinely IS the market, the user must
+    still see every role — just after they have seen who else is hiring."""
+    scored = _many("OnlyCo", 30)
+    out = server._spread_companies(scored, cap=4)
+    assert len(out) == 30, "nothing may be discarded"
+    assert [c["title"] for c, _, _ in out] == [f"OnlyCo Role {i}" for i in range(30)]
+
+
+def test_spreading_preserves_the_top_result():
+    """`top` and the score floor are derived from scored[0]; reordering must not move
+    the single best match."""
+    scored = _many("BigCo", 10) + _many("Other", 2, score_from=95)
+    out = server._spread_companies(scored, cap=4)
+    assert out[0][1] == 100.0
+
+
+def test_cap_of_zero_disables_spreading():
+    scored = _many("BigCo", 10)
+    assert server._spread_companies(scored, cap=0) == scored
+
+
+def test_score_endpoint_spreads_across_companies(client):
+    _seed(
+        [_job(f"Python Engineer {i}", text="python", company="MegaCorp",
+              url=f"https://x/mega-{i}") for i in range(20)]
+        + [_job("Python Engineer A", text="python", company="Tiny Inc",
+                url="https://x/tiny-a")]
+    )
+    _mark_fresh(["python engineer"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["python engineer"], "min_score": "plenty"},
+    ).json()
+    companies = [j["company"] for j in d["jobs"]]
+    # the one small employer surfaces ahead of MegaCorp's 5th role
+    assert companies[: server.MAX_PER_COMPANY] == ["MegaCorp"] * server.MAX_PER_COMPANY
+    assert companies[server.MAX_PER_COMPANY] == "Tiny Inc"
+    assert len(d["jobs"]) == 21, "nothing dropped — demoted, not filtered"
