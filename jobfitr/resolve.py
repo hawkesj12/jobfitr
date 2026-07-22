@@ -38,6 +38,13 @@ from .snapshot import load_dotenv
 # Off by default; the nightly path uses name-guessing over the (few) new companies.
 MINE_LIMIT = int(os.environ.get("JOBFITR_CDX_MINE_LIMIT", "4000"))
 
+# What Common Crawl is mined for. Workday belongs here and ONLY here: its three-part
+# key (tenant, wdN host, site slug) is visible in a crawled URL but unguessable from a
+# company name, so CDX is the only route to the enterprise/government/healthcare tier.
+CDX_ATS = ["greenhouse", "lever", "ashby", "workday"]
+# What a company NAME can be guessed into — single-key ATSs only.
+GUESSABLE_ATS = ["greenhouse", "lever", "ashby"]
+
 
 def resolve_batch(
     limit: int = 500,
@@ -64,21 +71,27 @@ def resolve_batch(
 
     if use_cdx:
         universe = []
-        for ats in ats_list or ["greenhouse", "lever", "ashby"]:
+        for ats in ats_list or CDX_ATS:
             try:
                 universe.extend(discover.mine(ats, limit=MINE_LIMIT))
             except Exception:  # noqa: BLE001 — a CDX hiccup must not kill the run
                 continue
+        # Matching a NAME against the mined universe is the only way Workday is
+        # reachable at all: its site slug ('BWCareers', 'Agent-Staff') cannot be
+        # guessed from a company name, but CDX saw the whole tenant/host/site triple,
+        # so a name that matches the tenant inherits the other two. That is the entire
+        # non-tech tier — insurance, manufacturing, municipalities, national labs.
         for e in discover.match_known(names, universe):
             found.setdefault(e["name"], e)
 
-    # Name-guessing for whatever the CDX match didn't cover.
+    # Name-guessing for whatever the CDX match didn't cover. Deliberately NOT Workday:
+    # a guessed tenant without the right site slug is a wasted request, not a company.
     outcomes: list[dict] = []
     remaining = [n for n in names if n not in found]
     if remaining:
         for e in discover.from_names(
             remaining,
-            ats_list=ats_list,
+            ats_list=[a for a in (ats_list or GUESSABLE_ATS) if a != "workday"],
             known=known,
             workers=workers,
             outcomes=outcomes,
@@ -112,6 +125,76 @@ def resolve_batch(
     }
 
 
+def discover_new(
+    ats_list: list[str] | None = None,
+    limit: int = MINE_LIMIT,
+    workers: int = 8,
+    path: str | None = None,
+) -> dict:
+    """Add companies we have NEVER heard of, straight from Common Crawl.
+
+    The mirror image of resolve_batch, and the half that actually carries the
+    non-tech tier. resolve_batch walks employers already in the store and asks "does
+    this one have a board?" — so it can only ever find companies an aggregator
+    already showed us. But the Workday universe (Barry-Wehmiller, Argonne, Baltimore
+    City, Ace Hardware) never appears in the store at all: those employers do not
+    syndicate to the free boards, which is precisely why they are missing. Matching
+    names against CDX cannot reach them, because there is no name to match.
+
+    So this goes the other way: mine the index for every board that exists, drop the
+    ones already in the ledger, probe the rest, and keep what answers. No identity
+    check — there is no company name to verify against, and none is claimed; the
+    company name arrives with the jobs themselves.
+    """
+    known = {
+        (c["ats"], (c["slug"] or "").lower(), (c.get("site") or "").lower())
+        for c in store.resolved_companies(path=path)
+    }
+    candidates = []
+    for ats in ats_list or CDX_ATS:
+        try:
+            mined = discover.mine(ats, limit=limit)
+        except Exception:  # noqa: BLE001 — one bad pattern must not kill the sweep
+            continue
+        for c in mined:
+            key = (c["ats"], c["slug"].lower(), (c.get("site") or "").lower())
+            if key not in known:
+                known.add(key)
+                candidates.append(c)
+
+    outcomes: list[dict] = []
+    verified = discover.probe(candidates, workers=workers, outcomes=outcomes)
+    for e in verified:
+        store.record_resolution(_board_name(e), e, variant="cdx-discovery", path=path)
+    # ONLY a hard refusal is terminal. A 429 is the rate limiter asking us to slow
+    # down — recording that as dead would blacklist good employers wholesale, since
+    # sweeping a few hundred Workday tenants reliably trips it.
+    refused = [o for o in outcomes if o.get("outcome") == "refused"]
+    for o in refused:
+        store.record_resolution(_board_name(o), None, status="dead", path=path)
+    throttled = sum(1 for o in outcomes if o.get("outcome") == "throttled")
+    return {
+        "mined": len(candidates),
+        "added": len(verified),
+        "dead": len(refused),
+        "throttled": throttled,
+        "roles": sum(e.get("roles", 0) for e in verified),
+    }
+
+
+def _board_name(entry: dict) -> str:
+    """The ledger identity of a discovered BOARD.
+
+    For most ATSs a company has one board and the slug is enough. Workday tenants
+    routinely run several — Ace Hardware has External, ARG_External and AHHS_External,
+    all different divisions with different jobs — so keying on the tenant alone
+    collapses them and silently keeps only the last one seen.
+    """
+    if entry.get("ats") == "workday" and entry.get("site"):
+        return f"{entry['slug']}/{entry['site']}"
+    return entry.get("name") or entry["slug"]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="jobfitr-resolve",
@@ -122,6 +205,12 @@ def main(argv=None) -> int:
         "--cdx",
         action="store_true",
         help="also mine Common Crawl and match names against it (slower, better)",
+    )
+    ap.add_argument(
+        "--discover",
+        action="store_true",
+        help="add NEW companies from Common Crawl that the store has never seen "
+        "(the only route to the Workday/enterprise tier)",
     )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stats", action="store_true", help="print ledger state and exit")
@@ -136,14 +225,22 @@ def main(argv=None) -> int:
         print(
             f"companies in store: {s['companies_in_store']:,}  "
             f"resolved: {s['resolved']:,}  unresolved: {s['unresolved']:,}  "
-            f"never checked: {s['never_checked']:,}"
+            f"dead: {s.get('dead', 0):,}  never checked: {s['never_checked']:,}"
         )
         return 0
+
+    if args.discover:
+        d = discover_new(workers=args.workers)
+        print(
+            f"jobfitr-discover: mined {d['mined']:,} unknown boards -> "
+            f"{d['added']:,} added ({d['roles']:,} roles), {d['dead']:,} refused"
+        )
 
     r = resolve_batch(limit=args.limit, use_cdx=args.cdx, workers=args.workers)
     print(
         f"jobfitr-resolve: checked {r['checked']:,} companies -> "
-        f"{r['resolved']:,} resolved, {r['unresolved']:,} cached as unresolved"
+        f"{r['resolved']:,} resolved, {r['dead']:,} dead, "
+        f"{r['unresolved']:,} cached as unresolved"
     )
     return 0
 
