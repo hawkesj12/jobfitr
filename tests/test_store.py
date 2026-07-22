@@ -542,3 +542,20 @@ def test_missing_or_corrupt_watchlist_seeds_nothing(db, tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert store.seed_companies_from_watchlist(bad, path=db) == 0
+
+
+def test_cdx_failure_is_reported_not_swallowed(db, monkeypatch):
+    """A discovery run that mined nothing because Common Crawl REFUSED us is a
+    completely different event from one that found nothing new. Reporting a silent
+    zero for both is the same failure shape as the frozen pool."""
+    from jobfitr import resolve as _resolve
+
+    def boom(ats, **kw):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(_resolve.discover, "mine", boom)
+    monkeypatch.setattr(_resolve.store, "DB_PATH", db)
+    out = _resolve.discover_new(ats_list=["greenhouse", "workday"], path=db)
+    assert out["mined"] == 0
+    assert len(out["mine_errors"]) == 2, "every failing pattern must be named"
+    assert "greenhouse" in out["mine_errors"][0]

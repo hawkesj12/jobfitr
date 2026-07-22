@@ -150,11 +150,16 @@ def discover_new(
         (c["ats"], (c["slug"] or "").lower(), (c.get("site") or "").lower())
         for c in store.resolved_companies(path=path)
     }
-    candidates = []
+    candidates, mine_errors = [], []
     for ats in ats_list or CDX_ATS:
         try:
             mined = discover.mine(ats, limit=limit)
-        except Exception:  # noqa: BLE001 — one bad pattern must not kill the sweep
+        except Exception as e:  # noqa: BLE001 — one bad pattern must not kill the sweep
+            # Say so. Swallowing this made "Common Crawl is refusing us" look exactly
+            # like "Common Crawl had nothing new" — a silent zero, which is the same
+            # failure shape as the frozen pool. CDX rate-limits by IP after a heavy
+            # sweep, so this is an expected condition, not an exotic one.
+            mine_errors.append(f"{ats}: {type(e).__name__}")
             continue
         for c in mined:
             key = (c["ats"], c["slug"].lower(), (c.get("site") or "").lower())
@@ -179,6 +184,7 @@ def discover_new(
         "dead": len(refused),
         "throttled": throttled,
         "roles": sum(e.get("roles", 0) for e in verified),
+        "mine_errors": mine_errors,
     }
 
 
@@ -233,8 +239,17 @@ def main(argv=None) -> int:
         d = discover_new(workers=args.workers)
         print(
             f"jobfitr-discover: mined {d['mined']:,} unknown boards -> "
-            f"{d['added']:,} added ({d['roles']:,} roles), {d['dead']:,} refused"
+            f"{d['added']:,} added ({d['roles']:,} roles), {d['dead']:,} refused, "
+            f"{d['throttled']:,} throttled"
         )
+        if d["mine_errors"]:
+            # LOUD: a discovery run that mined nothing because Common Crawl refused
+            # us is a completely different event from one that found nothing new.
+            print(
+                f"  ⚠ Common Crawl unreachable for {len(d['mine_errors'])} pattern(s): "
+                f"{', '.join(d['mine_errors'])}"
+            )
+            print("    → no new companies were discovered this run; retry later.")
 
     r = resolve_batch(limit=args.limit, use_cdx=args.cdx, workers=args.workers)
     print(
