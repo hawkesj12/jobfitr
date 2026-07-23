@@ -1,14 +1,22 @@
-# Fire the jobfitr baseline harvest once a day (and shortly after boot). Demoted
-# from 6h → 24h: live per-search fetches own freshness now, so this is just the
-# broad baseline floor. Persistent=true runs a missed harvest after downtime.
+# Fire the jobfitr baseline harvest nightly at 04:07, an hour after resolution (03:00)
+# and after eviction (03:30). The FIXED clock is load-bearing, not cosmetic: resolution
+# decides which companies the harvest polls, so it must finish first — jobfitr-resolve
+# bounds itself to 45 min "so it cannot still be running when the harvest starts at
+# 04:07", and that promise only holds if 04:07 is actually fixed.
+#
+# This was previously OnBootSec/OnUnitActiveSec — a RELATIVE timer that re-anchored to
+# whenever the service last ran (including a manual `systemctl start`), so it silently
+# drifted off 04:07 into the middle of the day, on a box serving live traffic, breaking
+# the ordering guarantee above. RandomizedDelaySec keeps it off the exact second of any
+# other job; Persistent=true runs a missed harvest after downtime.
 # Install: /etc/systemd/system/jobfitr-harvest.timer (done by bootstrap.sh).
 
 [Unit]
-Description=Run the jobfitr baseline harvest daily
+Description=Run the jobfitr baseline harvest nightly
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=24h
+OnCalendar=*-*-* 04:07:00
+RandomizedDelaySec=5min
 Persistent=true
 
 [Install]

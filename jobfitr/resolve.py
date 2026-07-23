@@ -185,13 +185,17 @@ def discover_new(
     outcomes: list[dict] = []
     verified = discover.probe(candidates, workers=workers, outcomes=outcomes)
     for e in verified:
-        store.record_resolution(_board_name(e), e, variant="cdx-discovery", path=path)
+        store.record_resolution(
+            _board_name(e), e, variant="cdx-discovery", key=board_key(e), path=path
+        )
     # ONLY a hard refusal is terminal. A 429 is the rate limiter asking us to slow
     # down — recording that as dead would blacklist good employers wholesale, since
     # sweeping a few hundred Workday tenants reliably trips it.
     refused = [o for o in outcomes if o.get("outcome") == "refused"]
     for o in refused:
-        store.record_resolution(_board_name(o), None, status="dead", path=path)
+        store.record_resolution(
+            _board_name(o), None, status="dead", key=board_key(o), path=path
+        )
     throttled = sum(1 for o in outcomes if o.get("outcome") == "throttled")
     return {
         "mined": len(candidates),
@@ -204,16 +208,26 @@ def discover_new(
 
 
 def _board_name(entry: dict) -> str:
-    """The ledger identity of a discovered BOARD.
-
-    For most ATSs a company has one board and the slug is enough. Workday tenants
-    routinely run several — Ace Hardware has External, ARG_External and AHHS_External,
-    all different divisions with different jobs — so keying on the tenant alone
-    collapses them and silently keeps only the last one seen.
-    """
+    """The DISPLAY name of a discovered BOARD (what shows in the ledger's `name`)."""
     if entry.get("ats") == "workday" and entry.get("site"):
         return f"{entry['slug']}/{entry['site']}"
     return entry.get("name") or entry["slug"]
+
+
+def board_key(entry: dict) -> str:
+    """The ledger PRIMARY KEY for a discovered board.
+
+    Deliberately in its own `board:` namespace. A discovered board is identified by
+    what it IS (ats + slug), not by a company name we don't have — and it must never
+    share a key with a name-resolved company, because a company's slug is its own
+    normalized name (see discover.name_variants), so board slugs and company names
+    would collide by construction. Workday tenants run several boards (Ace Hardware:
+    External, ARG_External, AHHS_External), so the site is part of the key too.
+    """
+    ats, slug = entry.get("ats", ""), entry.get("slug", "")
+    if ats == "workday" and entry.get("site"):
+        return f"board:workday:{slug}/{entry['site']}"
+    return f"board:{ats}:{slug}"
 
 
 def main(argv=None) -> int:

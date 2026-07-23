@@ -343,6 +343,7 @@ def record_resolution(
     entry: dict | None = None,
     variant: str = "",
     status: str | None = None,
+    key: str | None = None,
     path: str | None = None,
 ) -> None:
     """Write one company's outcome. `entry` None/empty = a cached NEGATIVE.
@@ -350,10 +351,30 @@ def record_resolution(
     `status` overrides the derived value — pass 'dead' for a board that answers but
     refuses us (a 403 Workday tenant), so the scheduler stops asking. `attempts`
     increments across runs so a company that keeps failing stays visible.
+
+    `key` overrides the primary key. A COMPANY resolution keys on its normalized name
+    (the default); a BOARD discovered from Common Crawl must NOT, because a board slug
+    and a company name share this one namespace and collide by construction — a
+    company's slug IS its normalized name. A discovered board passes an explicit
+    `board:{ats}:{slug}` key so it can never take the identity of a name-resolved
+    company (see resolve.board_key).
     """
     now = time.time()
     e = entry or {}
+    new_status = status or ("resolved" if e else "unresolved")
+    row_key = key or norm_company(name)
     with _conn(path) as c:
+        # No-downgrade guard: a refusal must never bury a live resolution. Without it,
+        # a discovered board that 403s could write status='dead' — terminal — over a
+        # correct binding, nulling its ats/slug and removing it from both resolution
+        # and discovery forever. The schema comment calls this the "sticky and silent"
+        # failure; this is the belt to the key-namespacing suspenders.
+        if new_status == "dead":
+            existing = c.execute(
+                "SELECT status FROM companies WHERE name_key=?", (row_key,)
+            ).fetchone()
+            if existing and existing["status"] == "resolved":
+                return
         c.execute(
             """INSERT INTO companies(name_key,name,ats,slug,host,site,status,roles,
                                      matched_variant,checked_at,attempts)
@@ -365,13 +386,13 @@ def record_resolution(
                  matched_variant=excluded.matched_variant, checked_at=excluded.checked_at,
                  attempts=companies.attempts+1""",
             {
-                "key": norm_company(name),
+                "key": row_key,
                 "name": name,
                 "ats": e.get("ats"),
                 "slug": e.get("slug"),
                 "host": e.get("host"),
                 "site": e.get("site"),
-                "status": status or ("resolved" if e else "unresolved"),
+                "status": new_status,
                 "roles": e.get("roles"),
                 "variant": variant,
                 "now": now,

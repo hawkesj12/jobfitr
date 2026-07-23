@@ -140,9 +140,14 @@ sudo systemctl enable --now jobfitr-evict@blue.timer jobfitr-evict@green.timer j
 sudo -u jobfitr /opt/jobfitr/green/jobfitr/.venv/bin/jobfitr-resolve --stats
 sudo -u jobfitr /opt/jobfitr/bin/resolve-active.sh          # ~25 min
 
-# 5. harvest the expanded universe (~25-40 min: more boards + Workday descriptions)
-sudo systemctl start jobfitr-harvest.service
-journalctl -u jobfitr-harvest -f
+# 5. harvest the expanded universe (~25-40 min: more boards + Workday descriptions).
+#    Run the wrapper DIRECTLY, not `systemctl start` — the harvest timer is now a fixed
+#    OnCalendar clock (04:07) that the resolve->harvest ordering depends on, and
+#    `systemctl start jobfitr-harvest.service` used to re-anchor the OLD relative timer
+#    off that clock. With OnCalendar this no longer drifts, but run the wrapper here so
+#    a first harvest never touches the timer's schedule at all.
+sudo /opt/jobfitr/bin/harvest-active.sh
+journalctl -u jobfitr-harvest -f   # (or just watch the wrapper's stdout)
 
 # 6. let green ingest the new snapshot (it polls every 15 min) or force it
 sudo systemctl restart jobfitr-web@green

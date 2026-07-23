@@ -516,9 +516,7 @@ def test_seed_imports_the_curated_watchlist_as_resolved(db, tmp_path):
 def test_seeding_is_idempotent(db, tmp_path):
     wl = tmp_path / "w.json"
     wl.write_text(
-        json.dumps(
-            {"companies": [{"name": "Acme", "ats": "ashby", "slug": "acme"}]}
-        )
+        json.dumps({"companies": [{"name": "Acme", "ats": "ashby", "slug": "acme"}]})
     )
     store.seed_companies_from_watchlist(wl, path=db)
     store.seed_companies_from_watchlist(wl, path=db)
@@ -530,7 +528,11 @@ def test_a_seeded_company_is_never_queued_for_discovery(db, tmp_path):
     wl = tmp_path / "w.json"
     wl.write_text(
         json.dumps(
-            {"companies": [{"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"}]}
+            {
+                "companies": [
+                    {"name": "Anthropic", "ats": "greenhouse", "slug": "anthropic"}
+                ]
+            }
         )
     )
     store.seed_companies_from_watchlist(wl, path=db)
@@ -565,8 +567,14 @@ def test_cdx_failure_is_reported_not_swallowed(db, monkeypatch):
 def test_board_evidence_reads_ownership_out_of_stored_urls(db):
     store.upsert_jobs(
         [
-            _job("https://jobs.ashbyhq.com/runway-ml/abc", "Engineer", company="Runway"),
-            _job("https://boards.greenhouse.io/stripe/jobs/1", "Engineer", company="Stripe"),
+            _job(
+                "https://jobs.ashbyhq.com/runway-ml/abc", "Engineer", company="Runway"
+            ),
+            _job(
+                "https://boards.greenhouse.io/stripe/jobs/1",
+                "Engineer",
+                company="Stripe",
+            ),
             _job("https://adzuna.com/land/ad/123", "Engineer", company="Some Agency"),
         ],
         path=db,
@@ -586,7 +594,10 @@ def test_audit_flags_a_resolution_its_own_links_contradict(db):
         path=db,
     )
     store.record_resolution(
-        "Runway", {"ats": "ashby", "slug": "runway", "roles": 4}, variant="runway", path=db
+        "Runway",
+        {"ats": "ashby", "slug": "runway", "roles": 4},
+        variant="runway",
+        path=db,
     )
     a = store.audit_resolutions(path=db)
     assert a["checked"] == 1 and a["agree"] == 0
@@ -626,7 +637,9 @@ def test_a_company_may_legitimately_own_several_boards(db):
         ],
         path=db,
     )
-    store.record_resolution("Acme", {"ats": "ashby", "slug": "acme", "roles": 2}, path=db)
+    store.record_resolution(
+        "Acme", {"ats": "ashby", "slug": "acme", "roles": 2}, path=db
+    )
     assert store.audit_resolutions(path=db)["agree"] == 1
 
 
@@ -644,3 +657,112 @@ def test_quarantine_retracts_but_keeps_the_evidence(db):
         row = c.execute("SELECT status,slug,matched_variant FROM companies").fetchone()
     assert row["status"] == "quarantined" and row["slug"] == "runway"
     assert "runway-ml" in row["matched_variant"]
+
+
+# ── discover_new must not collide with name-resolved companies ───────────────
+# REGRESSION (panel blocker 1): board slugs and company names shared one name_key
+# namespace, so a CDX-discovered board silently overwrote a correct resolution, and a
+# refused board could mark a resolved company permanently `dead`. Both reproduced
+# against a temp store during the panel review; neither had any test coverage.
+def _mine_ashby(entry):
+    from jobfitr import resolve as _r
+
+    _r.discover.mine = lambda ats, **kw: [entry] if ats == entry["ats"] else []
+    return _r
+
+
+def test_discovered_board_does_not_clobber_a_name_resolution(db, monkeypatch):
+    from jobfitr import resolve
+
+    store.record_resolution(
+        "Ramp", {"ats": "lever", "slug": "ramp", "roles": 88}, variant="ramp", path=db
+    )
+    monkeypatch.setattr(
+        resolve.discover,
+        "mine",
+        lambda ats, **kw: [{"ats": "ashby", "slug": "ramp"}] if ats == "ashby" else [],
+    )
+    monkeypatch.setattr(
+        resolve.discover,
+        "probe",
+        lambda c, outcomes=None, **kw: [{**x, "roles": 3, "outcome": "ok"} for x in c],
+    )
+    resolve.discover_new(ats_list=["ashby"], path=db)
+
+    # the correct 88-role Lever binding survives, under its own name key...
+    with store._conn(db) as cx:
+        ramp = cx.execute("SELECT * FROM companies WHERE name_key='ramp'").fetchone()
+    assert (ramp["ats"], ramp["roles"], ramp["name"]) == ("lever", 88, "Ramp")
+    # ...and the unrelated discovered board lands under a namespaced key
+    with store._conn(db) as cx:
+        board = cx.execute(
+            "SELECT * FROM companies WHERE name_key='board:ashby:ramp'"
+        ).fetchone()
+    assert board is not None and board["ats"] == "ashby"
+
+
+def test_a_refused_discovered_board_cannot_kill_a_resolved_company(db, monkeypatch):
+    from jobfitr import resolve
+
+    store.record_resolution(
+        "Acme", {"ats": "lever", "slug": "acme", "roles": 42}, variant="acme", path=db
+    )
+    monkeypatch.setattr(
+        resolve.discover,
+        "mine",
+        lambda ats, **kw: (
+            [{"ats": "greenhouse", "slug": "acme"}] if ats == "greenhouse" else []
+        ),
+    )
+    monkeypatch.setattr(
+        resolve.discover,
+        "probe",
+        lambda c, outcomes=None, **kw: (
+            (
+                outcomes.extend({**x, "outcome": "refused"} for x in c)
+                if outcomes is not None
+                else None
+            )
+            or []
+        ),
+    )
+    resolve.discover_new(ats_list=["greenhouse"], path=db)
+
+    assert [c["name"] for c in store.resolved_companies(path=db)] == ["Acme"]
+    assert store.unresolved_companies(
+        path=db
+    ) == [] or "Acme" not in store.unresolved_companies(path=db)
+
+
+def test_workday_boards_get_distinct_namespaced_keys():
+    from jobfitr.resolve import board_key
+
+    assert (
+        board_key({"ats": "greenhouse", "slug": "stripe"}) == "board:greenhouse:stripe"
+    )
+    # Ace Hardware's several Workday sites must not collapse to one key
+    a = board_key({"ats": "workday", "slug": "acehardware", "site": "External"})
+    b = board_key({"ats": "workday", "slug": "acehardware", "site": "ARG_External"})
+    assert a != b and a == "board:workday:acehardware/External"
+
+
+def test_record_resolution_guard_blocks_a_resolved_to_dead_downgrade(db):
+    store.record_resolution(
+        "Keeper", {"ats": "lever", "slug": "keeper", "roles": 7}, path=db
+    )
+    store.record_resolution("Keeper", None, status="dead", path=db)  # try to bury it
+    got = store.resolved_companies(path=db)
+    assert [c["name"] for c in got] == ["Keeper"] and got[0]["roles"] == 7
+
+
+def test_record_resolution_key_override_is_verbatim(db):
+    store.record_resolution(
+        "Whatever Display",
+        {"ats": "ashby", "slug": "x", "roles": 1},
+        key="board:ashby:x",
+        path=db,
+    )
+    with store._conn(db) as cx:
+        row = cx.execute("SELECT name_key, name FROM companies").fetchone()
+    assert row["name_key"] == "board:ashby:x"  # NOT norm_company("Whatever Display")
+    assert row["name"] == "Whatever Display"
