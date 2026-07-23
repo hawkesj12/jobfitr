@@ -766,3 +766,50 @@ def test_record_resolution_key_override_is_verbatim(db):
         row = cx.execute("SELECT name_key, name FROM companies").fetchone()
     assert row["name_key"] == "board:ashby:x"  # NOT norm_company("Whatever Display")
     assert row["name"] == "Whatever Display"
+
+
+# ── M1: a throttled/errored probe must not become a 90-day negative ──────────
+def _stub_depth(monkeypatch, fn):
+    from job_radar import sources
+
+    for a in list(sources.DEPTH_ALL):
+        monkeypatch.setitem(sources.DEPTH_ALL, a, fn)
+
+
+def test_a_throttled_run_is_not_cached_as_a_negative(db, monkeypatch):
+    """REGRESSION (panel M1): probe() marks a 429 `throttled` (retryable) on purpose,
+    but resolve_batch wrote any un-found name as `unresolved` — a 90-day negative. One
+    rate-limited night (which the sweep "reliably trips" at volume) froze those
+    companies out of discovery for a quarter."""
+    import urllib.error
+
+    from jobfitr import resolve
+
+    _seed_companies(db, [("Alpha Inc", 2), ("Beta Co", 1)])
+
+    def throttled(slug, **kw):
+        raise urllib.error.HTTPError("u", 429, "slow down", None, None)
+
+    _stub_depth(monkeypatch, throttled)
+    r = resolve.resolve_batch(limit=10, workers=2, path=db)
+    assert r["deferred"] == 2 and r["unresolved"] == 0
+    # both are still queued for the next run, not cached out
+    assert set(store.unresolved_companies(path=db)) == {"Alpha Inc", "Beta Co"}
+
+
+def test_a_definitive_miss_is_still_cached(db, monkeypatch):
+    """The inverse must be unchanged: a real 404 means no board, and that answer is
+    worth caching so we don't re-probe a genuine dead end every night."""
+    import urllib.error
+
+    from jobfitr import resolve
+
+    _seed_companies(db, [("Gamma LLC", 1)])
+
+    def missing(slug, **kw):
+        raise urllib.error.HTTPError("u", 404, "no board", None, None)
+
+    _stub_depth(monkeypatch, missing)
+    r = resolve.resolve_batch(limit=10, workers=2, path=db)
+    assert r["unresolved"] == 1 and r["deferred"] == 0
+    assert store.unresolved_companies(path=db) == []  # cached, not re-queued now

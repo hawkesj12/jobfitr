@@ -98,14 +98,31 @@ def resolve_batch(
         ):
             found.setdefault(e["name"], e)
 
-    # A board that REFUSED us (401/403/429) is not "we found nothing" — it exists and
-    # has said no. Recording that as `dead` stops the nightly scheduler asking again
+    # A board that REFUSED us (401/403) is not "we found nothing" — it exists and has
+    # said no. Recording that as `dead` stops the nightly scheduler asking again
     # forever, which is both pointless and impolite.
     refused = {
         o["name"]
         for o in outcomes
         if o.get("outcome") == "refused" and o.get("name") and o["name"] not in found
     }
+
+    # A name we never got a real ANSWER for must not be cached as a 90-day negative.
+    # probe() deliberately marks a 429 `throttled` (retryable) and a network fault
+    # `error`, precisely so a rate-limited sweep — which the code's own comments say
+    # "reliably trips" at volume — is not mistaken for "this company has no board." If
+    # ANY of a name's candidates came back throttled/error, we didn't finish probing
+    # it: leave it never-checked so tonight's run retries, rather than freezing it out
+    # of discovery for a quarter over one bad night.
+    indeterminate = (
+        {
+            o["name"]
+            for o in outcomes
+            if o.get("outcome") in ("throttled", "error") and o.get("name")
+        }
+        - set(found)
+        - refused
+    )
 
     # The apply URLs we already hold are an independent statement of who owns which
     # board — and the ONLY ownership check that reaches Ashby and Lever, which expose
@@ -123,6 +140,8 @@ def resolve_batch(
 
     for name in names:
         entry = found.get(name)
+        if not entry and name in indeterminate:
+            continue  # never got a real answer — retry next run, don't cache
         store.record_resolution(
             name,
             entry,
@@ -136,7 +155,8 @@ def resolve_batch(
         "resolved": len(found),
         "dead": len(refused),
         "contradicted": len(contradicted),
-        "unresolved": len(names) - len(found) - len(refused),
+        "deferred": len(indeterminate),
+        "unresolved": len(names) - len(found) - len(refused) - len(indeterminate),
     }
 
 

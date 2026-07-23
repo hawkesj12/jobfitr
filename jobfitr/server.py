@@ -203,30 +203,35 @@ def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
 
 
 def _spread_companies(scored: list, cap: int | None = None) -> list:
-    """Reorder so no single employer monopolises the top of the board.
+    """Drop each employer's roles beyond `cap` so no one company monopolises the board.
 
     Ranking by score alone is fine when the biggest employer has a handful of roles.
-    It stops being fine at scale: the pool now carries employers with 900+ open jobs
+    It stops being fine at scale: the pool carries employers with 900+ open jobs
     (Veterans Health Administration) and 600+ (Accenture Federal Services), and a
-    title that matches them well would hand a user fifty near-identical rows from one
-    company. That reads as a broken search, not a thorough one.
+    title that matches them well would otherwise hand a user fifty near-identical rows
+    from one company. That reads as a broken search, not a thorough one.
 
-    Each company's best `cap` roles keep their natural rank; the rest are demoted
-    behind everything else rather than dropped. Demoting instead of dropping matters:
-    for a niche search where one employer genuinely IS the market, the user still
-    sees every role — just after they have seen who else is hiring.
+    This DROPS the overflow rather than demoting it. An earlier version pushed the
+    excess to the back of the list, but the caller then truncates to a fixed window
+    (`_rank` does `[:limit]`), and for a shallow query the truncation sliced straight
+    back into that demoted overflow — so "nurse" showed 19 of 50 rows from one
+    employer. Dropping is also what lets the RESULT_LADDER work: a capped set that
+    comes up short is the honest signal that makes the ladder relax and pull a more
+    diverse set, instead of being silently padded back to full by the dominant
+    employer. A user who wants only that employer searches more specifically.
     """
     cap = MAX_PER_COMPANY if cap is None else cap
     if cap <= 0:
         return scored
     seen: dict[str, int] = {}
-    keep, overflow = [], []
+    keep = []
     for item in scored:
         company = (item[0].get("company") or "").strip().lower()
         n = seen.get(company, 0) + 1
         seen[company] = n
-        (keep if n <= cap else overflow).append(item)
-    return keep + overflow
+        if n <= cap:
+            keep.append(item)
+    return keep
 
 
 def _rank(

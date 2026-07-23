@@ -63,29 +63,38 @@ fi
 # 4. keys present (a slot with no Adzuna key silently loses the live-fetch lane)
 [[ "$adz" == "True" ]] && ok "adzuna configured" "yes" || bad "adzuna configured" "no key"
 
-# 5. a real search returns real, diverse results
-res=$(curl -s --max-time 45 -X POST "${base}/api/score" \
-	-H 'Content-Type: application/json' \
-	-d '{"titles":["engineer"],"location":"","min_score":"plenty"}' 2>/dev/null)
-if [[ -z "$res" ]]; then
-	bad "search works" "/api/score returned nothing"
-else
-	python3 - "$res" <<'PY'
-import json, sys
+# 5. real searches return real, diverse results. Test several titles, INCLUDING the
+#    ones that expose a broken diversity cap: "nurse" and "driver" are dominated by a
+#    few huge employers (Veterans Health Administration, McLane), so a cap that only
+#    reorders instead of filtering fails here while "engineer" passes. That exact gap
+#    shipped once — the gate must cover it.
+for title in engineer nurse driver; do
+	res=$(curl -s --max-time 45 -X POST "${base}/api/score" \
+		-H 'Content-Type: application/json' \
+		-d "{\"titles\":[\"${title}\"],\"location\":\"\",\"min_score\":\"plenty\"}" 2>/dev/null)
+	if [[ -z "$res" ]]; then
+		bad "search: ${title}" "/api/score returned nothing"
+		continue
+	fi
+	TITLE="$title" python3 - "$res" <<'PY'
+import json, os, sys
 from collections import Counter
-d = json.loads(sys.argv[1])
+d = json.loads(sys.argv[1]); t = os.environ["TITLE"]
 jobs = d.get("jobs", [])
 n = len(jobs)
 comp = Counter(j.get("company") for j in jobs)
 top = comp.most_common(1)[0][1] if comp else 0
 withdesc = sum(1 for j in jobs if (j.get("description") or "").strip())
-print(f"{'search works':<46} {'✓' if n else '✗'} {n} results, {len(comp)} companies")
-print(f"{'no employer dominates':<46} {'✓' if top <= 6 else '✗'} max {top} from one company")
-print(f"{'results are readable':<46} {'✓' if withdesc >= n*0.7 else '✗'} {withdesc}/{n} have a description")
-sys.exit(0 if (n and top <= 6 and withdesc >= n*0.7) else 1)
+ok_n = n > 0
+ok_div = top <= 6
+ok_desc = withdesc >= n * 0.7
+mark = "✓" if (ok_n and ok_div and ok_desc) else "✗"
+print(f"{'search: '+t:<40} {mark} {n} results · {len(comp)} companies · "
+      f"max {top}/one · {withdesc}/{n} readable")
+sys.exit(0 if (ok_n and ok_div and ok_desc) else 1)
 PY
 	[[ $? -ne 0 ]] && fail=1
-fi
+done
 
 echo
 if [[ "$fail" -eq 0 ]]; then

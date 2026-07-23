@@ -369,7 +369,7 @@ def test_harvest_polls_the_LEDGER_not_the_watchlist_file(tmp_path, monkeypatch):
     monkeypatch.setattr(
         snapshot.engine,
         "harvest",
-        lambda cfg, *a, **kw: (seen.update(kw) or ([], [], [])),
+        lambda cfg, *a, **kw: seen.update(kw) or ([], [], []),
     )
     snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
     assert [c["slug"] for c in seen["companies"]] == ["discovered"]
@@ -404,13 +404,15 @@ def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
     monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
     wl = tmp_path / "wl.json"
     wl.write_text(
-        _json.dumps({"companies": [{"name": "Seed Co", "ats": "lever", "slug": "seedco"}]})
+        _json.dumps(
+            {"companies": [{"name": "Seed Co", "ats": "lever", "slug": "seedco"}]}
+        )
     )
     seen = {}
     monkeypatch.setattr(
         snapshot.engine,
         "harvest",
-        lambda cfg, *a, **kw: (seen.update(kw) or ([], [], [])),
+        lambda cfg, *a, **kw: seen.update(kw) or ([], [], []),
     )
     snapshot.build_snapshot(Config(), str(wl), str(tmp_path / "out.json"))
     assert [c["slug"] for c in seen["companies"]] == ["seedco"]
@@ -418,11 +420,14 @@ def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
 
 # ── per-company diversity (the guard the 3x corpus needs) ────────────────────
 def _many(company, n, score_from=100):
-    return [(
-        {"company": company, "title": f"{company} Role {i}"},
-        float(score_from - i),
-        "",
-    ) for i in range(n)]
+    return [
+        (
+            {"company": company, "title": f"{company} Role {i}"},
+            float(score_from - i),
+            "",
+        )
+        for i in range(n)
+    ]
 
 
 def test_one_employer_cannot_monopolise_the_front_of_the_board():
@@ -431,22 +436,33 @@ def test_one_employer_cannot_monopolise_the_front_of_the_board():
     near-identical rows from one company, which reads as a broken search."""
     scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
     out = server._spread_companies(scored, cap=4)
-    companies = [c["company"] for c, _, _ in out]
-    # every SmallCo role must appear before BigCo's 5th — that is the whole point
-    fifth_bigco = [i for i, c in enumerate(companies) if c == "BigCo"][4]
-    assert all(
-        i < fifth_bigco for i, c in enumerate(companies) if c == "SmallCo"
-    ), f"a smaller employer got buried: {companies[:10]}"
-    assert companies[:4] == ["BigCo"] * 4  # its best 4 keep their natural rank
+    from collections import Counter
+
+    counts = Counter(c["company"] for c, _, _ in out)
+    assert counts["BigCo"] == 4 and counts["SmallCo"] == 3
+    assert out[0][0]["company"] == "BigCo"  # its best 4 keep their natural rank
 
 
-def test_spreading_demotes_rather_than_drops():
-    """For a niche search where one employer genuinely IS the market, the user must
-    still see every role — just after they have seen who else is hiring."""
+def test_cap_holds_through_truncation():
+    """REGRESSION (panel blocker B3): the cap demoted overflow to the back, then the
+    caller's [:limit] sliced straight back into it. On live prod this made a "nurse"
+    search return 19 of 50 rows from Veterans Health Administration. The cap must hold
+    inside the returned window, not merely reorder before it."""
+    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
+    shown = server._spread_companies(scored, cap=4)[:50]  # exactly what _rank does
+    from collections import Counter
+
+    assert max(Counter(c["company"] for c, _, _ in shown).values()) == 4
+
+
+def test_spreading_drops_overflow_rather_than_padding():
+    """When one employer IS the whole pool, the cap yields a SHORT set — which is the
+    honest signal that makes the RESULT_LADDER relax, instead of the old behavior that
+    padded the window back to full with the dominant employer's demoted roles."""
     scored = _many("OnlyCo", 30)
     out = server._spread_companies(scored, cap=4)
-    assert len(out) == 30, "nothing may be discarded"
-    assert [c["title"] for c, _, _ in out] == [f"OnlyCo Role {i}" for i in range(30)]
+    assert len(out) == 4, "overflow beyond the cap is dropped, not demoted"
+    assert [c["title"] for c, _, _ in out] == [f"OnlyCo Role {i}" for i in range(4)]
 
 
 def test_spreading_preserves_the_top_result():
@@ -464,10 +480,23 @@ def test_cap_of_zero_disables_spreading():
 
 def test_score_endpoint_spreads_across_companies(client):
     _seed(
-        [_job(f"Python Engineer {i}", text="python", company="MegaCorp",
-              url=f"https://x/mega-{i}") for i in range(20)]
-        + [_job("Python Engineer A", text="python", company="Tiny Inc",
-                url="https://x/tiny-a")]
+        [
+            _job(
+                f"Python Engineer {i}",
+                text="python",
+                company="MegaCorp",
+                url=f"https://x/mega-{i}",
+            )
+            for i in range(20)
+        ]
+        + [
+            _job(
+                "Python Engineer A",
+                text="python",
+                company="Tiny Inc",
+                url="https://x/tiny-a",
+            )
+        ]
     )
     _mark_fresh(["python engineer"])
     d = client.post(
@@ -475,10 +504,14 @@ def test_score_endpoint_spreads_across_companies(client):
         json={"titles": ["python engineer"], "min_score": "plenty"},
     ).json()
     companies = [j["company"] for j in d["jobs"]]
-    # the one small employer surfaces ahead of MegaCorp's 5th role
-    assert companies[: server.MAX_PER_COMPANY] == ["MegaCorp"] * server.MAX_PER_COMPANY
-    assert companies[server.MAX_PER_COMPANY] == "Tiny Inc"
-    assert len(d["jobs"]) == 21, "nothing dropped — demoted, not filtered"
+    from collections import Counter
+
+    counts = Counter(companies)
+    # no employer exceeds the cap in what the user actually receives
+    assert counts["MegaCorp"] == server.MAX_PER_COMPANY
+    assert counts["Tiny Inc"] == 1
+    # MegaCorp's roles beyond the cap are filtered out, not shown at the tail
+    assert len(d["jobs"]) == server.MAX_PER_COMPANY + 1
 
 
 def test_load_dotenv_survives_an_unreadable_directory(tmp_path, monkeypatch):
