@@ -16,6 +16,7 @@
 Description=jobfitr harvest (build the jobs.json snapshot)
 After=network-online.target
 Wants=network-online.target
+OnFailure=jobfitr-notify@%n.service
 
 [Service]
 Type=oneshot

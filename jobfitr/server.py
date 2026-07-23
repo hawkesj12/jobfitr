@@ -30,7 +30,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from . import chat as chatmod
-from . import live, store
+from . import live, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
 from .snapshot import load_dotenv
 
@@ -120,7 +120,9 @@ CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
 # Daily cap on live Adzuna/USAJOBS fetches — the actuator saturation. When tripped,
 # we serve the cache with a `degraded` banner instead of burning the free quota.
-ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "800"))
+# Default is UNDER Adzuna's ~250/day free tier so the valve fires before the real
+# quota is blown, not after; raise the env to match a higher plan.
+ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "200"))
 
 app = FastAPI(title="jobfitr", version="0.1.0", lifespan=lifespan)
 
@@ -130,7 +132,9 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── daily live-fetch ceiling (the load-shed) ──────────────────────────────────
-_fetch_usage = {"date": "", "count": 0}
+# The tally is persisted in the store (store.live_fetch_count/note_live_fetch), so a
+# restart or crash cannot reset it and defeat the ceiling. Only the last-success
+# timestamp stays in-process — it's a display value, fine to be per-process.
 _last_fetch_ok = {"at": None}
 
 
@@ -139,17 +143,11 @@ def _today() -> str:
 
 
 def _fetch_ceiling_reached() -> bool:
-    if _fetch_usage["date"] != _today():
-        _fetch_usage["date"] = _today()
-        _fetch_usage["count"] = 0
-    return _fetch_usage["count"] >= ADZUNA_DAILY_CEILING
+    return store.live_fetch_count() >= ADZUNA_DAILY_CEILING
 
 
 def _note_fetch() -> None:
-    if _fetch_usage["date"] != _today():
-        _fetch_usage["date"] = _today()
-        _fetch_usage["count"] = 0
-    _fetch_usage["count"] += 1
+    store.note_live_fetch()
     _last_fetch_ok["at"] = datetime.now(_ET).isoformat(timespec="seconds")
 
 
@@ -404,11 +402,16 @@ def health() -> dict:
             os.environ.get("ADZUNA_APP_ID") and os.environ.get("ADZUNA_APP_KEY")
         ),
         "openrouter_ok": chatmod.chat_available(),
-        "daily_fetches_used": _fetch_usage["count"]
-        if _fetch_usage["date"] == _today()
-        else 0,
+        "daily_fetches_used": store.live_fetch_count(),
         "daily_fetch_ceiling": ADZUNA_DAILY_CEILING,
         "pool_size": store.pool_size(),
+        # The size of the harvest snapshot this slot should be serving. The pool is
+        # that snapshot plus live-fetch accumulation, so pool_size < snapshot_count
+        # means the slot UNDER-ingested — the exact regression verify-slot.sh gates on
+        # with a ratio, instead of a fixed floor that a 90%-smaller harvest slips past.
+        "snapshot_count": snapshot.load_snapshot(store.JOBS_JSON_PATH)["meta"].get(
+            "count", 0
+        ),
         "last_successful_fetch": _last_fetch_ok["at"],
         # The harvest snapshot this slot has actually ingested. Stale here means the
         # slot is serving an aging pool even while the nightly harvest is green — the

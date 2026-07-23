@@ -36,14 +36,22 @@ ok "service responds" "200"
 jqv() { printf '%s' "$health" | python3 -c "import json,sys;print(json.load(sys.stdin).get('$1'))" 2>/dev/null; }
 
 pool=$(jqv pool_size)
+snapcount=$(jqv snapshot_count)
 imported=$(jqv snapshot_imported_at)
 adz=$(jqv adzuna_ok)
 
-# 2. the pool is not empty
-if [[ "$pool" =~ ^[0-9]+$ ]] && [[ "$pool" -gt 1000 ]]; then
-	ok "pool size" "$(printf "%'d" "$pool") jobs"
-else
+# 2. the pool is not just NON-EMPTY but the right SIZE. A fixed >1000 floor let a
+#    harvest that silently dropped 90% of the depth lane pass (the pool is ~34k). Gate
+#    on the ratio to what the slot should be serving: the pool is the snapshot plus
+#    live-fetch accumulation, so it should meet or exceed snapshot_count; below 70% of
+#    it means the slot under-ingested. Keep a small absolute floor for a cold snapshot.
+if ! [[ "$pool" =~ ^[0-9]+$ ]] || [[ "$pool" -lt 500 ]]; then
 	bad "pool size" "only ${pool} jobs — the slot has not ingested a snapshot"
+elif [[ "$snapcount" =~ ^[0-9]+$ ]] && [[ "$snapcount" -gt 0 ]] &&
+	[[ $((pool * 10)) -lt $((snapcount * 7)) ]]; then
+	bad "pool size" "${pool} jobs is <70% of the ${snapcount}-job snapshot — under-ingested"
+else
+	ok "pool size" "$(printf "%'d" "$pool") jobs (snapshot ${snapcount})"
 fi
 
 # 3. THE ONE THAT BIT US: is the slot serving a CURRENT snapshot, or a frozen one?

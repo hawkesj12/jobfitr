@@ -249,6 +249,36 @@ def _meta_set(key: str, value: str, path: str | None = None) -> None:
         )
 
 
+# ── the daily live-fetch tally (Adzuna/USAJOBS load-shed) ─────────────────────
+# Persisted here rather than in the web process's memory so a restart or crash-loop
+# cannot silently zero it — that reset was what let the daily ceiling fail to bound
+# real API usage. Stored as "YYYY-MM-DD:count" in a single meta row; a new day reads
+# as 0 without needing a sweep. Per-slot (the server's own store), which is enough:
+# only the ACTIVE slot serves traffic, so only it fetches.
+_FETCH_USAGE_KEY = "live_fetch_usage"
+
+
+def live_fetch_count(path: str | None = None) -> int:
+    """Live fetches recorded so far TODAY (0 on a fresh day)."""
+    raw = _meta_get(_FETCH_USAGE_KEY, path)
+    if raw and ":" in raw:
+        day, cnt = raw.rsplit(":", 1)
+        if day == datetime.now(_ET).date().isoformat():
+            try:
+                return int(cnt)
+            except ValueError:
+                return 0
+    return 0
+
+
+def note_live_fetch(path: str | None = None) -> int:
+    """Record one live fetch against today's tally; return the new count."""
+    today = datetime.now(_ET).date().isoformat()
+    n = live_fetch_count(path) + 1
+    _meta_set(_FETCH_USAGE_KEY, f"{today}:{n}", path)
+    return n
+
+
 # ── the baseline inflow: import the harvest snapshot whenever it's newer ──────
 # The nightly harvest writes ONE shared jobs.json; every slot's store pulls from it.
 # Gating on the file's mtime (not "is the table empty?") is what makes a long-lived

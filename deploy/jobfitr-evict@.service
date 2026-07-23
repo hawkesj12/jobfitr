@@ -13,6 +13,7 @@
 
 [Unit]
 Description=jobfitr evict (garbage-collect the stale job pool) — slot %i
+OnFailure=jobfitr-notify@%n.service
 
 [Service]
 Type=oneshot

@@ -813,3 +813,28 @@ def test_a_definitive_miss_is_still_cached(db, monkeypatch):
     r = resolve.resolve_batch(limit=10, workers=2, path=db)
     assert r["unresolved"] == 1 and r["deferred"] == 0
     assert store.unresolved_companies(path=db) == []  # cached, not re-queued now
+
+
+# ── M3: the live-fetch tally persists across a "restart" ─────────────────────
+def test_live_fetch_count_persists_and_rolls_over(db, monkeypatch):
+    """REGRESSION (panel M3): the counter was in-process, so a restart/crash zeroed
+    it and defeated the daily ceiling. It now lives in the store."""
+    assert store.live_fetch_count(path=db) == 0
+    for _ in range(3):
+        store.note_live_fetch(path=db)
+    assert store.live_fetch_count(path=db) == 3
+    # a simulated restart is just a fresh read of the same store — tally survives
+    assert store.live_fetch_count(path=db) == 3
+
+    # a new day reads as 0 without any sweep
+    import jobfitr.store as s
+
+    real = s.datetime
+
+    class _Tomorrow(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2099, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(s, "datetime", _Tomorrow)
+    assert store.live_fetch_count(path=db) == 0

@@ -18,6 +18,7 @@ Wants=network-online.target
 # spacing is the timers (03:00 vs 04:07); this just keeps them from racing if both
 # are ever started by hand at once.
 Before=jobfitr-harvest.service
+OnFailure=jobfitr-notify@%n.service
 
 [Service]
 Type=oneshot

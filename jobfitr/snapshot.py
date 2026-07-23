@@ -83,8 +83,14 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
                 store.record_resolution(
                     d.get("name") or d.get("slug", ""), d, variant="funnel"
                 )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 — never fail the harvest over the ledger
+            # But say so. Swallowing this silently meant a harvest could discover new
+            # companies and fail to persist a single one, invisibly and forever. Same
+            # print-style as _harvest_universe's sibling handler below.
+            print(
+                f"note: could not record {len(discovered)} discovered companies "
+                f"to the ledger ({type(e).__name__}: {e})"
+            )
 
     jobs = [_clean_row(r) for r in rows]
 

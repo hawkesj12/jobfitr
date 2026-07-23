@@ -48,7 +48,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
     store.init()  # DB_PATH now points at the tmp db
     server.limiter.enabled = False  # don't let 40/min trip across the suite
-    server._fetch_usage.update(date="", count=0)
+    # the live-fetch tally now lives in the (fresh, per-test) store, so nothing to reset
     server._last_fetch_ok["at"] = None
     monkeypatch.setattr(
         server, "ADZUNA_DAILY_CEILING", 800
@@ -556,3 +556,47 @@ def test_harvest_config_is_found_from_the_repo_root(tmp_path, monkeypatch, capsy
     (tmp_path / "web-harvest.example.yaml").write_text("profile: {}\n")
     assert snapshot._resolve_config(None) == "web-harvest.example.yaml"
     assert "NARROW" not in capsys.readouterr().out
+
+
+# ── M3/M4: health surfaces the persisted tally and the snapshot size ─────────
+def test_health_exposes_snapshot_count_for_the_ratio_gate(client, tmp_path):
+    """M4: verify-slot.sh gates on pool_size vs snapshot_count instead of a fixed
+    floor, so the slot must publish what it should be serving."""
+    d = client.get("/api/health").json()
+    assert "snapshot_count" in d and isinstance(d["snapshot_count"], int)
+
+
+def test_health_reports_the_persisted_fetch_tally(client):
+    """M3: the count survives outside the request handler's memory."""
+    store.note_live_fetch()
+    store.note_live_fetch()
+    assert client.get("/api/health").json()["daily_fetches_used"] == 2
+
+
+# ── M5: a failed discovered-company write is reported, not swallowed ─────────
+def test_discovered_write_failure_is_reported_not_silent(tmp_path, monkeypatch, capsys):
+    """REGRESSION (panel M5): build_snapshot swallowed a ledger-write failure with a
+    bare `except: pass`, so a harvest could discover companies and persist none of
+    them, invisibly and forever."""
+    from job_radar.config import Config
+
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "s.db"))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    store.init()
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        snapshot.engine,
+        "harvest",
+        lambda cfg, *a, **kw: (
+            [],
+            [{"name": "New Co", "ats": "ashby", "slug": "n"}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(store, "record_resolution", boom)
+    meta = snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
+    assert meta["count"] == 0  # harvest still succeeded (didn't raise)
+    assert "could not record" in capsys.readouterr().out  # but it said so

@@ -1,0 +1,35 @@
+# jobfitr failure notifier — the dead-man's switch the nightly jobs never had.
+#
+# None of the resolve/harvest/evict units had an OnFailure handler, so a failed 3 AM
+# run was invisible until someone noticed the site was stale — which is how every
+# incident so far has been caught, by hand. This closes that: it is invoked as
+# `OnFailure=jobfitr-notify@%n.service` by the units below, and %i is the failed
+# unit's name.
+#
+# It does two things, both cheap:
+#   1. appends "<ts> FAILED <unit>" to a PERSISTENT log the operator (or the morning
+#      ritual) can read — works with zero external dependency.
+#   2. if JOBFITR_ALERT_URL is set (a healthchecks.io / dead-man's-snitch ping URL),
+#      curls it so a failure reaches you off-box. Wire it later by setting the env;
+#      absent, step 1 still runs.
+# Install: /etc/systemd/system/jobfitr-notify@.service
+
+[Unit]
+Description=jobfitr failure notifier for %i
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+EnvironmentFile=-/etc/jobfitr/jobfitr.env
+# %i is the failed unit's full name. Log locally always; ping externally if a URL is
+# configured. `|| true` on the curl so a flaky alerting endpoint never makes the
+# NOTIFIER itself fail (which would be its own silent hole).
+ExecStart=/bin/sh -c 'printf "%%s FAILED %%s\\n" "$(date -Is)" "%i" >> /opt/jobfitr/data/failures.log; [ -n "$JOBFITR_ALERT_URL" ] && curl -fsS --max-time 10 --data-urlencode "unit=%i" "$JOBFITR_ALERT_URL" >/dev/null 2>&1 || true'
+
+# Hardening — may write only the shared data dir (the failure log lives there).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/jobfitr/data
