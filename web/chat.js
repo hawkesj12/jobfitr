@@ -20,6 +20,8 @@
   const heroEl = document.getElementById("hero");
   const doorExtra = document.getElementById("doorextra");
   const stepsEl = document.getElementById("steps");
+  const hintEl = document.getElementById("chips-hint");
+  const sendBtn = form.querySelector(".chat-send");
 
   const messages = [];
   let config = {};
@@ -106,11 +108,13 @@
     });
   }
 
-  // ── contextual chips: ONE TAP = ONE ANSWER. ──────────────────────────────────────
-  // These used to only FILL the box and leave the user to find Enter — a dead end
-  // dressed as a button, and the single most confusing moment in the interview. A tap
-  // now sends. Anything the user has already typed is carried along, so a chip still
-  // composes with free text; typing a comma-separated list by hand works as before.
+  // ── contextual chips: tap to BUILD an answer, ↵ to send ──────────────────────────
+  // Chips are multi-select on purpose — "Remote, Hybrid" or three skills at once is a
+  // normal answer, so a tap ADDS to the box rather than committing the turn. The tapped
+  // chip is removed and the next reserve slides in, so it visibly falls away and can't
+  // be double-added. What makes this readable rather than a dead end is the send button:
+  // it lights up the moment there is something to send (see syncReady), so the way
+  // forward is on screen instead of being an Enter key you have to know about.
   function renderChips() {
     if (!chipsEl) return;
     chipsEl.textContent = "";
@@ -122,10 +126,22 @@
       b.addEventListener("click", () => selectChip(label));
       chipsEl.appendChild(b);
     }
+    if (hintEl) hintEl.hidden = !chipPool.length;
   }
   function selectChip(label) {
-    const typed = input.value.trim().replace(/,\s*$/, "");
-    send(typed ? typed + ", " + label : label);
+    const cur = input.value.trim().replace(/,\s*$/, "");
+    input.value = cur ? cur + ", " + label : label;
+    input.focus();
+    chipPool = chipPool.filter((c) => c !== label); // remove it; the next reserve slides in
+    renderChips();
+    syncReady();
+  }
+
+  // The send button is the answer to "what do I do now?" — dim while the box is empty,
+  // lit the moment there is an answer to send.
+  function syncReady() {
+    if (!sendBtn) return;
+    sendBtn.classList.toggle("ready", input.value.trim() !== "");
   }
   function setChips(list) {
     chipPool = Array.isArray(list) ? list.filter((c) => typeof c === "string" && c.trim()) : [];
@@ -137,17 +153,24 @@
     if (window.jobfitr) window.jobfitr.run(config);
   }
 
+  // Nothing about an exchange is recorded until the turn actually LANDS. Recording it
+  // up front looked harmless and was not: a failed turn left the answer sitting in the
+  // transcript as though it had been understood, while the config never received it —
+  // and the user turn stayed in `messages`, so retyping the answer sent it to the model
+  // twice, with a second identical transcript row to match. A turn that did not happen
+  // must leave the conversation exactly where it was.
   async function send(text) {
     if (busy || !text.trim()) return;
     busy = true;
     enterConversation();
     input.value = "";
-    setChips([]); // clear last question's chips until the next turn returns fresh ones
-    pushEcho(currentQuestion, text);
-    messages.push({ role: "user", content: text });
-    answered = Math.min(answered + 1, TOTAL_STEPS - 1);
-    renderSteps();
+    syncReady();
     typeInto("");
+
+    const asked = currentQuestion; // the question THIS answer is responding to
+    const priorChips = chipPool.slice(); // restored if the turn never lands
+    const turn = [...messages, { role: "user", content: text }];
+    setChips([]); // clear last question's chips until the next turn returns fresh ones
 
     // Assistant unavailable (503/429/upstream/network). If we already have a role +
     // place, just search; otherwise ask them to try again — never the form.
@@ -155,22 +178,33 @@
       if (hasTitles() && hasLocation()) {
         typeInto("Pulling your matches from what you told me…");
         setTimeout(toResults, 900);
-      } else {
-        typeInto("One sec — I lost my train of thought. Say that again?");
+        return;
       }
+      // hand the answer back so a retry is one keypress, not a retype
+      input.value = text;
+      syncReady();
+      setChips(priorChips);
+      typeInto("One sec — I lost my train of thought. Say that again?");
     };
 
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages, config }),
+        body: JSON.stringify({ messages: turn, config }),
       });
       const data = resp.ok ? await resp.json() : null;
       if (!data || data.error) {
         unavailable();
         return;
       }
+
+      // the turn landed — only now does the exchange become part of the conversation
+      messages.push({ role: "user", content: text });
+      pushEcho(asked, text);
+      answered = Math.min(answered + 1, TOTAL_STEPS - 1);
+      renderSteps();
+
       config = data.config || config;
       persist();
       const reply = data.reply || "Got it.";
@@ -193,6 +227,7 @@
     e.preventDefault();
     send(input.value);
   });
+  input.addEventListener("input", syncReady);
 
   // A starter button is just a first answer typed for you.
   window.jobfitr = window.jobfitr || {};

@@ -230,11 +230,19 @@ button { font: inherit; cursor: pointer; }
 }
 .chat-field input { flex: 1; border: 0; background: transparent; color: var(--ink); font-size: var(--t-body); outline: none; }
 .chat-field input::placeholder { color: var(--sub); }
+/* Dim until there is something to send, then lit. Chips are multi-select — a tap adds
+   to the box rather than committing — so this button is what tells you the turn is
+   ready to go, instead of leaving Enter as a key you have to already know about. */
 .chat-send {
   display: grid; place-items: center; width: 34px; height: 34px; flex: none;
-  border: 0; border-radius: 50%; background: var(--anchor); color: var(--on-anchor);
-  font-size: var(--t-small); padding: 0;
-  transition: background 1400ms ease, color 1400ms ease;
+  border: 0; border-radius: 50%; padding: 0; font-size: var(--t-small);
+  background: color-mix(in srgb, var(--ink) 16%, transparent); color: var(--sub);
+  transition: background 220ms ease, color 220ms ease, transform 220ms ease;
+}
+.chat-send.ready { background: var(--anchor); color: var(--on-anchor); transform: scale(1.06); }
+.chips-hint {
+  font-family: var(--mono); font-size: var(--t-micro); color: var(--sub);
+  text-align: center; margin-top: 9px; opacity: 0.75;
 }
 /* seeded starters — a bare input tells a first-time visitor nothing about what the
    assistant can do, so offer real searches they can run with one click. */
@@ -255,7 +263,8 @@ button { font: inherit; cursor: pointer; }
 @media (min-width: 620px) { .doornotes { grid-template-columns: 1fr 1fr; gap: 26px; } }
 /* suggested-chips row — sits just under the pinned bar (grid row 3); hidden when empty.
    Populated later (fixed per-question or model-suggested); the front door stays bare for now. */
-.chips { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.chipwrap { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .chips:empty { display: none; }
 /* one tap = one answer. A chip used to only FILL the box, leaving the user to find
    Enter — a dead end dressed as a button. */
@@ -356,7 +365,7 @@ body.board #chat-view { display: contents; } /* dissolve so the bar can dock ind
    hidden explicitly — otherwise it reflows loose into the page (a share link that
    lands straight on the board never runs the chat's own hide). */
 body.board .doorhead { display: none; }
-body.board .chips { display: none; }
+body.board .chipwrap { display: none; }
 body.board .doorextra { display: none; }
 body.board .barwrap {
   position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 30;
