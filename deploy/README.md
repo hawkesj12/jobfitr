@@ -121,7 +121,7 @@ On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json`
 
 **The box tracks PyPI, like any other dependency.** `pyproject.toml` pins `job-radar>=0.2,<0.3`; `uv pip install` resolves it from PyPI into each slot's venv. An engine change reaches production through a **job-radar release + a version bump here**, not a `git pull` on the box.
 
-This resolves the open question left by the 2026-07-19 handoff (which removed the old `[tool.uv.sources]` local-path override). The slots were already built this way — both blue and green run job-radar **0.2.0 from PyPI** — so this section documents what's true rather than changing it. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
+This settles what was left open when the old `[tool.uv.sources]` local-path override was removed. The slots were already built this way — both blue and green run job-radar **0.2.0 from PyPI** — so this section documents what's true rather than changing it. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
 
 > **To hack on the engine against the live box anyway** (rare, and it makes that slot stop matching how everyone else installs jobfitr): `uv pip install -e /opt/jobfitr/job-radar` inside that slot's venv, and remember the next `uv pip install` for the app will resolve job-radar back to PyPI.
 
