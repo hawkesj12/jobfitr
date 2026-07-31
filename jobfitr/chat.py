@@ -387,17 +387,72 @@ def _extract_turn(data: dict) -> dict:
     return {}
 
 
+# The interview prompt above runs the FIRST search. Once results are on screen the job
+# is a different one — the user is adjusting a search that already exists, not answering
+# an intake form — and running the interview script against a refinement is exactly what
+# broke: "make it senior roles only, $150k+" came back as "What skills should rank
+# HIGHER?", the change was never applied, and `ready` stayed false so the board never
+# re-scored. The user's request simply vanished.
+REFINE_SYSTEM_PROMPT = (
+    "You are jobfitr's job-search assistant. The user's search has ALREADY RUN and they "
+    "are looking at their results right now. Your only job this turn is to apply the "
+    "change they just asked for to the existing config.\n"
+    "The interview is OVER. Do NOT ask the intake questions again — not titles, not "
+    "location, not boosts, not what to avoid. Do NOT ask what else they want.\n"
+    "Re-emit the WHOLE config with their change applied, keeping every field they "
+    "already set unless the change itself replaces it. Examples: 'senior only' adds a "
+    "boost/title signal; 'no contract work' adds to exclude or rank_down; 'try Austin "
+    "instead' replaces location; 'drop the python thing' removes that boost.\n"
+    "Set `ready`=true so their board re-scores immediately. The ONLY reason to leave it "
+    "false is a genuinely ambiguous instruction you cannot apply (e.g. a bare city with "
+    "no state) — then ask that one short question instead.\n"
+    "`reply` is ONE short line naming what you changed, e.g. 'Senior roles only — "
+    "re-scoring.' Do not recap the whole search back to them.\n"
+    "chips: 4-8 SHORT (1-3 word) tappable follow-up refinements that make sense for what "
+    "they are looking at, e.g. 'Posted this week', 'Drop contract roles', '$150k+', "
+    "'Remote only'. Never repeat something already in their config. Set `hint` to ''.\n"
+    "Salary and recency are handled by the board's own filters — if they ask for those, "
+    "apply what you can to the config and say so plainly rather than refusing."
+)
+
+
 # ── the turn the endpoint serves ──────────────────────────────────────────────
-async def turn(messages: list, current_config: dict | None = None) -> dict:
+async def turn(
+    messages: list, current_config: dict | None = None, refining: bool = False
+) -> dict:
     """One structured chat turn.
 
     Returns {"reply": str, "config": dict, "ready": bool} (plus "error": str on an
     upstream failure, so the endpoint can fall the UI back to the form). `ready` is
     gated server-side on titles + location so the model can't jump the search early.
+
+    `refining` switches to the post-results prompt: the client sets it once the board
+    has been shown, because at that point the user is editing a live search rather than
+    answering an intake question.
     """
+    system = REFINE_SYSTEM_PROMPT if refining else TURN_SYSTEM_PROMPT
+    convo = [{"role": "system", "content": system}]
+    # The model has never actually been SHOWN the config — during the interview it
+    # re-derives it from the transcript, which works only because the transcript is the
+    # whole conversation. A refinement can arrive with almost no transcript at all (a
+    # shared #q= link opens the board with an empty message log), and then "keep every
+    # field they already set" is an instruction about data the model cannot see: it
+    # dropped titles and boosts and returned an empty board. State it explicitly.
+    if current_config:
+        convo.append(
+            {
+                "role": "system",
+                "content": (
+                    "The user's CURRENT search config is:\n"
+                    + json.dumps(current_config, sort_keys=True)
+                    + "\nRe-emit this whole object with any change applied. Never drop a "
+                    "field that is already set."
+                ),
+            }
+        )
     payload = {
         "model": os.environ.get("CHAT_MODEL", DEFAULT_MODEL),
-        "messages": [{"role": "system", "content": TURN_SYSTEM_PROMPT}, *messages],
+        "messages": [*convo, *messages],
         "response_format": TURN_SCHEMA,
         "max_tokens": MAX_TOKENS,
     }
@@ -420,7 +475,9 @@ async def turn(messages: list, current_config: dict | None = None) -> dict:
     merged = merge_config(current_config, delta)
     ready = _has_titles(merged) and _has_location(merged) and model_ready
     raw_chips = parsed.get("chips") if isinstance(parsed.get("chips"), list) else []
-    if _is_avoid_turn(merged):
+    # The interview's forced avoid-chips and mechanic hints belong to the intake flow
+    # only — injecting them into a refinement would re-open a question already answered.
+    if _is_avoid_turn(merged) and not refining:
         # Lead, don't replace: the client renders only the first few, so the curated
         # dealbreakers are what the user actually sees, while any genuinely tailored
         # model suggestion still survives further down the pool.
@@ -440,7 +497,7 @@ async def turn(messages: list, current_config: dict | None = None) -> dict:
     # The hint the client renders under the question. Forced on the two turns whose
     # mechanic is invisible; otherwise the model's own line (often just "").
     hint = parsed.get("hint") if isinstance(parsed.get("hint"), str) else ""
-    if not ready:
+    if not ready and not refining:
         if _is_boosts_turn(merged):
             hint = _BOOSTS_HINT
         elif _is_avoid_turn(merged):

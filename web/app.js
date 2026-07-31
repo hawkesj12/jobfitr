@@ -43,6 +43,7 @@ const el = {
   criteria: $("#criteria"),
   proof: $("#proof"),
   starters: $("#starters"),
+  doorextra: $("#doorextra"),
   chatSay: $("#chat-say"),
   carousel: $("#carousel"),
   summary: $("#result-summary"),
@@ -427,8 +428,28 @@ function toggleExpand(node) {
   el.carousel.querySelectorAll(".gcard.expanded").forEach((n) => n.classList.remove("expanded"));
   if (!wasOpen) {
     node.classList.add("expanded");
-    node.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "nearest" });
+    // after the card has actually grown, not before
+    requestAnimationFrame(() => revealCard(node));
   }
+}
+
+// Keep an expanded card clear of the sticky header. scrollIntoView({block:"nearest"})
+// reasons about the VIEWPORT and knows nothing about chrome pinned over the top of it,
+// so a card that grew pushed its own title up underneath the header — you clicked a
+// row and the thing you clicked disappeared.
+function revealCard(node) {
+  const header = document.querySelector(".boardbar");
+  const ceiling = header ? header.getBoundingClientRect().bottom : 0;
+  const gap = 10;
+  const r = node.getBoundingClientRect();
+  let dy = 0;
+  if (r.top < ceiling + gap) {
+    dy = r.top - ceiling - gap; // tucked under the header — bring it down
+  } else if (r.bottom > window.innerHeight - gap) {
+    // running off the bottom: scroll up, but never so far that the top hides again
+    dy = Math.min(r.bottom - window.innerHeight + gap, r.top - ceiling - gap);
+  }
+  if (dy) window.scrollBy({ top: dy, behavior: reduceMotion() ? "auto" : "smooth" });
 }
 
 // ── the criteria bar: THE HANDOFF ────────────────────────────────────────────
@@ -484,15 +505,43 @@ function renderCriteria() {
     el.criteria.appendChild(pill);
   }
 
+  // Refine opens the conversation IN PLACE, right under the criteria it edits, rather
+  // than throwing the user back to the front door or parking a bar at the bottom of
+  // the page. The board keeps its height until you actually ask to talk.
   const refine = document.createElement("button");
   refine.type = "button";
   refine.className = "crit-refine";
   refine.textContent = "Refine ⌄";
-  refine.addEventListener("click", showChat);
+  refine.setAttribute("aria-expanded", String(refineOpen()));
+  refine.addEventListener("click", () => toggleRefine());
   el.criteria.appendChild(refine);
 
   show(el.criteria, any);
 }
+
+// ── the refine panel (the conversation, docked in the header) ────────────────
+function boardbar() {
+  return document.querySelector(".boardbar");
+}
+function refineOpen() {
+  const b = boardbar();
+  return !!b && b.classList.contains("refining");
+}
+function toggleRefine(force) {
+  const b = boardbar();
+  if (!b) return;
+  const open = force === undefined ? !b.classList.contains("refining") : !!force;
+  b.classList.toggle("refining", open);
+  const btn = $(".crit-refine", b);
+  if (btn) btn.setAttribute("aria-expanded", String(open));
+  if (open) {
+    const input = $("#chat-input");
+    if (input) input.focus();
+  }
+}
+// chat.js calls this when the assistant says something while the board is up, so a
+// reply can never land in a panel the user has closed.
+window.jobfitrShowRefine = () => toggleRefine(true);
 
 // Dropping a criterion re-scores. That is a real request, so guard against a user
 // clearing four pills in a row and firing four searches — coalesce to the last one.
@@ -656,9 +705,26 @@ function showResults() {
   show(el.filters, true); // the filter panel is only available on the board
   state.focusIndex = 0;
 
-  // The assistant's last line was "Pulling your matches…" — once the board is here it
-  // is stale, and it used to sit there contradicting the results underneath it.
-  if (el.chatSay) el.chatSay.textContent = "";
+  // Move the conversation into the header group so refining happens next to the
+  // criteria it changes. Reparenting (rather than a second input) keeps ONE chat
+  // form, one message log, one set of handlers — two would drift apart immediately.
+  const header = document.querySelector(".boardbar");
+  const convo = document.querySelector(".convo");
+  if (header && convo && convo.parentElement !== header) header.appendChild(convo);
+  // On the board the box is no longer answering an interview question — it is the way
+  // back into the conversation, so say that rather than "Type your answer…".
+  const chatInput = $("#chat-input");
+  if (chatInput) {
+    chatInput.placeholder = "Ask jobfitr to change your search…";
+    chatInput.setAttribute("aria-label", "Ask jobfitr to change your search");
+  }
+
+  // On the FIRST handoff the assistant's last line is "Pulling your matches…", which
+  // is stale the moment the board arrives and used to sit there contradicting it.
+  // Only on the first, though: later runs are refinements, and their reply ("Senior
+  // roles only — re-scoring.") is the only confirmation the user gets that the thing
+  // they asked for actually happened.
+  if (entering && el.chatSay) el.chatSay.textContent = "";
   renderCriteria();
 
   // On a fresh search: FLIP the chat bar from its centered spot DOWN into the dock,
@@ -681,6 +747,16 @@ function showResults() {
 }
 function showChat() {
   document.body.classList.remove("board");
+  // hand the conversation back to the front-door column it came from
+  const convo = document.querySelector(".convo");
+  if (convo && convo.parentElement !== el.chatView) {
+    el.chatView.insertBefore(convo, el.doorextra || null);
+  }
+  const chatInput = $("#chat-input");
+  if (chatInput) {
+    chatInput.placeholder = "Type your answer…";
+    chatInput.setAttribute("aria-label", "Tell jobfitr what job you're chasing");
+  }
   show(el.resultsView, false);
   show(el.formView, false);
   show(el.filters, false);
@@ -776,7 +852,18 @@ function confirmConfig(cfg) {
   showForm();
 }
 
-window.jobfitr = { run, showChat, showResults, showForm, confirm: confirmConfig };
+window.jobfitr = {
+  run,
+  showChat,
+  showResults,
+  showForm,
+  confirm: confirmConfig,
+  // The board's config is the ONE truth once results are up. chat.js used to keep its
+  // own copy, which was empty for anyone who arrived by shared link and went stale the
+  // moment a criteria pill was removed — so a refinement was computed against a config
+  // the user was no longer looking at.
+  currentConfig: () => state.cfg || {},
+};
 
 // ── the front door: proof + starters ─────────────────────────────────────────
 // The proof line uses ONLY what /api/meta really returns (pool size + harvest date).

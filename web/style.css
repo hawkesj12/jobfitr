@@ -28,6 +28,13 @@
      RATIONED to the wordmark, the fit bar, the primary action, and an open card.
      --anchor derives from --ink so it inverts with the sky (atmosphere.js flips
      --ink light after dusk); a hardcoded dark would vanish at night. ────────── */
+  /* The app's CHROME surface — the sticky header group. It has to be opaque (cards
+     scroll under it) and it must NOT take the sky's colour: every version that mixed
+     the sky in went muddy tan at sunset, exactly when the rest of the app is warmest
+     and a dingy toolbar reads worst. atmosphere.js states --paper flatly per scene
+     (cool near-white by day, deep navy at night); this is a fallback for first paint. */
+  --paper: #f2f5f9;
+  --chrome: var(--paper);
   --plate: color-mix(in srgb, var(--card-bg) 55%, rgba(255, 255, 255, 0.7));
   --plate-brd: color-mix(in srgb, var(--card-brd) 70%, rgba(255, 255, 255, 0.5));
   --anchor: color-mix(in srgb, var(--ink) 88%, var(--accent));
@@ -212,8 +219,10 @@ button { font: inherit; cursor: pointer; }
 }
 .rip.run { animation: ripOut 1.7s ease-out forwards; }
 .rip.dub { animation-duration: 1.5s; }
+/* the live conversation block: what was just said + the box + its chips, as one unit */
+.convo { grid-row: 2; width: min(560px, calc(100% - 40px)); }
 /* no outer window — the bar itself is the glass; halo + pulse hug the BAR, not the taller wrap */
-.barwrap { grid-row: 2; position: relative; width: min(560px, calc(100% - 40px)); }
+.barwrap { position: relative; }
 .chat-say { font-size: var(--t-lead); font-weight: 560; letter-spacing: -0.01em; line-height: 1.35; min-height: 1.35em; margin-bottom: 14px; padding: 0 4px; text-wrap: balance; }
 /* collapse the assistant line when it has nothing to say — a clean single-line bar on load */
 .chat-say:empty { display: none; }
@@ -255,7 +264,7 @@ button { font: inherit; cursor: pointer; }
 }
 .starter:hover { color: var(--ink); border-style: solid; background: var(--card-bg); }
 .starter .arw { opacity: 0.5; }
-.doorextra { width: min(560px, calc(100% - 40px)); margin-top: 26px; }
+.doorextra { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 26px; }
 /* the two things a sceptical visitor actually wants to know before typing anything */
 .doornotes { display: grid; gap: 20px; margin-top: 40px; padding-top: 22px; border-top: 1px solid var(--card-brd); }
 .doornotes h2 { font-size: var(--t-small); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); margin-bottom: 6px; }
@@ -263,7 +272,7 @@ button { font: inherit; cursor: pointer; }
 @media (min-width: 620px) { .doornotes { grid-template-columns: 1fr 1fr; gap: 26px; } }
 /* suggested-chips row — sits just under the pinned bar (grid row 3); hidden when empty.
    Populated later (fixed per-question or model-suggested); the front door stays bare for now. */
-.chipwrap { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 14px; }
+.chipwrap { margin-top: 14px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .chips:empty { display: none; }
 /* one tap = one answer. A chip used to only FILL the box, leaving the user to find
@@ -355,7 +364,7 @@ button { font: inherit; cursor: pointer; }
 /* ── board mode: ONE continuous scroll surface. The chat sits centered at the top;
    scroll down and the board flows up while the chat bar STICKS to the top; scroll back
    to the top and the chat re-centers. ─────────────────────────────────────────────── */
-body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 110px; }
+body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 64px; }
 body.board #chat-view { display: contents; } /* dissolve so the bar can dock independently */
 /* THE HANDOFF. The transcript has done its job — four answered questions are not
    worth 40% of the viewport while you are reading results. It collapses into the
@@ -365,13 +374,30 @@ body.board #chat-view { display: contents; } /* dissolve so the bar can dock ind
    hidden explicitly — otherwise it reflows loose into the page (a share link that
    lands straight on the board never runs the chat's own hide). */
 body.board .doorhead { display: none; }
-body.board .chipwrap { display: none; }
 body.board .doorextra { display: none; }
-body.board .barwrap {
-  position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 30;
-  width: min(620px, calc(100% - 28px)); margin: 0;
+body.board .steps { display: none; } /* the interview is over */
+
+/* Refine lives at the TOP, inside the header group, with the criteria it edits — not
+   in a bar at the bottom. app.js moves the whole conversation block in here when the
+   board opens. It stays closed until you ask for it (or the assistant answers), so the
+   board keeps its full height while you are just reading. */
+body.board .convo {
+  width: 100%; margin: 0; display: none;
+  padding: 2px 6px 10px;
 }
-body.board .chat-say { display: none; } /* the status line lives in the criteria bar now */
+body.board .boardbar.refining .convo { display: block; }
+body.board .sayrow { margin-bottom: 8px; }
+body.board .chat-say { font-size: var(--t-small); font-weight: 500; line-height: 1.4; }
+body.board .chat-field { border-radius: 100px; padding: 9px 8px 9px 16px; }
+body.board .chat-field input { font-size: var(--t-small); }
+body.board .chipwrap { margin-top: 9px; }
+/* chips behave identically here and on the front door — tap to add, ↵ to send — so
+   the interaction never changes meaning underneath the user */
+body.board .chips { justify-content: flex-start; }
+body.board .chips-hint { text-align: left; }
+/* the halo breathes on the front door; on the board it would pulse over the results */
+body.board .halo, body.board .pulse { display: none; }
+.crit-refine[aria-expanded="true"] { background: var(--anchor); }
 body.board #results-view { margin-top: 0; }
 /* The criteria bar + toolbar stick as ONE group and carry ONE glass plate between
    them. Two reasons: a criteria bar that wraps to a second line can never collide
@@ -385,7 +411,7 @@ body.board .boardbar {
      behind it, but this one has moving CARDS behind it, and at --plate's ~50% alpha
      their text read straight through the toolbar. This is the one surface that has to
      actually occlude, so it gets its own value rather than the shared token. */
-  background: color-mix(in srgb, var(--card-bg) 25%, var(--glow) 82%);
+  background: var(--chrome);
   border: 1px solid var(--plate-brd); border-radius: 14px;
   padding: 4px 6px 0; margin-bottom: 10px;
   -webkit-backdrop-filter: blur(20px) saturate(1.3); backdrop-filter: blur(20px) saturate(1.3);
@@ -554,7 +580,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   .fit-num { font-size: var(--t-body); }
   .site-header { padding: 12px 14px; }
   .m-link { padding: 6px 7px; }
-  body.board #stage { padding: 0 14px 96px; }
+  body.board #stage { padding: 0 14px 56px; }
   body.board .boardbar { top: 48px; }
   body.board .drawer { top: auto !important; bottom: 0; left: 0; transform: none; width: 100%; max-width: 100%; }
   body.board .drawer-body { border-radius: var(--radius) var(--radius) 0 0; max-height: 62vh; }
@@ -571,7 +597,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   body.board .criteria > *, body.board .toolbar > * { flex: none; }
   .crit { max-width: 20ch; }
   /* Refine must stay reachable without scrolling to the end of the pills */
-  body.board .crit-refine { position: sticky; right: 0; margin-left: 4px; box-shadow: -10px 0 12px 4px var(--glow); }
+  body.board .crit-refine { position: sticky; right: 0; margin-left: 4px; box-shadow: -10px 0 12px 4px var(--chrome); }
   .toolbar .spacer { display: none; }
   .tb-salary input[type="range"] { width: 92px; }
   /* the column is narrow — two wrapped lines beat a hard ellipsis on every title */

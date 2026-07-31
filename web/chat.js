@@ -29,6 +29,10 @@
   let prefetched = false;
   let currentQuestion = OPENER; // the question the next answer responds to
   let answered = 0;
+  // Whether we are refining is a property of what is ON SCREEN, not of how we got
+  // there: a shared #q= link opens the board without chat.js ever running the
+  // interview, and a local flag left those sessions talking to the intake prompt.
+  const onBoard = () => document.body.classList.contains("board");
   let chipPool = []; // suggestions for the current question; CHIP_SHOW render, rest reserve
 
   // Render the assistant line. The question appears AT ONCE — the old version typed it
@@ -150,7 +154,7 @@
 
   // Search runs straight from the conversation once ready — no form, ever.
   function toResults() {
-    if (window.jobfitr) window.jobfitr.run(config);
+    if (window.jobfitr) window.jobfitr.run(config); // app.js re-labels the box for the board
   }
 
   // Nothing about an exchange is recorded until the turn actually LANDS. Recording it
@@ -162,7 +166,16 @@
   async function send(text) {
     if (busy || !text.trim()) return;
     busy = true;
+    // Once the board is up, ITS config is the truth — the user may have arrived by a
+    // shared link (this module never ran the interview) or dropped a criteria pill
+    // since the last turn. Refining against a stale local copy silently discarded
+    // whatever it was missing.
+    if (onBoard() && window.jobfitr && window.jobfitr.currentConfig) {
+      config = { ...window.jobfitr.currentConfig() };
+    }
     enterConversation();
+    // on the board the panel may be closed — never let a reply land out of sight
+    if (onBoard() && window.jobfitrShowRefine) window.jobfitrShowRefine();
     input.value = "";
     syncReady();
     typeInto("");
@@ -191,7 +204,10 @@
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: turn, config }),
+        // `refining` tells the server the interview is over and this is an edit to a
+        // search the user is already looking at — without it the assistant re-runs the
+        // intake script and the requested change is silently dropped.
+        body: JSON.stringify({ messages: turn, config, refining: onBoard() }),
       });
       const data = resp.ok ? await resp.json() : null;
       if (!data || data.error) {
@@ -205,7 +221,12 @@
       answered = Math.min(answered + 1, TOTAL_STEPS - 1);
       renderSteps();
 
+      const prev = JSON.stringify(config);
       config = data.config || config;
+      // On the board, any config change IS the result of the refinement, so re-score on
+      // the change itself rather than waiting for the model to volunteer `ready` — a
+      // refinement that silently left the board untouched was the whole complaint.
+      const changed = onBoard() && JSON.stringify(config) !== prev;
       persist();
       const reply = data.reply || "Got it.";
       messages.push({ role: "assistant", content: reply });
@@ -215,7 +236,7 @@
       maybePrefetch();
       // The reply is on screen instantly now, so the old length-proportional wait
       // (which paced the typewriter) would just be dead time before the board.
-      if (data.ready) setTimeout(toResults, 650);
+      if (data.ready || changed) setTimeout(toResults, 650);
     } catch {
       unavailable();
     } finally {

@@ -81,12 +81,18 @@
       root.style.setProperty("--card-brd", "rgba(255,255,255,0.62)");
       root.style.setProperty("--rip-col", "rgba(255,255,255,0.85)"); // bright scene → light heartbeat
       root.style.setProperty("--good", "#1f7a4d"); // salary/fit green readable on the light glass
+      // The chrome (the sticky header) is the ONE surface that must be opaque and
+      // must not take the sky's colour: derived from the sky it went tan at sunset,
+      // which is when the app looks its warmest and a muddy toolbar reads worst.
+      // A cool neutral, stated flatly, per scene.
+      root.style.setProperty("--paper", "#f2f5f9");
     } else {
       root.style.setProperty("--ink", "#f4f6fb");
       root.style.setProperty("--sub", "rgba(244,246,251,0.66)");
       root.style.setProperty("--card-brd", "rgba(255,255,255,0.18)");
       root.style.setProperty("--rip-col", "rgba(10,14,26,0.62)"); // dark scene → shadowy heartbeat
       root.style.setProperty("--good", "#5ee89b"); // brighter green so it reads on the dark night glass
+      root.style.setProperty("--paper", "#161c2b");
     }
     // the halo breathes slower as it darkens — the app "sleeping"
     root.style.setProperty("--breath", (4.2 + (1 - fr.lum) * 4.5).toFixed(1) + "s");

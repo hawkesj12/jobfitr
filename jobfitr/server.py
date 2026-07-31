@@ -561,8 +561,11 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=429, detail="turn_cap")
 
     current = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    # The client flips this on once the board has been shown — after that the user is
+    # adjusting a live search, not answering intake questions.
+    refining = bool(payload.get("refining"))
     chatmod.note_request()
-    return await chatmod.turn(messages, current)
+    return await chatmod.turn(messages, current, refining=refining)
 
 
 @app.get("/api/meta")

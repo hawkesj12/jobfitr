@@ -39,8 +39,9 @@ jobfitr-serve
 > **Hacking on the engine too?** To run against a local `job-radar` checkout instead of the PyPI release, clone it next door and install it editable first: `uv pip install -e ../job-radar`.
 
 Open **http://localhost:8000** and answer the four questions the assistant asks. The board
-appears as soon as it has enough; you can keep refining by talking to it, or edit the
-criteria pills at the top of the board directly.
+appears as soon as it has enough. From there, **Refine** re-opens the assistant inline at
+the top of the board — say "drop contract roles" or "senior only" and it re-scores — or
+edit the criteria pills directly.
 
 > **Heads-up:** the free, no-key boards skew toward remote tech roles. A broad non-tech search stays thin until you add a free Adzuna key (see _Configure_). The app tells you this when results are sparse — it won't silently hand you an empty list.
 
@@ -75,7 +76,7 @@ Same-origin; the front end talks to these directly.
 | Method & path     | Purpose                                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /api/score` | Score the cached snapshot against a config body (`titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`, `min_score`, `limit`). Returns ranked jobs. |
-| `POST /api/chat`  | One conversational turn: `{messages, config}` → `{reply, config, ready, chips}` (structured output). The only thing that reaches scoring is the config it fills. |
+| `POST /api/chat`  | One conversational turn: `{messages, config, refining}` → `{reply, config, ready, chips}` (structured output). The only thing that reaches scoring is the config it fills. `refining` switches from the intake interview to editing a search that is already on screen. |
 | `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer. |
 | `GET /api/meta`   | Snapshot freshness — `count` (pool size) and `harvested_at`. Drives the front door's proof line. |
 | `GET /api/health` | Liveness check.                                                                                                                                                                     |
