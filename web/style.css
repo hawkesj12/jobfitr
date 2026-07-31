@@ -543,21 +543,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17p
 input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
 
 /* ── the applied rail (right edge) ──────────────────────────────────────────── */
-/* DOCKED into the toolbar, not floating over the board. As a fixed overlay this thing
-   caused two separate defects: it sat as an invisible sheet (sized to its 260px body
-   even while that body was off-screen) eating clicks meant for sort and the salary
-   slider, and once moved below the header it covered the first result card at every
-   width under ~1300px. In the toolbar row it is furniture — it cannot cover a listing,
-   and it cannot swallow a control. `sticky right` keeps it pinned inside the horizontal
-   scroller the toolbar becomes on a phone, the same trick .crit-refine uses. */
-.rail { position: sticky; right: 0; margin-left: 4px; flex: none; }
-/* The panel hangs from the bar; only it overlays anything, and only while open.
-   `fixed`, not `absolute`, because the toolbar becomes an overflow-x scroller on a phone
-   and an overflow ancestor CLIPS absolutely-positioned descendants — the panel opened
-   with its list sliced off and its links hit-testing as the cards behind them. The
-   boardbar's backdrop-filter makes it the containing block for a fixed child, so the
-   offsets below still resolve against the bar rather than the viewport. */
-.rail-body { position: fixed; top: calc(100% + 6px); right: 0; z-index: 30; }
+/* In the MASTHEAD, beside the nav — this is the user's own state, not search state.
+   Every other home broke something. Floating, it sat as an invisible sheet (sized to its
+   260px body while that body was off-screen) swallowing clicks meant for sort and the
+   salary slider. Below the header it covered the first card at every width under
+   ~1300px. Docked in the toolbar it was crowded between Refine and the match count AND
+   invisible, because a --chrome pill on the --chrome boardbar is paper on paper. Here it
+   sits over the sky, which is what that surface was built to read against, and it is
+   back on the front door instead of appearing only once a board exists.
+   The header has no overflow, so the panel is a plain absolute dropdown. */
+.rail { position: relative; flex: none; margin-left: 4px; }
+.rail-body { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; }
 .rail:not(.open) .rail-body { opacity: 0; pointer-events: none; }
 /* Chrome, not content. On --card-bg (the same 0.34-alpha glass the job cards use) the
    pill read as another card floating among the listings, so it blended into the role

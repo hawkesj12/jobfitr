@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=47" />
+    <link rel="stylesheet" href="style.css?v=48" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -49,6 +49,23 @@
       <span class="spacer"></span>
       <a class="m-link" href="#how">How it works</a>
       <a class="m-link" href="#sources">Sources</a>
+
+      <!-- Applied lives in the masthead because it is YOUR state, not search state.
+           In the toolbar it was crowded between Refine and the match count, and its
+           paper surface vanished against the boardbar's identical paper. Here it sits
+           over the sky, where that surface reads — and it is visible on the front door
+           again, not only once a board exists. -->
+      <aside class="rail" id="rail" aria-label="Jobs you've applied to" hidden>
+        <button class="rail-toggle" id="rail-toggle" aria-expanded="false">
+          <span class="rail-count" id="rail-count">0</span>
+          <span class="rail-word">applied</span>
+        </button>
+        <div class="rail-body glass" id="rail-body">
+          <p class="rail-head">Applied</p>
+          <ul class="rail-list" id="rail-list"></ul>
+          <button type="button" class="rail-share" id="rail-share" hidden>Share these</button>
+        </div>
+      </aside>
     </header>
 
     <main id="stage" class="stage">
@@ -158,21 +175,6 @@
           <span class="fit-note">fit is relative to your best match</span>
           <span class="result-summary" id="result-summary" aria-live="polite"></span>
 
-          <!-- The applied rail lives IN the toolbar rather than floating over the board.
-               As a fixed overlay it covered the first result card at every width below
-               ~1300px; docked here it is part of the header furniture and can never sit
-               on a listing. -->
-          <aside class="rail" id="rail" aria-label="Jobs you've applied to" hidden>
-            <button class="rail-toggle" id="rail-toggle" aria-expanded="false">
-              <span class="rail-count" id="rail-count">0</span>
-              <span class="rail-word">applied</span>
-            </button>
-            <div class="rail-body glass" id="rail-body">
-              <p class="rail-head">Applied</p>
-              <ul class="rail-list" id="rail-list"></ul>
-              <button type="button" class="rail-share" id="rail-share" hidden>Share these</button>
-            </div>
-          </aside>
         </div>
         </div>
 
