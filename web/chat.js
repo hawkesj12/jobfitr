@@ -21,6 +21,8 @@
   const doorExtra = document.getElementById("doorextra");
   const stepsEl = document.getElementById("steps");
   const hintEl = document.getElementById("chips-hint");
+  const CHIP_HINT = "tap to add — press ↵ when you're done";
+  let turnHint = ""; // the server's explanation for THIS question, when it sends one
   const sendBtn = form.querySelector(".chat-send");
 
   const messages = [];
@@ -130,7 +132,18 @@
       b.addEventListener("click", () => selectChip(label));
       chipsEl.appendChild(b);
     }
-    if (hintEl) hintEl.hidden = !chipPool.length;
+    renderHint();
+  }
+  // The line under the chips. The server sends a `hint` on the two questions whose
+  // mechanic a user cannot guess — what makes a good boost, and that "avoid" REMOVES
+  // listings rather than nudging them. That is worth more than the generic chip
+  // instruction, so it wins when present and the generic line fills in otherwise.
+  function renderHint() {
+    if (!hintEl) return;
+    const text = turnHint || (chipPool.length ? CHIP_HINT : "");
+    hintEl.textContent = text;
+    hintEl.classList.toggle("chips-hint-strong", !!turnHint);
+    hintEl.hidden = !text;
   }
   function selectChip(label) {
     const cur = input.value.trim().replace(/,\s*$/, "");
@@ -183,6 +196,7 @@
     const asked = currentQuestion; // the question THIS answer is responding to
     const priorChips = chipPool.slice(); // restored if the turn never lands
     const turn = [...messages, { role: "user", content: text }];
+    turnHint = ""; // the previous question's explanation must not outlive its question
     setChips([]); // clear last question's chips until the next turn returns fresh ones
 
     // Assistant unavailable (503/429/upstream/network). If we already have a role +
@@ -232,6 +246,7 @@
       messages.push({ role: "assistant", content: reply });
       currentQuestion = reply;
       typeInto(reply);
+      turnHint = typeof data.hint === "string" ? data.hint : "";
       setChips(data.chips);
       maybePrefetch();
       // The reply is on screen instantly now, so the old length-proportional wait

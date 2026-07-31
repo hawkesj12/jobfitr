@@ -253,6 +253,13 @@ button { font: inherit; cursor: pointer; }
   font-family: var(--mono); font-size: var(--t-micro); color: var(--sub);
   text-align: center; margin-top: 9px; opacity: 0.75;
 }
+/* When the server explains a question's mechanic ("Specific beats generic…") the line
+   stops being a throwaway chip instruction and becomes the answer to a question the
+   user would otherwise get wrong — so it reads as prose, not as UI chrome. */
+.chips-hint-strong {
+  font-family: inherit; font-size: var(--t-micro); opacity: 1;
+  color: var(--ink); max-width: 54ch; margin-left: auto; margin-right: auto;
+}
 /* seeded starters — a bare input tells a first-time visitor nothing about what the
    assistant can do, so offer real searches they can run with one click. */
 .starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
@@ -522,12 +529,36 @@ body.board .drawer-head { width: 100%; margin-bottom: 2px; }
 body.board .fgroup { padding: 0; border-bottom: 0; min-width: 150px; }
 body.board .fcount { width: 100%; margin-top: 4px; }
 
-input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 5px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 20%, transparent); outline: none; }
-input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17px; height: 17px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
+/* The TRACK stays 5px; the INPUT is 24px so there is something to actually hit. A 5px
+   control is a miss on a mouse and hopeless on a thumb (WCAG 2.5.8 wants 24 minimum).
+   The height goes on the element with a transparent background and the visible bar moves
+   to the track pseudo-element, so the hit area grows without the bar getting fatter — and
+   24px still fits inside the existing ~36px toolbar row, so the sticky mobile header does
+   not grow (the reason it is not the 44px Apple would prefer). */
+input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 24px; background: transparent; outline: none; }
+input[type="range"]::-webkit-slider-runnable-track { height: 5px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 20%, transparent); }
+input[type="range"]::-moz-range-track { height: 5px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 20%, transparent); }
+/* margin-top centres the thumb on the track: (track 5 - thumb 17) / 2 = -6 */
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17px; height: 17px; margin-top: -6px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
 input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
 
 /* ── the applied rail (right edge) ──────────────────────────────────────────── */
-.rail { position: fixed; top: 20px; right: 0; z-index: 8; text-align: right; }
+/* Above the board chrome (masthead 20, boardbar 15). The rail predates both and kept
+   z-index 8, so the new sticky header and criteria bar were painting over it: the
+   "N applied" button hit-tested as .site-header / .m-link / .criteria at every width
+   from 390 to 1000, i.e. the applied list was effectively unreachable. It is a floating
+   right-edge control by design, so riding above the chrome is the correct layer for it —
+   nudging its `top` only moved the collision from one bar to the next. */
+.rail { position: fixed; top: 20px; right: 0; z-index: 25; text-align: right; }
+/* The rail is a fixed box sized to its WIDEST child — the 260px body — even while that
+   body is translated off-screen. So it sits as an invisible ~260x200 sheet over the
+   top-right of the page and eats clicks meant for whatever is under it. On a phone that
+   is the toolbar: sort and the salary slider both reported BLOCKED-by-rail. It only
+   bites once something has been applied to (the rail is hidden at zero), which is why a
+   fresh session looks fine and the core loop breaks. Same failure as the filter drawer;
+   same fix: the container is transparent to clicks, its real controls are not. */
+.rail { pointer-events: none; }
+.rail-toggle, .rail.open .rail-body { pointer-events: auto; }
 .rail-toggle { display: inline-flex; align-items: center; gap: 8px; background: var(--card-bg); border: 1px solid var(--card-brd); border-right: 0; border-radius: 100px 0 0 100px; padding: 9px 16px; color: var(--ink); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
 .rail-count { font-weight: 700; font-family: var(--mono); }
 .rail-word { font-size: 12px; color: var(--sub); }
