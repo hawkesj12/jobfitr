@@ -318,7 +318,7 @@ def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
     d = client.post(
         "/api/score", json={"titles": ["nurse"], "min_score": "plenty"}
     ).json()
-    assert d["degraded"] == "adzuna_daily_limit"  # load-shed
+    assert d["degraded"] == "live_search_limit"  # load-shed
     assert (
         d["jobs"] and d["jobs"][0]["title"] == "Registered Nurse"
     )  # served from cache

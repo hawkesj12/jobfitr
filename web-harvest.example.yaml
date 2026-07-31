@@ -87,8 +87,12 @@ filters:
   min_score: 0 # harvest keeps everything; scoring/threshold happens per-request
 
 sources:
-  # Breadth (market-wide boards). The no-key ones run today; adzuna/usajobs
-  # self-skip until their keys are set, so listing them here is harmless.
+  # Breadth for the nightly baseline = the FREE, no-key boards only. This harvest is
+  # the tech-leaning baseline pool; the KEYED SEARCH APIs (adzuna, usajobs,
+  # google_jobs) are deliberately NOT here — they are per-user, live-query-only
+  # sources (jobfitr/live.py), fired by title+location on a search, not swept nightly.
+  # Do NOT add them to this list: it would broaden the baseline off-tech and, for
+  # google_jobs, burn the metered SerpApi quota on every harvest.
   boards:
     - remotive
     - jobicy
@@ -98,17 +102,6 @@ sources:
     - hn
     - braintrust
     - techtree
-    - adzuna
-    - usajobs
-  # Adzuna is the general-market firehose (all sectors, nationwide). It caps a page
-  # at 50 results, so `pages` × 50 ≈ jobs/query before dedup. The remote lens is
-  # selective, so fetch deep enough that plenty survive it. Env override: ADZUNA_PAGES.
-  adzuna:
-    pages: 3 # 3×50 = up to 150 jobs/query/harvest; raise for more breadth
-  # USAJOBS caps a page at 500 (default 25) — one big page covers most federal
-  # queries. Env override: USAJOBS_RESULTS_PER_PAGE.
-  usajobs:
-    results_per_page: 500
   # Depth (per-company ATS) only runs when --watchlist is passed; defaults are fine.
   funnel:
     auto_grow: false # a read-only harvest never mutates a watchlist file

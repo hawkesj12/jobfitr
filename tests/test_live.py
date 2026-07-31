@@ -26,6 +26,9 @@ def test_live_fetch_calls_only_keyed_sources(monkeypatch):
     monkeypatch.setattr(
         live.sources, "search_usajobs", lambda q: calls.append(("usa", q)) or []
     )
+    monkeypatch.setattr(
+        live.sources, "search_google_jobs", lambda q: calls.append(("goog", q)) or []
+    )
     # engine.harvest must NEVER be reachable from live.py — poison it to be sure.
     import job_radar.engine as eng
 
@@ -39,7 +42,8 @@ def test_live_fetch_calls_only_keyed_sources(monkeypatch):
 
     rows = live.live_fetch(["product manager"], "remote")
     assert rows == [{"url": "u", "title": "X"}]
-    assert [c[0] for c in calls] == ["adz", "usa"]  # both keyed sources, in order
+    # the three keyed sources, in order
+    assert [c[0] for c in calls] == ["adz", "usa", "goog"]
     assert calls[0][1] == ["product manager"]
 
 
@@ -62,6 +66,7 @@ def test_live_fetch_survives_a_dead_source(monkeypatch):
     monkeypatch.setattr(
         live.sources, "search_usajobs", lambda q: [{"url": "u2", "title": "Y"}]
     )
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
     assert live.live_fetch(["nurse"], "") == [
         {"url": "u2", "title": "Y"}
     ]  # one dead, one ok
@@ -79,6 +84,7 @@ def test_single_flight_coalesces_concurrent_identical_searches(monkeypatch):
 
     monkeypatch.setattr(live.sources, "search_adzuna", slow_adzuna)
     monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(
@@ -102,6 +108,7 @@ def test_single_flight_distinct_searches_each_fetch(monkeypatch):
         lambda q: fetches.__setitem__("n", fetches["n"] + 1) or [],
     )
     monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
     live.coalesced_fetch(["accountant"], "remote")
     live.coalesced_fetch(["nurse"], "remote")
     assert fetches["n"] == 2  # different keys → separate fetches

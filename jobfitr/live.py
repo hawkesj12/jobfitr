@@ -1,9 +1,11 @@
 """The live fetch — the per-search inflow to the store.
 
 On a search the store misses (or whose TTL lapsed), we go get the jobs LIVE from
-the fast keyed sources only — Adzuna + USAJOBS, ~1-2s — NOT job_radar's full
-10-source `engine.harvest` (~50s; the slow free boards add nothing to a specific
-title and are covered by the periodic baseline).
+the fast keyed sources only — Adzuna + USAJOBS + Google for Jobs (SerpApi), ~1-3s
+— NOT job_radar's full 10-source `engine.harvest` (~50s; the slow free boards add
+nothing to a specific title and are covered by the periodic baseline). Google for
+Jobs is metered (SerpApi free tier 250 searches/mo); the single-flight + store TTL
+below bound how often it is actually called.
 
 Two concurrency controls:
   1. A module LOCK around set_active+call, because job_radar's source functions
@@ -45,8 +47,9 @@ def _prep_location(location: str | None) -> str:
 
 
 def live_fetch(titles: list[str], location: str | None) -> list[dict]:
-    """Fetch jobs for the user's titles from Adzuna + USAJOBS. Blocking (run me in
-    a threadpool). Returns raw job_radar rows (normalized later by store.upsert)."""
+    """Fetch jobs for the user's titles from Adzuna + USAJOBS + Google for Jobs.
+    Blocking (run me in a threadpool). Returns raw job_radar rows (normalized later
+    by store.upsert)."""
     titles = [t for t in (titles or []) if t and t.strip()]
     if not titles:
         return []
@@ -55,12 +58,16 @@ def live_fetch(titles: list[str], location: str | None) -> list[dict]:
     cfg.location = _prep_location(location)
     cfg.remote_only = False
     cfg.radius_miles = 0
-    cfg.breadth_sources = ["adzuna", "usajobs"]  # the fast keyed sources ONLY
+    cfg.breadth_sources = ["adzuna", "usajobs", "google_jobs"]  # fast keyed sources
 
     rows: list[dict] = []
     with _CFG_LOCK:
         jr_config.set_active(cfg)
-        for fn in (sources.search_adzuna, sources.search_usajobs):
+        for fn in (
+            sources.search_adzuna,
+            sources.search_usajobs,
+            sources.search_google_jobs,
+        ):
             try:
                 rows.extend(fn(titles) or [])
             except Exception:  # a dead source never fails the whole fetch

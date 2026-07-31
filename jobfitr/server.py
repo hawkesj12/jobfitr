@@ -118,10 +118,12 @@ RESULT_LADDER = [
 
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
-# Daily cap on live Adzuna/USAJOBS fetches — the actuator saturation. When tripped,
-# we serve the cache with a `degraded` banner instead of burning the free quota.
-# Default is UNDER Adzuna's ~250/day free tier so the valve fires before the real
-# quota is blown, not after; raise the env to match a higher plan.
+# Daily cap on live keyed-source fetches (Adzuna + USAJOBS + Google/SerpApi) — the
+# actuator saturation. When tripped, we serve the cache with a `degraded` banner
+# instead of burning a free quota. Default is UNDER Adzuna's ~250/day free tier so
+# the valve fires before the real quota is blown; raise the env to match a higher
+# plan. (Env name kept as ADZUNA_DAILY_CEILING so the deployed box's config still
+# applies; it now governs all three keyed sources, not just Adzuna.)
 ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "200"))
 
 app = FastAPI(title="jobfitr", version="0.1.0", lifespan=lifespan)
@@ -283,7 +285,7 @@ def _warm_cache(titles: list, location: str) -> str | None:
     if store.search_fresh(key):
         return None  # fresh (< TTL) — no API call
     if _fetch_ceiling_reached():
-        return "adzuna_daily_limit"  # load-shed: serve the cache
+        return "live_search_limit"  # load-shed: serve the cache
     try:
         rows = live.coalesced_fetch(
             titles, location

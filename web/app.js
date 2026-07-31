@@ -206,9 +206,9 @@ async function run(cfg) {
 // ── the degradation / thin-results banner (warm, honest, never alarming) ──────
 function renderNotice(data) {
   let msg = "";
-  if (data.degraded === "adzuna_daily_limit") {
+  if (data.degraded === "live_search_limit") {
     msg =
-      "🌅 We've hit today's live-search budget — jobfitr is a free tool with a daily API allowance. These are the freshest saved matches. Fresh pulls refill tomorrow.";
+      "🌅 We've hit today's live-search limit. jobfitr is a free tool running on free APIs — no paid services — so there's a daily ceiling to stay in budget. These are the freshest saved matches; check back a bit later and the live search opens back up.";
   } else if (data.degraded === "fetch_error") {
     msg =
       "A job source hiccuped just now, so these are the most recent saved matches. Try again in a moment for a fresh pull.";
