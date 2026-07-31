@@ -396,6 +396,126 @@ def test_dedup_keeps_genuinely_different_roles_at_the_same_company(client, monke
     assert len({j["title"] for j in d["jobs"]}) == 2
 
 
+# ── Phase B: data hygiene at the source ───────────────────────────────────────
+def test_html_bodies_render_as_clean_text(client, monkeypatch):
+    """The P0 leak: Greenhouse ships the JD as HTML and the top card opened with a
+    literal '<div class="content-intro"><h3>About Arize</h3>'."""
+    _seed(
+        [
+            _job(
+                "Applied AI Engineer",
+                text=(
+                    '<div class="content-intro"><h3>About Arize</h3> '
+                    "<p>AI is rapidly transforming the world.</p>"
+                    "<p><strong>Arize AI</strong> is the leading AI &amp; Agent "
+                    "Engineering&nbsp;observability platform.</p>"
+                    "<script>window.tracking=1;</script></div>"
+                ),
+                url="https://x/arize",
+            )
+        ]
+    )
+    _mark_fresh(["applied ai engineer"])
+    _no_fetch(monkeypatch)
+
+    top = client.post("/api/score", json={"titles": ["applied ai engineer"]}).json()[
+        "jobs"
+    ][0]
+    for field in ("description", "snippet"):
+        assert "<" not in top[field] and ">" not in top[field]  # no markup
+        assert "&amp;" not in top[field] and "&nbsp;" not in top[field]  # decoded
+        assert "window.tracking" not in top[field]  # script body dropped
+    assert "AI & Agent Engineering observability" in top["description"]
+    # tags become a SPACE, never nothing — headings must not fuse into the next word
+    assert "About Arize AI is rapidly" in top["description"]
+
+
+def test_employment_type_spellings_collapse_to_one_facet(client, monkeypatch):
+    """Four spellings of full-time split 621 live rows across four unfilterable chips."""
+    _seed(
+        [
+            _job("Engineer A", employment_type="Full Time", url="https://x/a"),
+            _job("Engineer B", employment_type="Full-Time", url="https://x/b"),
+            _job("Engineer C", employment_type="full_time", url="https://x/c"),
+            _job("Engineer D", employment_type="Full-time", url="https://x/d"),
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post("/api/score", json={"titles": ["engineer"]}).json()
+    assert {j["employment_type"] for j in d["jobs"]} == {"full_time"}
+    assert list(d["facets"]["employment_type"]) == ["full_time"]  # one chip, not four
+
+
+def test_free_text_schedules_never_become_filter_chips(client, monkeypatch):
+    """USAJOBS uses the field for prose. A chip you cannot filter by is worse than none."""
+    _seed(
+        [
+            _job(
+                "Analyst",
+                employment_type=(
+                    "This is a full-time position.  Work schedules, including telework, "
+                    "are at the discretion of the supervisor, consistent with agency policy."
+                ),
+                url="https://x/prose",
+            ),
+            _job("Analyst II", employment_type="Contractor", url="https://x/contract"),
+        ]
+    )
+    _mark_fresh(["analyst"])
+    _no_fetch(monkeypatch)
+
+    d = client.post("/api/score", json={"titles": ["analyst"]}).json()
+    types = {j["employment_type"] for j in d["jobs"]}
+    assert types == {"", "contract"}  # prose dropped, Contractor canonicalized
+
+
+def test_category_keeps_job_fields_and_drops_employers_and_levels(client, monkeypatch):
+    """`category` drives the "Field" facet, so it must be a job FUNCTION. ~550 live rows
+    put a USAJOBS agency there, one puts a seniority, one an internal ATS code."""
+    _seed(
+        [
+            # distinct companies: five rows at one employer would trip MAX_PER_COMPANY
+            _job("Role A", company="Ay", department="IT Jobs", url="https://x/it"),
+            _job(
+                "Role B",
+                company="Bee",
+                department="Department of the Navy",
+                url="https://x/navy",
+            ),
+            _job(
+                "Role C",
+                company="Cee",
+                department="Mid-Senior Level",
+                url="https://x/level",
+            ),
+            _job(
+                "Role D",
+                company="Dee",
+                department="220 - Solutions PS",
+                url="https://x/code",
+            ),
+            _job(
+                "Role E",
+                company="Ee",
+                department="Legal &amp; Compliance",
+                url="https://x/legal",
+            ),
+        ]
+    )
+    _mark_fresh(["role"])
+    _no_fetch(monkeypatch)
+
+    d = client.post("/api/score", json={"titles": ["role"]}).json()
+    cats = {j["title"]: j["category"] for j in d["jobs"]}
+    assert cats["Role A"] == "IT Jobs"  # a real field, kept
+    assert cats["Role B"] == ""  # an employer, not a field
+    assert cats["Role C"] == ""  # a seniority, not a field
+    assert cats["Role D"] == "Solutions PS"  # internal code stripped
+    assert cats["Role E"] == "Legal & Compliance"  # entity decoded
+
+
 def test_score_miss_triggers_live_fetch(client, monkeypatch):
     calls = {"n": 0}
 

@@ -308,10 +308,33 @@ function tierFor(pct) {
 
 // Some sources (e.g. HN) stuff the whole posting into `location`. Keep just the real
 // place: the first clause, capped — so the org line stays a clean "Company · Place".
-function cleanLoc(loc) {
-  const first = (loc || "").split(/[.;|]/)[0].trim();
+function cleanLoc(loc, job) {
+  const first = (loc || "").split(/[.;|\n]/)[0].trim();
   if (!first) return "—";
-  return first.length > 60 ? first.slice(0, 57) + "…" : first;
+  // Adzuna appends the county — "Austin, Travis County", "San Diego, San Diego County"
+  // (474 rows in the live pool). A county means nothing to a job seeker, and there is no
+  // county→state table here, so drop it rather than show it or guess a state.
+  const place = first.replace(/,\s*[^,]*\bcounty\s*$/i, "").trim() || first;
+  // Some sources use `location` as a dumping ground: HN leads with a place and then
+  // appends the entire posting ("REMOTE (US) Do you want to help scientists…"), and
+  // himalayas lists 190 countries. 145 rows in the live pool. Truncating that to 60
+  // chars still put a paragraph on the org line, so when the value reads as prose fall
+  // back to the work-style tag we already derive — honest, and never a fabricated city.
+  if (place.split(/\s+/).length > 8) {
+    const tags = (job && job.tags) || [];
+    return tags.includes("remote") ? "Remote" : tags.includes("onsite") ? "On-site" : "—";
+  }
+  return place.length > 60 ? place.slice(0, 57) + "…" : place;
+}
+
+// Sources emit a "range" even when both ends are identical — 637 of the 1,480 salaried
+// rows in the live pool render as "$40,000–$40,000". Collapse those to one figure while
+// leaving real ranges ("$190–250k", "$120 - $170 /hour") untouched. The separator from
+// this source is an EN DASH, not a hyphen, so match both.
+function cleanSalary(s) {
+  const t = (s || "").trim();
+  const m = t.match(/^(.+?)\s*[-–—]\s*(.+)$/);
+  return m && m[1].trim() === m[2].trim() ? m[1].trim() : t;
 }
 
 // The board is a SCROLLABLE vertical carousel of small cards. Each is compact by
@@ -353,7 +376,7 @@ function buildCard(job, index, total) {
 
   $(".role", node).textContent = job.title || "Untitled role";
   $(".company", node).textContent = job.company || "—";
-  $(".loc", node).textContent = cleanLoc(job.location);
+  $(".loc", node).textContent = cleanLoc(job.location, job);
   const t = tierFor(pct);
   const tierEl = $(".tier", node);
   tierEl.textContent = t.word;
@@ -361,7 +384,7 @@ function buildCard(job, index, total) {
   $(".rank", node).textContent = `#${index + 1} of ${total}`;
 
   // always visible on the small card — everyone wants salary + posted at a glance
-  $(".salary", node).textContent = job.salary || "";
+  $(".salary", node).textContent = cleanSalary(job.salary);
   $(".posted", node).textContent = job.posted ? `Posted ${job.posted}` : "";
   $(".source", node).textContent = job.source ? `via ${job.source}` : "";
 

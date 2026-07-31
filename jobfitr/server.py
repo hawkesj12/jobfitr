@@ -13,8 +13,10 @@ The only metered LLM path is /api/chat.
 
 from __future__ import annotations
 
+import html
 import logging
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -166,11 +168,31 @@ def _note_fetch() -> None:
     _last_fetch_ok["at"] = datetime.now(_ET).isoformat(timespec="seconds")
 
 
-def _snippet(text) -> str:
+# Greenhouse (and most ATS feeds) ship the JD as HTML. Rendered with textContent the
+# markup came through as literal text on the card — the top result opened with
+# '<div class="content-intro"><h3>About Arize</h3>'. Cleaning it here rather than in the
+# client fixes every consumer at once and shrinks the payload.
+_SCRIPT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain_text(text) -> str:
+    """HTML (or already-plain text) → clean display text.
+
+    Tags become a SPACE, not nothing: '<p>One</p><p>Two</p>' must read "One Two", never
+    "OneTwo". Entities are decoded after stripping, so text that was escaped in the
+    source ('&lt;b&gt;') stays literal instead of becoming markup.
+    """
     if not isinstance(text, str):
         return ""
-    s = " ".join(text.split())
-    return s[:SNIPPET_CHARS]
+    s = _SCRIPT_RE.sub(" ", text)  # drop script/style bodies outright
+    s = _TAG_RE.sub(" ", s)
+    s = html.unescape(s)  # &amp; &nbsp; &#8217; …
+    return " ".join(s.split())  # collapses \xa0 too — it is whitespace to str.split
+
+
+def _snippet(text) -> str:
+    return _plain_text(text)[:SNIPPET_CHARS]
 
 
 def _description(text) -> str:
@@ -179,9 +201,68 @@ def _description(text) -> str:
     Still served from the cached snapshot — never a live fetch. The full untruncated
     body is never returned; the harvest already caps text at ~2000 chars.
     """
-    if not isinstance(text, str):
+    return _plain_text(text)[:DESC_CHARS]
+
+
+# ── facet normalization ───────────────────────────────────────────────────────
+# A filter chip is a PROMISE that picking it shows you every matching job. Raw source
+# values break that promise: the live pool carries "full_time", "Full Time", "Full-Time"
+# and "Full-time" as four separate chips over what is one thing (621 rows split four
+# ways), plus five spellings of contract. Both fields are also used as dumping grounds
+# for free text — schedule prose ("Monday-Friday 8:00am-4:30pm"), German seniority
+# tokens, and whole sentences — which are not types at all.
+#
+# So this is a WHITELIST, not a cleanup: a value that does not map to a known token is
+# dropped rather than surfaced. An unfilterable chip is worse than no chip.
+_EMPLOYMENT_ALIASES = {
+    "full time": "full_time",
+    "fulltime": "full_time",
+    "permanent": "full_time",
+    "part time": "part_time",
+    "parttime": "part_time",
+    "contract": "contract",
+    "contractor": "contract",
+    "contract long": "contract",
+    "contract short": "contract",
+    "temporary": "temporary",
+    "temp": "temporary",
+    "internship": "internship",
+    "intern": "internship",
+    "freelance": "freelance",
+    "seasonal": "seasonal",
+    "flex time": "flexible",
+    "flextime": "flexible",
+    "flexitime": "flexible",
+}
+
+# `category` drives the "Field" facet, so it must be a job FUNCTION. Three other kinds
+# of value leak in: USAJOBS agency names (~550 rows of "Department of the Navy" — an
+# EMPLOYER, not a field), a seniority ("Mid-Senior Level"), and one employer's internal
+# ATS codes ("220 - Solutions PS"). Agencies are dropped rather than renamed because
+# there is no employer facet to move them to; adding one is a separate feature.
+_CATEGORY_CODE_RE = re.compile(r"^\d+\s*[-–—]\s*")
+_CATEGORY_DENY_RE = re.compile(
+    r"(?i)^(department of|office of|.*\bagencies\b|legislative branch|judicial branch|"
+    r"mid[- ]senior level|entry level|executive|associate|director|not applicable)"
+)
+_CATEGORY_MAX_LEN = 40
+
+
+def _norm_employment_type(value) -> str:
+    """Canonical employment-type token, or '' when the value is not a type at all."""
+    key = " ".join(
+        "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
+    ).lower()
+    return _EMPLOYMENT_ALIASES.get(key, "")
+
+
+def _norm_category(value) -> str:
+    """A job-function category, or '' when the value is an employer/level/free text."""
+    s = _plain_text(value)  # decodes 'Legal &amp; Compliance' → 'Legal & Compliance'
+    s = _CATEGORY_CODE_RE.sub("", s).strip()  # '220 - Solutions PS' → 'Solutions PS'
+    if not s or len(s) > _CATEGORY_MAX_LEN or _CATEGORY_DENY_RE.match(s):
         return ""
-    return " ".join(text.split())[:DESC_CHARS]
+    return s
 
 
 def _fit_pct(fit_score: float, ref: float) -> int:
@@ -204,8 +285,8 @@ def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
         "posted": c.get("posted", ""),
         "source": c.get("source", ""),
         "salary": c.get("salary", ""),
-        "category": c.get("category", ""),
-        "employment_type": c.get("employment_type", ""),
+        "category": _norm_category(c.get("category")),
+        "employment_type": _norm_employment_type(c.get("employment_type")),
         "tags": tags,
         "fit_score": fit_score,  # the reranked score (canonical)
         "fit_pct": fit_pct,  # derived gauge value (presentation only)
@@ -436,7 +517,19 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     results = [
         _shape(c, round(final), why, _fit_pct(final, ref)) for c, final, why in kept
     ]
-    facets = store.facet_counts([c for c, _, _ in kept])
+    # Count facets over NORMALIZED rows so the counts match the chips the cards produce.
+    # Normalizing on a copy (not the shaped result) keeps remote/seniority/salary_band,
+    # which live as top-level columns here but are folded into `tags` by _shape.
+    facets = store.facet_counts(
+        [
+            {
+                **c,
+                "category": _norm_category(c.get("category")),
+                "employment_type": _norm_employment_type(c.get("employment_type")),
+            }
+            for c, _, _ in kept
+        ]
+    )
     return {
         "count": len(results),
         "degraded": degraded,
