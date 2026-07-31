@@ -4,7 +4,8 @@
 // tint, the time-of-day accent, the living halo, and deep-night twinkles from the
 // browser's OWN local clock (no server, no IP). The whole UI is glass over this.
 // Recomputes only on the minute; all motion is gated by prefers-reduced-motion.
-// Ported from design/atmosphere-study.html (the locked reference).
+// The palette ramps and timings below ARE the reference — they were ported from a
+// design study kept outside the repo, so this file is the only source of truth for them.
 
 (function () {
   const root = document.documentElement;

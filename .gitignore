@@ -28,6 +28,10 @@ BUILD-PLAN.md
 HANDOFF.md
 HANDOFF-*.md
 
+# Design workshop — studies, boards, and screenshots kept local. It accumulates
+# (phone screenshots, prototypes), so it is deny-by-default rather than per-file.
+/design
+
 # Editors / IDEs
 .idea/
 .vscode/
