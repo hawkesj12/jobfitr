@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>jobfitr — Atmosphere Study</title>
 <style>
   :root {
@@ -77,6 +78,22 @@
     opacity: 0.5; animation: breathe var(--breath) ease-in-out infinite;
   }
   @keyframes breathe { 0%,100% { transform: scale(0.99); opacity: 0.34; } 50% { transform: scale(1.04); opacity: 0.6; } }
+
+  /* ── heartbeat: a faint pulse emanating from the chat card ── */
+  .pulse { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+  .rip {
+    position: absolute; inset: 0; border-radius: 18px; z-index: -1; pointer-events: none;
+    border: 3px solid color-mix(in srgb, var(--accent) 58%, transparent);
+    filter: blur(1.5px);                    /* soften the stroke into a band */
+    opacity: 0; will-change: transform, opacity;
+  }
+  @keyframes ripOut {
+    0%   { transform: scale(1);    opacity: 0; }
+    26%  { opacity: 0.085; }
+    100% { transform: scale(1.45); opacity: 0; }
+  }
+  .rip.run { animation: ripOut 1.7s ease-out forwards; }
+  .rip.dub { animation-duration: 1.5s; }   /* the softer second beat */
   .chat { width: 100%; padding: 15px 17px; }
   .chat .line { font-size: 14.5px; margin-bottom: 11px; line-height: 1.5; }
   .chat .line .cur { display: inline-block; width: 7px; height: 15px; vertical-align: -2px; background: var(--accent); margin-left: 2px; border-radius: 1px; animation: blink 1.1s steps(1) infinite; }
@@ -131,7 +148,8 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
   @media (prefers-reduced-motion: reduce) {
-    #glow, #wash, .halo, .tw.on, .chat .line .cur { animation: none; }
+    #glow, #wash, .halo, .tw.on, .chat .line .cur, .rip.run { animation: none; }
+    .pulse { display: none; }
     #sky, #glow, #wash, .glass, .cc, .field, .gcard .why b, .controls button, body { transition: none; }
   }
 </style>
@@ -146,6 +164,7 @@
 <div class="scene">
   <div class="chatwrap">
     <div class="halo"></div>
+    <div class="pulse" id="pulse"></div>
     <div class="glass chat">
       <div class="line" id="chatline">Nice — a few strong fits near you. Tap a card to see the detail.<span class="cur"></span></div>
       <div class="field"><span class="ph">Refine your search…</span><span class="go">↵</span></div>
@@ -256,6 +275,8 @@
     }
     // breathe slower as it gets dark — the app "sleeping"
     root.style.setProperty("--breath", (4.2 + (1-fr.lum)*4.5).toFixed(1)+"s");
+    // the heartbeat slows as it gets dark — the app drifting toward sleep
+    bpm = 46 + fr.lum*20;                                     // ~46 bpm night → ~66 bpm midday
 
     clock.textContent=fmt(fr.t); phaseEl.textContent=phaseName(fr.t);
 
@@ -279,6 +300,22 @@
   }
   function startStars(){ if(starTimer)return; starTimer=setInterval(spawnStar, 620); }
   function stopStars(){ if(starTimer){ clearInterval(starTimer); starTimer=null; } starsLayer.textContent=""; }
+
+  // ── heartbeat: a faint lub-dub pulse from the chat, slowing at night
+  var pulse=document.getElementById("pulse");
+  var bpm=62;                                  // set by time-of-day in apply()
+  function rip(dub){
+    if (reduce) return;
+    var r=document.createElement("div"); r.className="rip run"+(dub?" dub":"");
+    pulse.appendChild(r);
+    r.addEventListener("animationend", function(){ r.remove(); });
+  }
+  function heartbeat(){
+    rip(false);                                // lub
+    setTimeout(function(){ rip(true); }, 235); // dub, a beat later
+    setTimeout(heartbeat, 60000/bpm);          // rest, then the next beat
+  }
+  if (!reduce){ setTimeout(heartbeat, 600); }
 
   // ── gauge fill on load ────────────────────────────────────
   setTimeout(function(){ document.getElementById("fill").style.width="88%"; }, 380);

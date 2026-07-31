@@ -1,4 +1,4 @@
-# 🎯 jobfitr
+# jobfitr
 
 **Answer a few questions, get a ranked list of jobs that actually fit you — each with a link straight to apply.**
 
