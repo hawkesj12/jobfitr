@@ -105,7 +105,7 @@ For a box already running the old pure-cache build:
 sudo nano /etc/jobfitr/jobfitr.env        # + JOBFITR_DB_PATH=/opt/jobfitr/data/jobs.db
                                           # + ADZUNA_DAILY_CEILING=200
 # 2. pull the new code + reinstall (sqlite3+fts5 are stdlib — no new deps)
-sudo -u jobfitr sh -c "cd /opt/jobfitr/jobfitr && git pull && .venv/bin/uv pip install -e '.[web]'"
+sudo -u jobfitr sh -c "cd /opt/jobfitr/jobfitr && git pull && .venv/bin/uv sync --frozen --extra web"
 # 3. install the new/updated units
 sudo install -m 644 /opt/jobfitr/jobfitr/deploy/jobfitr-*.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -119,9 +119,9 @@ On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json`
 
 ## Where the job-radar engine comes from (settled 2026-07-22)
 
-**The box tracks PyPI, like any other dependency.** `pyproject.toml` pins `job-radar>=0.2,<0.3`; `uv pip install` resolves it from PyPI into each slot's venv. An engine change reaches production through a **job-radar release + a version bump here**, not a `git pull` on the box.
+**The box tracks PyPI, like any other dependency.** `pyproject.toml` declares the accepted range (`job-radar>=0.5,<0.6`) and **`uv.lock` pins the exact build**; `deploy-slot.sh` installs with `uv sync --frozen`, so the box replays the locked graph instead of re-resolving it. An engine change reaches production through a **job-radar release + a version bump + a re-`uv lock` here**, not a `git pull` on the box.
 
-This settles what was left open when the old `[tool.uv.sources]` local-path override was removed. The slots were already built this way — both blue and green run job-radar **0.2.0 from PyPI** — so this section documents what's true rather than changing it. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
+This settles what was left open when the old `[tool.uv.sources]` local-path override was removed. Locking came later (2026-07-31): resolving a version *range* at install time meant two deploys from identical source could land different dependency versions, so a rollback restored the old code against a possibly-different graph. The range is a wish; the lockfile is the contract. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
 
 > **To hack on the engine against the live box anyway** (rare, and it makes that slot stop matching how everyone else installs jobfitr): `uv pip install -e /opt/jobfitr/job-radar` inside that slot's venv, and remember the next `uv pip install` for the app will resolve job-radar back to PyPI.
 
@@ -134,7 +134,7 @@ The everyday "I merged a change, get it on the box" flow. Under blue-green you d
 sudo -u jobfitr git -C /opt/jobfitr/jobfitr   pull --ff-only
 
 # 2. ALWAYS reinstall after a pull — even for a pure-.py change (see the gotcha below)
-sudo -u jobfitr sh -lc "cd /opt/jobfitr/jobfitr && uv pip install -e '.[web]' --quiet"
+sudo -u jobfitr sh -lc "cd /opt/jobfitr/jobfitr && uv sync --frozen --extra web --quiet"
 
 # 3. restart the web service (editable reinstall doesn't disturb the running process)
 sudo systemctl restart jobfitr-web

@@ -22,8 +22,14 @@ echo "▸ deploying ref '${REF}' to the STAGING slot: ${slot}  (${dir})"
 sudo -u jobfitr git -C "$dir" fetch --all --tags --quiet
 sudo -u jobfitr git -C "$dir" checkout --quiet "$REF"
 sudo -u jobfitr git -C "$dir" pull --ff-only --quiet 2>/dev/null || true   # no-op for a tag/sha
-echo "▸ installing deps"
-sudo -u jobfitr sh -c "cd '$dir' && '$UV' pip install -e '.[web]' --quiet"
+echo "▸ installing deps (from the lockfile — a replay, not a re-solve)"
+# --frozen installs exactly what uv.lock pins and never re-resolves. The old
+# `uv pip install -e '.[web]'` resolved the pyproject version RANGES at install time, so
+# two deploys from identical source could land different dependency versions — which
+# also meant a rollback restored the old code against a possibly-different graph. The
+# range is a wish; the lockfile is the contract. If this errors with a stale-lockfile
+# complaint, the fix is `uv lock` committed from a dev machine, never a re-solve here.
+sudo -u jobfitr sh -c "cd '$dir' && '$UV' sync --frozen --extra web --quiet"
 
 systemctl restart "jobfitr-web@${slot}"
 sleep 1

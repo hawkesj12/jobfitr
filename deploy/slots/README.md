@@ -112,8 +112,10 @@ Ships the resolution ledger, the Workday adapter, Common Crawl discovery, the
 per-company diversity cap, and the frozen-pool fix — in one flip, reversible at every
 step. **Blue is production; green is the spare.** Nothing below touches blue until step 8.
 
-**Before you start:** job-radar must be on PyPI at the pinned version, because
-`deploy-slot.sh` runs `uv pip install` and will resolve it from there. Publishing is a
+**Before you start:** job-radar must be on PyPI at the LOCKED version, because
+`deploy-slot.sh` runs `uv sync --frozen` and installs exactly what `uv.lock` names.
+Bumping the engine therefore means: release it, widen the range in `pyproject.toml`,
+re-run `uv lock`, and commit the lockfile — the box never re-resolves. Publishing is a
 separate, earlier decision — see the dry-run gate in `scripts/dry_run.py`.
 
 ```bash
