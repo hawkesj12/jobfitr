@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=32" />
+    <link rel="stylesheet" href="style.css?v=33" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -41,12 +41,37 @@
     <div id="wash" aria-hidden="true"></div>
     <div id="stars" aria-hidden="true"></div>
 
+    <header class="site-header">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">jf</span>
+        <span class="brand-name">jobfitr</span>
+      </a>
+      <span class="spacer"></span>
+      <a class="m-link" href="#how">How it works</a>
+      <a class="m-link" href="#sources">Sources</a>
+    </header>
+
     <main id="stage" class="stage">
       <!-- ── the chat front door ──────────────────────────────────────────────── -->
       <section id="chat-view" class="chat-view" aria-label="Describe your search">
-        <div class="transcript">
-          <div class="echo" id="echo" aria-hidden="true"></div>
-          <p class="chat-say" id="chat-say" aria-live="polite"></p>
+        <div class="doorhead">
+          <!-- what a cold visitor reads in three seconds. Hidden the moment the
+               conversation starts (chat.js), so it never competes with the answers. -->
+          <div class="hero" id="hero">
+            <h1 class="hero-prop">Jobs that <em>actually fit you</em> — straight from the company.</h1>
+            <p class="hero-sub">
+              Answer four questions. jobfitr ranks every open role against them and links you
+              direct to the employer's own posting. No account, no tracking, no recruiters.
+            </p>
+            <p class="proof" id="proof"></p>
+          </div>
+          <div class="transcript">
+            <div class="echo" id="echo" aria-hidden="true"></div>
+            <div class="sayrow">
+              <span class="steps" id="steps" aria-hidden="true"></span>
+              <p class="chat-say" id="chat-say" aria-live="polite"></p>
+            </div>
+          </div>
         </div>
         <div class="barwrap">
           <div class="halo" aria-hidden="true"></div>
@@ -63,10 +88,44 @@
             </form>
           </div>
         <div class="chips" id="chips" aria-hidden="true"></div>
+
+        <!-- seeded starters: a bare input tells a first-time visitor nothing about
+             what the assistant can do. These run a real search on one click. -->
+        <div class="doorextra" id="doorextra">
+          <p class="starters-lab">or start from one of these</p>
+          <div class="starters" id="starters"></div>
+
+          <div class="doornotes">
+            <section id="how">
+              <h2>How it works</h2>
+              <p>
+                You answer four questions in the box above. jobfitr scores every role in its
+                pool against your answers — title match first, then the skills you said matter,
+                minus anything you asked to avoid — and shows the best fits in order. Fit is
+                relative to your own best match, not an absolute grade.
+              </p>
+            </section>
+            <section id="sources">
+              <h2>Where the jobs come from</h2>
+              <p>
+                Companies' own hiring boards (Greenhouse, Lever, Ashby and friends) plus a few
+                open job APIs. Every result links straight to the employer's posting — jobfitr
+                never sits between you and the application, and never takes a fee for it.
+              </p>
+            </section>
+          </div>
+        </div>
       </section>
 
-      <!-- ── results: the gauge-card carousel ─────────────────────────────────── -->
+      <!-- ── results: the board ───────────────────────────────────────────────── -->
       <section id="results-view" class="results-view" hidden>
+        <!-- The criteria bar and the toolbar stick as ONE group: the criteria pills
+             wrap to a second line on narrow screens, so a hardcoded sticky offset for
+             the toolbar underneath would collide with them. -->
+        <div class="boardbar">
+        <!-- THE HANDOFF: the answered questions, collapsed into editable pills -->
+        <div class="criteria" id="criteria" hidden></div>
+
         <div class="toolbar" id="toolbar">
           <button type="button" class="tb-btn" id="filters-toggle" aria-expanded="false">
             <span aria-hidden="true">☰</span> Filters
@@ -84,7 +143,9 @@
             <input type="range" id="f-salary" min="0" max="200000" step="10000" value="0" aria-label="Minimum salary" />
           </label>
           <span class="spacer"></span>
+          <span class="fit-note">fit is relative to your best match</span>
           <span class="result-summary" id="result-summary" aria-live="polite"></span>
+        </div>
         </div>
 
         <p class="notice" id="notice" hidden></p>
@@ -207,31 +268,36 @@
     <!-- ── the gauge-card template ──────────────────────────────────────────── -->
     <template id="card-template">
       <article class="gcard glass">
-        <div class="fill"></div>
+        <!-- the fit gutter: a number and a bar on a common baseline, in its own
+             aligned track — not a tinted wash behind the text it has to compete with -->
+        <div class="fitcol">
+          <p class="fit-num"></p>
+          <div class="fit-track"><div class="fit-bar"></div></div>
+          <p class="fit-word"></p>
+        </div>
         <div class="gcard-head">
           <div class="gcard-id">
             <h3 class="role"></h3>
             <p class="org"><span class="company"></span> · <span class="loc"></span></p>
           </div>
-          <div class="fitcorner">
-            <span class="tier"></span>
-            <span class="rank"></span>
-          </div>
+          <ul class="why" aria-label="Why it fits"></ul>
+          <p class="detail-meta">
+            <span class="salary"></span><span class="posted"></span><span class="source"></span>
+          </p>
         </div>
-        <ul class="why" aria-label="Why it fits"></ul>
-        <ul class="desc-bullets" aria-label="About this role"></ul>
-        <p class="detail-meta">
-          <span class="salary"></span><span class="posted"></span><span class="source"></span>
-        </p>
-        <div class="acts">
-          <a class="btn btn-primary btn-open" href="#" target="_blank" rel="noopener noreferrer">Apply ↗</a>
-          <button class="btn btn-ghost btn-dismiss" type="button">Pass</button>
+        <span class="chev" aria-hidden="true">⌄</span>
+        <div class="gcard-detail">
+          <ul class="desc-bullets" aria-label="About this role"></ul>
+          <div class="acts">
+            <a class="btn btn-primary btn-open" href="#" target="_blank" rel="noopener noreferrer">Apply ↗</a>
+            <button class="btn btn-ghost btn-dismiss" type="button">Pass</button>
+          </div>
         </div>
       </article>
     </template>
 
-    <script src="atmosphere.js?v=32"></script>
-    <script src="app.js?v=32"></script>
-    <script src="chat.js?v=32"></script>
+    <script src="atmosphere.js?v=33"></script>
+    <script src="app.js?v=33"></script>
+    <script src="chat.js?v=33"></script>
   </body>
 </html>

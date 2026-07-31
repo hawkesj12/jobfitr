@@ -16,44 +16,47 @@
 
   const OPENER = "What job are you chasing?";
   const CHIP_SHOW = 4; // how many chips to show at once (pool is up to 8; refills on pick)
-  const reduceMo = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const TOTAL_STEPS = 4; // the interview is four questions — show where you are
+  const heroEl = document.getElementById("hero");
+  const doorExtra = document.getElementById("doorextra");
+  const stepsEl = document.getElementById("steps");
 
   const messages = [];
   let config = {};
   let busy = false;
   let prefetched = false;
   let currentQuestion = OPENER; // the question the next answer responds to
-  let typeToken = 0;
+  let answered = 0;
   let chipPool = []; // suggestions for the current question; CHIP_SHOW render, rest reserve
 
-  function renderSay(text, withCursor) {
-    sayEl.textContent = text;
-    if (withCursor) {
+  // Render the assistant line. The question appears AT ONCE — the old version typed it
+  // out character by character, which delays interaction to simulate work that has
+  // already finished. Faking latency where none exists is theater, not presence; the
+  // blinking cursor carries the aliveness without costing the user a second.
+  function typeInto(text) {
+    sayEl.textContent = text || "";
+    if (text) {
       const c = document.createElement("span");
       c.className = "cur";
       sayEl.appendChild(c);
     }
   }
 
-  // Type `text` into the assistant line ABOVE the box, with a blinking cursor. A newer
-  // message supersedes an in-flight one (typeToken).
-  function typeInto(text) {
-    const token = ++typeToken;
-    if (reduceMo || !text) {
-      renderSay(text || "", false);
-      return;
+  function renderSteps() {
+    if (!stepsEl) return;
+    stepsEl.textContent = "";
+    for (let i = 0; i < TOTAL_STEPS; i++) {
+      const d = document.createElement("i");
+      if (i <= answered) d.classList.add("on");
+      stepsEl.appendChild(d);
     }
-    let i = 0;
-    (function step() {
-      if (token !== typeToken) return;
-      renderSay(text.slice(0, i), true);
-      if (i < text.length) {
-        i++;
-        setTimeout(step, 18 + Math.random() * 22);
-      } else {
-        renderSay(text, false);
-      }
-    })();
+  }
+
+  // Once the conversation is underway the marketing block has done its job and would
+  // only compete with the answers.
+  function enterConversation() {
+    if (heroEl) heroEl.hidden = true;
+    if (doorExtra) doorExtra.hidden = true;
   }
 
   function pushEcho(question, answer) {
@@ -103,9 +106,11 @@
     });
   }
 
-  // ── contextual chips: tap to add to the answer; a picked chip is replaced by the
-  // next reserve one (so similar suggestions keep sliding in). Multi-select builds a
-  // comma-separated answer in the box. ──────────────────────────────────────────────
+  // ── contextual chips: ONE TAP = ONE ANSWER. ──────────────────────────────────────
+  // These used to only FILL the box and leave the user to find Enter — a dead end
+  // dressed as a button, and the single most confusing moment in the interview. A tap
+  // now sends. Anything the user has already typed is carried along, so a chip still
+  // composes with free text; typing a comma-separated list by hand works as before.
   function renderChips() {
     if (!chipsEl) return;
     chipsEl.textContent = "";
@@ -119,11 +124,8 @@
     }
   }
   function selectChip(label) {
-    const cur = input.value.trim().replace(/,\s*$/, "");
-    input.value = cur ? cur + ", " + label : label;
-    input.focus();
-    chipPool = chipPool.filter((c) => c !== label); // remove it; the next reserve slides in
-    renderChips();
+    const typed = input.value.trim().replace(/,\s*$/, "");
+    send(typed ? typed + ", " + label : label);
   }
   function setChips(list) {
     chipPool = Array.isArray(list) ? list.filter((c) => typeof c === "string" && c.trim()) : [];
@@ -138,11 +140,14 @@
   async function send(text) {
     if (busy || !text.trim()) return;
     busy = true;
+    enterConversation();
     input.value = "";
     setChips([]); // clear last question's chips until the next turn returns fresh ones
     pushEcho(currentQuestion, text);
     messages.push({ role: "user", content: text });
-    renderSay("", true);
+    answered = Math.min(answered + 1, TOTAL_STEPS - 1);
+    renderSteps();
+    typeInto("");
 
     // Assistant unavailable (503/429/upstream/network). If we already have a role +
     // place, just search; otherwise ask them to try again — never the form.
@@ -174,7 +179,9 @@
       typeInto(reply);
       setChips(data.chips);
       maybePrefetch();
-      if (data.ready) setTimeout(toResults, reply.length * 22 + 500);
+      // The reply is on screen instantly now, so the old length-proportional wait
+      // (which paced the typewriter) would just be dead time before the board.
+      if (data.ready) setTimeout(toResults, 650);
     } catch {
       unavailable();
     } finally {
@@ -187,6 +194,11 @@
     send(input.value);
   });
 
-  // Open the conversation: type the first question ABOVE the box.
-  setTimeout(() => typeInto(OPENER), 450);
+  // A starter button is just a first answer typed for you.
+  window.jobfitr = window.jobfitr || {};
+  window.jobfitr.seed = (text) => send(text);
+
+  // Open the conversation with the first question already on screen.
+  renderSteps();
+  typeInto(OPENER);
 })();

@@ -1,8 +1,10 @@
 # jobfitr
 
-**Answer a few questions, get a ranked list of jobs that actually fit you — each with a link straight to apply.**
+**Answer four questions, get a ranked list of jobs that actually fit you — each with a link straight to apply.**
 
-jobfitr is a small, self-hostable web app. You tell it what you want (titles), what makes a role a better fit for _you_ (skills, tools, a city), and what to hide — and it hands back fit-scored, clickable, direct-to-company job listings. Mark the ones you apply to and they fly to a saved rail. No account, no tracking.
+jobfitr is a small, self-hostable web app. An assistant asks you four things — the job you want, where, what should rank a role higher (skills, tools), and what to keep out — then hands back fit-scored, clickable, direct-to-company job listings. Mark the ones you apply to and they fly to a saved rail. No account, no tracking.
+
+Each result carries its **fit** as a number and a bar in its own column, plus the signals that earned it. Fit is normalized against your own best match, so it is a relative ranking, not an absolute grade — the board says so on its face.
 
 It's the consumer front end on top of the open-source [**job-radar**](https://github.com/hawkesj12/job-radar) engine, which does the harvesting and scoring.
 
@@ -12,7 +14,7 @@ It's the consumer front end on top of the open-source [**job-radar**](https://gi
 
 ```
 scheduled:   wide harvest ──▶ jobs.json  (the cache)
-per request: your 5 answers ──▶ score the cache ──▶ ranked links
+per request: your 4 answers ──▶ score the cache ──▶ ranked links
 ```
 
 ## Quickstart (local)
@@ -36,7 +38,9 @@ jobfitr-serve
 
 > **Hacking on the engine too?** To run against a local `job-radar` checkout instead of the PyPI release, clone it next door and install it editable first: `uv pip install -e ../job-radar`.
 
-Open **http://localhost:8000**, answer the five questions, and hit **Find my jobs**.
+Open **http://localhost:8000** and answer the four questions the assistant asks. The board
+appears as soon as it has enough; you can keep refining by talking to it, or edit the
+criteria pills at the top of the board directly.
 
 > **Heads-up:** the free, no-key boards skew toward remote tech roles. A broad non-tech search stays thin until you add a free Adzuna key (see _Configure_). The app tells you this when results are sparse — it won't silently hand you an empty list.
 
@@ -71,20 +75,25 @@ Same-origin; the front end talks to these directly.
 | Method & path     | Purpose                                                                                                                                                                             |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /api/score` | Score the cached snapshot against a config body (`titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`, `min_score`, `limit`). Returns ranked jobs. |
-| `GET /api/meta`   | Snapshot freshness — when it was harvested, how many jobs, which sources.                                                                                                           |
+| `POST /api/chat`  | One conversational turn: `{messages, config}` → `{reply, config, ready, chips}` (structured output). The only thing that reaches scoring is the config it fills. |
+| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer. |
+| `GET /api/meta`   | Snapshot freshness — `count` (pool size) and `harvested_at`. Drives the front door's proof line. |
 | `GET /api/health` | Liveness check.                                                                                                                                                                     |
 
 ## Project layout
 
 ```
 jobfitr/
-  config_builder.py   the 5-answer JSON → a job_radar Config (the per-user lens)
+  config_builder.py   the 4-answer JSON → a job_radar Config (the per-user lens)
   snapshot.py         wide harvest → atomic jobs.json; the cached reader
-  server.py           FastAPI: /api/score + /api/meta + /api/health; serves web/
+  chat.py             the structured-turn assistant behind /api/chat
+  server.py           FastAPI: /api/chat + /api/score + /api/meta + /api/health; serves web/
 web/
-  index.html          the 5-question form + result cards + applied rail
-  app.js              form → API → cards, localStorage state, shareable links
-  style.css           the theme (light/dark, responsive)
+  index.html          the chat front door + the results board + applied rail
+  chat.js             the four-question assistant (one structured turn per message)
+  app.js              config → API → board rows, criteria bar, localStorage state
+  atmosphere.js       the time-of-day sky the whole UI floats on
+  style.css           the theme (time-of-day atmosphere, responsive)
 tests/
   test_web.py         incl. the zero-network-on-request guarantee
 web-harvest.example.yaml   the wide-harvest config

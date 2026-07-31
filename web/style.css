@@ -20,6 +20,30 @@
   --radius: 16px;
   --radius-sm: 11px;
   --maxw: 560px;
+
+  /* ── the three value planes (the notan test: if it doesn't read in two values,
+     it won't read in twenty). Plane 1 is the sky. Plane 2 is the glass surface —
+     --card-bg's 0.34 alpha only gives body text ~2.9:1, so real reading surfaces
+     use --plate instead. Plane 3 is --anchor: the single strongest value jump,
+     RATIONED to the wordmark, the fit bar, the primary action, and an open card.
+     --anchor derives from --ink so it inverts with the sky (atmosphere.js flips
+     --ink light after dusk); a hardcoded dark would vanish at night. ────────── */
+  --plate: color-mix(in srgb, var(--card-bg) 55%, rgba(255, 255, 255, 0.7));
+  --plate-brd: color-mix(in srgb, var(--card-brd) 70%, rgba(255, 255, 255, 0.5));
+  --anchor: color-mix(in srgb, var(--ink) 88%, var(--accent));
+  /* the label ON the anchor tracks the SKY, not white — so it stays the light half
+     of the pair by day and flips to the dark half at night, when --ink goes light. */
+  --on-anchor: color-mix(in srgb, var(--sky-mid) 88%, #fff);
+
+  /* ── a real modular type scale (1.25). The app previously ran ten sizes between
+     10.5px and 15.5px — inside 5px, with no 16px body size at all. That is not a
+     scale, and mush cannot express hierarchy. ─────────────────────────────────── */
+  --t-micro: 11px;
+  --t-small: 13px;
+  --t-body: 16px;
+  --t-lead: 20px;
+  --t-head: 25px;
+  --t-hero: 31px;
 }
 
 * { box-sizing: border-box; }
@@ -97,14 +121,48 @@ button { font: inherit; cursor: pointer; }
 
 /* ── header + stage ─────────────────────────────────────────────────────────── */
 .site-header {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  max-width: 940px; margin: 0 auto; padding: 20px 22px 0;
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 12px;
+  max-width: 940px; margin: 0 auto; padding: 14px 22px;
 }
-.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: -0.01em; }
-.brand-mark { font-size: 20px; }
-.brand-name { font-size: 18px; }
-.freshness { font-family: var(--mono); font-size: 11.5px; color: var(--sub); }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); text-decoration: none; }
+/* plane 3 — the monogram is one of the four objects allowed the full ink jump */
+.brand-mark {
+  display: grid; place-items: center; width: 27px; height: 27px;
+  border-radius: 8px; background: var(--anchor); color: var(--accent);
+  font-size: var(--t-small); font-weight: 800; letter-spacing: -0.04em;
+  transition: background 1400ms ease, color 1400ms ease;
+}
+.brand-name { font-size: var(--t-body); }
+.site-header .spacer { flex: 1; }
+.freshness { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); }
+.m-link { font-size: var(--t-small); color: var(--sub); text-decoration: none; padding: 6px 10px; border-radius: 100px; }
+.m-link:hover { color: var(--ink); background: var(--field-bg); }
 .stage { max-width: var(--maxw); margin: 0 auto; padding: 24px 20px 120px; }
+
+/* ── the front-door hero: what a cold visitor reads in three seconds ─────────── */
+.hero { width: min(640px, calc(100% - 40px)); text-align: center; margin-bottom: 26px; }
+.hero-prop {
+  font-size: var(--t-hero); font-weight: 680; letter-spacing: -0.025em;
+  line-height: 1.15; text-wrap: balance; margin-bottom: 10px;
+}
+.hero-prop em { font-style: normal; color: var(--anchor); }
+.hero-sub { font-size: var(--t-body); color: var(--sub); text-wrap: balance; max-width: 46ch; margin: 0 auto 20px; }
+/* the proof line — real numbers from /api/meta, never invented ones */
+.proof {
+  display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: center;
+  font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); min-height: 1.2em;
+}
+.proof b { color: var(--ink); font-weight: 600; }
+.proof .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); }
+.proof .sep { opacity: 0.4; }
+/* the interview progress dots — four questions, so show where you are */
+.sayrow { display: flex; align-items: baseline; gap: 10px; width: 100%; }
+.sayrow:has(.chat-say:empty) { display: none; } /* nothing said yet → no empty row */
+.steps { display: inline-flex; gap: 5px; flex: none; transform: translateY(-3px); }
+.steps:empty { display: none; }
+.steps i { width: 6px; height: 6px; border-radius: 50%; display: block; background: color-mix(in srgb, var(--ink) 18%, transparent); transition: background 300ms ease; }
+.steps i.on { background: var(--anchor); }
 
 /* ── chat front door ────────────────────────────────────────────────────────── */
 /* front door: the BAR is pinned dead-center; the transcript stacks upward above it,
@@ -115,8 +173,12 @@ button { font: inherit; cursor: pointer; }
   justify-items: center;
   min-height: 100dvh; margin-block: -24px -120px;
 }
+/* the hero and the transcript share row 1 — hero on top, transcript hugging the bar */
+.doorhead {
+  grid-row: 1; align-self: end; width: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+}
 .transcript {
-  grid-row: 1; align-self: end; /* sit just above the bar and grow upward */
   width: min(560px, calc(100% - 40px));
   display: flex; flex-direction: column; justify-content: flex-end;
   gap: 10px; padding-bottom: 14px; overflow: hidden; /* no scroll — old lines clip/fade */
@@ -152,111 +214,225 @@ button { font: inherit; cursor: pointer; }
 .rip.dub { animation-duration: 1.5s; }
 /* no outer window — the bar itself is the glass; halo + pulse hug the BAR, not the taller wrap */
 .barwrap { grid-row: 2; position: relative; width: min(560px, calc(100% - 40px)); }
-.chat-say { font-size: 15.5px; line-height: 1.5; min-height: 1.5em; margin-bottom: 12px; padding: 0 4px; }
+.chat-say { font-size: var(--t-lead); font-weight: 560; letter-spacing: -0.01em; line-height: 1.35; min-height: 1.35em; margin-bottom: 14px; padding: 0 4px; text-wrap: balance; }
 /* collapse the assistant line when it has nothing to say — a clean single-line bar on load */
 .chat-say:empty { display: none; }
 .chat-say .cur { display: inline-block; width: 7px; height: 16px; vertical-align: -2px; background: var(--accent); margin-left: 2px; border-radius: 1px; animation: blink 1.1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .chat-field {
-  display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-radius: 14px;
-  background: var(--card-bg); border: 1px solid var(--card-brd);
+  display: flex; align-items: center; gap: 10px; padding: 12px 10px 12px 18px; border-radius: 14px;
+  /* a real reading surface (plane 2), not the 0.34-alpha whisper the rest of the app used */
+  background: var(--plate); border: 1px solid var(--plate-brd);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, 0 12px 44px rgba(15, 20, 38, 0.16);
   -webkit-backdrop-filter: blur(22px) saturate(1.4);
   backdrop-filter: blur(22px) saturate(1.4);
   transition: background 1400ms ease, border-color 1400ms ease;
 }
-.chat-field input { flex: 1; border: 0; background: transparent; color: var(--ink); font-size: 15px; outline: none; }
+.chat-field input { flex: 1; border: 0; background: transparent; color: var(--ink); font-size: var(--t-body); outline: none; }
 .chat-field input::placeholder { color: var(--sub); }
-.chat-send { border: 0; background: transparent; color: var(--accent); font-size: 18px; padding: 2px 6px; }
-.starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-.starter { font-size: 12.5px; color: var(--ink); background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.chat-send {
+  display: grid; place-items: center; width: 34px; height: 34px; flex: none;
+  border: 0; border-radius: 50%; background: var(--anchor); color: var(--on-anchor);
+  font-size: var(--t-small); padding: 0;
+  transition: background 1400ms ease, color 1400ms ease;
+}
+/* seeded starters — a bare input tells a first-time visitor nothing about what the
+   assistant can do, so offer real searches they can run with one click. */
+.starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+.starters-lab { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); margin-bottom: 9px; text-align: center; }
+.starter {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: var(--t-small); color: var(--sub);
+  background: transparent; border: 1px dashed var(--card-brd); border-radius: 100px; padding: 7px 13px;
+}
+.starter:hover { color: var(--ink); border-style: solid; background: var(--card-bg); }
+.starter .arw { opacity: 0.5; }
+.doorextra { width: min(560px, calc(100% - 40px)); margin-top: 26px; }
+/* the two things a sceptical visitor actually wants to know before typing anything */
+.doornotes { display: grid; gap: 20px; margin-top: 40px; padding-top: 22px; border-top: 1px solid var(--card-brd); }
+.doornotes h2 { font-size: var(--t-small); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); margin-bottom: 6px; }
+.doornotes p { font-size: var(--t-small); color: var(--sub); line-height: 1.6; }
+@media (min-width: 620px) { .doornotes { grid-template-columns: 1fr 1fr; gap: 26px; } }
 /* suggested-chips row — sits just under the pinned bar (grid row 3); hidden when empty.
    Populated later (fixed per-question or model-suggested); the front door stays bare for now. */
 .chips { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
 .chips:empty { display: none; }
-.chip { font-size: 12.5px; color: var(--ink); background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; cursor: pointer; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); transition: background 1400ms ease, border-color 1400ms ease; }
-.link-quiet { background: none; border: 0; color: var(--sub); font-size: 12.5px; text-decoration: underline; text-underline-offset: 3px; }
+/* one tap = one answer. A chip used to only FILL the box, leaving the user to find
+   Enter — a dead end dressed as a button. */
+.chip { font-size: var(--t-small); color: var(--ink); background: var(--card-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 7px 14px; cursor: pointer; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); transition: transform 140ms ease, background 200ms ease, border-color 1400ms ease; }
+.chip:hover { transform: translateY(-1px); background: var(--plate); }
+.link-quiet { background: none; border: 0; color: var(--sub); font-size: var(--t-small); text-decoration: underline; text-underline-offset: 3px; }
 
 /* ── results toolbar ────────────────────────────────────────────────────────── */
-.toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin-bottom: 14px; flex-wrap: wrap; }
-.tb-btn { font-size: 12.5px; color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 8px; padding: 6px 11px; }
-.tb-sort select { font: inherit; font-size: 12.5px; color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 8px; padding: 6px 10px; }
+.toolbar { display: flex; align-items: center; gap: 9px; padding: 4px 2px 12px; flex-wrap: wrap; }
+.tb-btn { font-size: var(--t-small); color: var(--ink); background: var(--plate); border: 1px solid var(--plate-brd); border-radius: 9px; padding: 7px 12px; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+.tb-sort select { font: inherit; font-size: var(--t-small); color: var(--ink); background: var(--plate); border: 1px solid var(--plate-brd); border-radius: 9px; padding: 7px 11px; }
 .toolbar .spacer { flex: 1; }
-.result-summary { font-family: var(--mono); font-size: 12px; color: var(--sub); }
+.result-summary { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); }
 .result-summary b { color: var(--good); }
+/* fit is RELATIVE to your best match (the server normalizes to the top score), so say
+   so once here rather than implying an absolute score with a "/100" on every row. */
+.fit-note { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); opacity: 0.8; }
 .tb-salary { display: flex; align-items: center; gap: 8px; }
-.tb-salary-val { font-family: var(--mono); font-size: 11.5px; color: var(--sub); min-width: 48px; }
+.tb-salary-val { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); min-width: 48px; }
 .tb-salary input[type="range"] { width: 120px; }
 
-/* ── the job board: a no-scroll vertical carousel ───────────────────────────── */
-.carousel { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
-.gcard {
-  position: relative; width: 100%; overflow: hidden; isolation: isolate; padding: 0;
-  transition: background 1400ms ease, border-color 1400ms ease, width 380ms cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 380ms ease, filter 380ms ease;
-}
-.gcard .fill {
-  position: absolute; inset: 0; z-index: -1; width: 0%;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, transparent), color-mix(in srgb, var(--accent) 52%, transparent));
-  border-right: 2px solid color-mix(in srgb, var(--accent) 82%, transparent);
-  transition: width 1000ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.gcard-head { width: 100%; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 15px 18px 8px; }
-.gcard-id .role { font-weight: 650; font-size: 15px; line-height: 1.25; }
-.gcard-id .org { font-size: 12.5px; color: var(--sub); margin-top: 2px; }
-.fitcorner { text-align: right; white-space: nowrap; }
-.tier { font-weight: 700; font-size: 14px; color: color-mix(in srgb, var(--accent) 72%, var(--ink)); }
-.tier.strong { color: var(--good); }
-.rank { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--sub); margin-top: 2px; }
-.why { list-style: none; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; padding: 0 18px 12px; }
-.why li { font-family: var(--mono); font-size: 10.5px; color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 6px; padding: 2px 7px; }
-/* bulleted job description — only on the primary card */
-.desc-bullets { list-style: none; margin: 0; padding: 2px 18px 4px; display: flex; flex-direction: column; gap: 6px; }
-.desc-bullets li { position: relative; font-size: 13px; color: var(--ink); opacity: 0.82; line-height: 1.45; padding-left: 16px; }
-.desc-bullets li::before { content: "›"; position: absolute; left: 2px; color: var(--accent); font-weight: 700; }
-.detail-meta { display: flex; gap: 12px; flex-wrap: wrap; padding: 8px 18px 0; font-size: 12px; }
-.detail-meta .salary { color: var(--good); font-family: var(--mono); font-weight: 600; }
-.detail-meta span:empty { display: none; }
-.acts { display: flex; align-items: center; gap: 8px; padding: 14px 18px 16px; flex-wrap: wrap; }
+/* ── the job board ──────────────────────────────────────────────────────────────
+   Each row is a three-column grid: the FIT GUTTER, the body, the expand affordance.
 
-/* small cards by default — title · place on the left, fit + rank on the right, with
-   salary · posted always visible. Click a card to expand the full detail. */
+   Fit used to be drawn as a tinted wash BEHIND the row text — that is area plus
+   color, the two channels the eye decodes least accurately (Cleveland & McGill),
+   it doubled as a false hover state, and it dropped text contrast. Now fit gets
+   its own aligned track: a number plus a bar on a common baseline, which is the
+   most accurate encoding available in a list row. ──────────────────────────────── */
+.carousel { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
+.gcard {
+  position: relative; width: 100%; overflow: hidden; isolation: isolate;
+  display: grid; grid-template-columns: 92px 1fr auto; align-items: start; gap: 14px;
+  padding: 14px 16px;
+  background: var(--plate); border: 1px solid var(--plate-brd);
+  transition: background 1400ms ease, border-color 1400ms ease, transform 160ms ease,
+    box-shadow 160ms ease, opacity 380ms ease;
+}
+.gcard:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(15, 20, 38, 0.14); }
+
+/* the fit gutter — position/length, on a common baseline across every row */
+.fitcol { grid-column: 1; padding-top: 2px; }
+.fit-num { font-family: var(--mono); font-size: var(--t-lead); font-weight: 600; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.fit-track { height: 5px; border-radius: 3px; margin: 6px 0 5px; background: color-mix(in srgb, var(--ink) 12%, transparent); }
+.fit-bar { height: 100%; width: 0%; border-radius: 3px; background: var(--anchor); transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fit-bar.good { background: color-mix(in srgb, var(--anchor) 48%, transparent); }
+.fit-bar.fair { background: color-mix(in srgb, var(--ink) 26%, transparent); }
+.fit-word { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); }
+
+.gcard-head { grid-column: 2; min-width: 0; }
+.gcard-id .role { font-weight: 620; font-size: var(--t-lead); line-height: 1.2; letter-spacing: -0.015em; }
+.gcard-id .org { font-size: var(--t-small); color: var(--sub); margin-top: 3px; }
+
+/* the expand affordance — visible, not guessed at */
+.chev {
+  grid-column: 3; display: grid; place-items: center; width: 28px; height: 28px; margin-top: 4px;
+  border: 1px solid var(--card-brd); border-radius: 50%; background: var(--field-bg);
+  font-size: var(--t-micro); color: var(--sub); transition: transform 180ms ease, background 180ms ease;
+}
+.gcard.expanded .chev { transform: rotate(180deg); background: var(--anchor); color: var(--on-anchor); border-color: transparent; }
+
+/* WHY the job ranked where it did — visible on the COLLAPSED row, because that is
+   the moment the user is judging the ranking. These are the real matched signals
+   from the scorer; when it matched nothing the list is simply empty. */
+.why { list-style: none; display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; padding: 0; }
+.why li { font-family: var(--mono); font-size: var(--t-micro); color: var(--ink); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 5px; padding: 2px 7px; }
+.why:empty { display: none; }
+/* bulleted job description — expand-only */
+.desc-bullets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.desc-bullets li { position: relative; font-size: var(--t-small); color: var(--ink); opacity: 0.86; line-height: 1.45; padding-left: 15px; }
+.desc-bullets li::before { content: "›"; position: absolute; left: 2px; color: var(--accent); font-weight: 700; }
+.detail-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 9px; font-size: var(--t-small); }
+.detail-meta .salary { color: var(--good); font-family: var(--mono); font-weight: 600; }
+.detail-meta .posted, .detail-meta .source { color: var(--sub); }
+.detail-meta span:empty { display: none; }
+.acts { display: flex; align-items: center; gap: 8px; margin-top: 13px; flex-wrap: wrap; }
+
+/* compact by default; click anywhere on the row to expand the full detail. The
+   expand-only block spans the body + affordance columns so it isn't squeezed
+   into the body column's width. */
 .gcard { cursor: pointer; }
-.gcard .why, .gcard .desc-bullets, .gcard .acts { display: none; } /* expand-only */
-.gcard.expanded .why { display: flex; }
-.gcard.expanded .desc-bullets { display: flex; }
-.gcard.expanded .acts { display: flex; }
-.gcard.expanded { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, 0 18px 54px rgba(15, 20, 38, 0.22); }
-.gcard.expanded .role { font-size: 18px; }
-.gcard .role { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62ch; }
+.gcard-detail { grid-column: 2 / -1; display: none; padding-top: 12px; }
+.gcard.expanded .gcard-detail { display: block; }
+.gcard.expanded { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.22) inset, 0 18px 54px rgba(15, 20, 38, 0.22); border-color: var(--anchor); }
+.gcard .role { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gcard.expanded .role { white-space: normal; }
-/* the compact meta (salary · posted) is ALWAYS visible on the small card */
-.detail-meta { padding: 2px 18px 14px; }
-.gcard.expanded .detail-meta { padding-top: 10px; }
 
 /* ── board mode: ONE continuous scroll surface. The chat sits centered at the top;
    scroll down and the board flows up while the chat bar STICKS to the top; scroll back
    to the top and the chat re-centers. ─────────────────────────────────────────────── */
-body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 48px; }
-body.board #chat-view { display: contents; } /* dissolve so the bar can stick across the whole page */
-body.board .transcript { width: min(760px, 100%); margin: 17vh auto 0; max-height: 20vh; overflow: hidden; }
-body.board .barwrap { position: sticky; top: 10px; z-index: 6; width: min(760px, 100%); margin: 8px auto 0; }
+body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 110px; }
+body.board #chat-view { display: contents; } /* dissolve so the bar can dock independently */
+/* THE HANDOFF. The transcript has done its job — four answered questions are not
+   worth 40% of the viewport while you are reading results. It collapses into the
+   criteria bar (#criteria), and the input DOCKS to the bottom instead of floating
+   over the results header, which is what it used to collide with. */
+/* #chat-view is display:contents on the board, so every front-door block has to be
+   hidden explicitly — otherwise it reflows loose into the page (a share link that
+   lands straight on the board never runs the chat's own hide). */
+body.board .doorhead { display: none; }
 body.board .chips { display: none; }
-body.board #results-view { margin-top: 16px; }
-/* keep the filter/sort/salary reachable while scrolling — the toolbar sticks under the bar */
-body.board .toolbar { position: sticky; top: 72px; z-index: 5; margin-bottom: 10px; }
-/* cards fade into the sky BEFORE they slide under the sticky chat bar + toolbar */
+body.board .doorextra { display: none; }
+body.board .barwrap {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 30;
+  width: min(620px, calc(100% - 28px)); margin: 0;
+}
+body.board .chat-say { display: none; } /* the status line lives in the criteria bar now */
+body.board #results-view { margin-top: 0; }
+/* The criteria bar + toolbar stick as ONE group and carry ONE glass plate between
+   them. Two reasons: a criteria bar that wraps to a second line can never collide
+   with a toolbar pinned at a constant offset, and a single surface means rows
+   scrolling underneath are actually occluded — a translucent toolbar with nothing
+   behind it let the notice text and card edges read straight through. It also stops
+   the blur stacking (glass over glass is where legibility goes to die). */
+body.board .boardbar {
+  position: sticky; top: 52px; z-index: 15;
+  /* Deliberately more opaque than --plate. Every other glass surface only has the sky
+     behind it, but this one has moving CARDS behind it, and at --plate's ~50% alpha
+     their text read straight through the toolbar. This is the one surface that has to
+     actually occlude, so it gets its own value rather than the shared token. */
+  background: color-mix(in srgb, var(--card-bg) 25%, var(--glow) 82%);
+  border: 1px solid var(--plate-brd); border-radius: 14px;
+  padding: 4px 6px 0; margin-bottom: 10px;
+  -webkit-backdrop-filter: blur(20px) saturate(1.3); backdrop-filter: blur(20px) saturate(1.3);
+  box-shadow: 0 8px 26px rgba(15, 20, 38, 0.1);
+  transition: background 1400ms ease, border-color 1400ms ease;
+}
+/* inside the group the criteria row is just a row — the plate is the group's job now */
+body.board .criteria {
+  background: none; border: 0; box-shadow: none; border-radius: 0;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+  padding: 6px 6px 2px; margin-bottom: 0;
+}
+body.board .toolbar { margin-bottom: 0; padding: 6px 6px 8px; }
+/* Rows fade into the sky before they reach the masthead. The header group below it
+   is its own opaque plate, so this only has to cover the masthead strip. */
 body.board::before {
-  content: ""; position: fixed; left: 0; right: 0; top: 0; height: 148px; z-index: 4; pointer-events: none;
-  background: linear-gradient(to bottom, var(--sky-top), color-mix(in srgb, var(--sky-top) 55%, transparent) 58%, transparent);
+  content: ""; position: fixed; left: 0; right: 0; top: 0; height: 60px; z-index: 4; pointer-events: none;
+  /* opaque all the way to where the header plate takes over (its sticky top is 52px) */
+  background: linear-gradient(to bottom, var(--sky-top) 0%, var(--sky-top) 88%, transparent);
+}
+
+/* ── the criteria bar: the four answers, as editable pills ───────────────────── */
+.criteria {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: var(--plate); border: 1px solid var(--plate-brd);
+  border-radius: 14px; padding: 10px 12px; margin-bottom: 10px;
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+  box-shadow: 0 8px 26px rgba(15, 20, 38, 0.1);
+  transition: background 1400ms ease, border-color 1400ms ease;
+}
+.crit-lab { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); }
+.crit {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--t-small); font-weight: 550;
+  background: var(--field-bg); border: 1px solid var(--card-brd);
+  border-radius: 100px; padding: 4px 6px 4px 11px; max-width: 34ch;
+}
+.crit .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* what you asked to keep OUT, shown struck through — the filter is visible, not hidden */
+.crit.neg .txt { color: var(--sub); text-decoration: line-through; text-decoration-thickness: 1px; }
+.crit .x { display: grid; place-items: center; width: 18px; height: 18px; flex: none; border: 0; border-radius: 50%; background: transparent; color: var(--sub); font-size: 11px; line-height: 1; padding: 0; }
+.crit .x:hover { background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink); }
+.crit-refine {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
+  font-size: var(--t-small); font-weight: 600; color: var(--on-anchor);
+  background: var(--anchor); border: 0; border-radius: 100px; padding: 7px 14px;
+  transition: background 1400ms ease, color 1400ms ease;
 }
 /* fresh search: the results flow up beneath the chat bar as it settles into place */
 @keyframes flowUp { from { opacity: 0; transform: translateY(34px); } to { opacity: 1; transform: none; } }
 body.board #results-view.flow-up { animation: flowUp 620ms cubic-bezier(0.22, 1, 0.36, 1); }
 
 /* buttons */
-.btn { font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 8px 13px; border: 1px solid var(--card-brd); background: var(--field-bg); color: var(--ink); text-decoration: none; display: inline-block; }
-.btn-primary { background: color-mix(in srgb, var(--accent) 82%, var(--ink)); color: #fff; border-color: transparent; }
+.btn { font-size: var(--t-small); font-weight: 600; border-radius: 9px; padding: 9px 16px; border: 1px solid var(--card-brd); background: var(--field-bg); color: var(--ink); text-decoration: none; display: inline-block; }
+/* plane 3 — the primary action is one of the four objects allowed the full ink jump */
+.btn-primary { background: var(--anchor); color: var(--on-anchor); border-color: transparent; transition: background 1400ms ease, color 1400ms ease; }
 .btn-ghost { color: var(--sub); }
 
 /* states */
@@ -294,7 +470,7 @@ body.board #results-view.flow-up { animation: flowUp 620ms cubic-bezier(0.22, 1,
 
 /* board mode: the filters DROP DOWN from the sticky toolbar (click-only), not a
    left-edge slide-out — a centered panel between the chat and the cards. */
-body.board .drawer { position: fixed; top: 116px; left: 50%; transform: translateX(-50%); width: min(760px, calc(100% - 40px)); max-width: none; z-index: 7; }
+body.board .drawer { position: fixed; top: 158px; left: 50%; transform: translateX(-50%); width: min(760px, calc(100% - 40px)); max-width: none; z-index: 7; }
 /* The closed panel is invisible but still LAID OUT, so the container would sit as a
    transparent 760px-wide sheet over the chat bar, the toolbar, and the top cards and
    eat every click. Only the open drawer takes pointer events; closed, clicks pass through. */
@@ -359,6 +535,46 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .segmented input:checked + label { color: #fff; background: color-mix(in srgb, var(--accent) 78%, var(--ink)); border-color: transparent; }
 .form-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* ── narrow screens: the fit gutter shrinks, the chevron goes (the whole row is
+   already tappable), and the detail block spans the full width. ───────────────── */
+@media (max-width: 620px) {
+  :root { --t-hero: 26px; --t-head: 21px; --t-lead: 18px; }
+  .gcard { grid-template-columns: 62px 1fr; gap: 12px; padding: 13px 14px; }
+  .chev { display: none; } /* the whole row is tappable; the chevron is desktop affordance */
+  .gcard-detail { grid-column: 1 / -1; }
+  .fit-num { font-size: var(--t-body); }
+  .site-header { padding: 12px 14px; }
+  .m-link { padding: 6px 7px; }
+  body.board #stage { padding: 0 14px 96px; }
+  body.board .boardbar { top: 48px; }
+  body.board .drawer { top: auto !important; bottom: 0; left: 0; transform: none; width: 100%; max-width: 100%; }
+  body.board .drawer-body { border-radius: var(--radius) var(--radius) 0 0; max-height: 62vh; }
+
+  /* Both header rows become horizontal scrollers instead of wrapping. Wrapping put
+     every criteria pill and every toolbar control on its own line — a 262px-tall
+     sticky header on an 844px phone, which pushed the board off screen entirely and
+     ran the header into the docked input. Nothing is removed; it scrolls. */
+  body.board .criteria, body.board .toolbar {
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    scrollbar-width: none; -ms-overflow-style: none;
+  }
+  body.board .criteria::-webkit-scrollbar, body.board .toolbar::-webkit-scrollbar { display: none; }
+  body.board .criteria > *, body.board .toolbar > * { flex: none; }
+  .crit { max-width: 20ch; }
+  /* Refine must stay reachable without scrolling to the end of the pills */
+  body.board .crit-refine { position: sticky; right: 0; margin-left: 4px; box-shadow: -10px 0 12px 4px var(--glow); }
+  .toolbar .spacer { display: none; }
+  .tb-salary input[type="range"] { width: 92px; }
+  /* the column is narrow — two wrapped lines beat a hard ellipsis on every title */
+  .gcard .role { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+}
+
+/* Below ~480px the masthead links do not fit beside the wordmark and wrap into the
+   board header. Both are front-door sections anyway, reachable by scrolling. */
+@media (max-width: 480px) {
+  .m-link { display: none; }
+}
+
 @media (max-width: 560px) {
   .split { grid-template-columns: 1fr; }
   .drawer { top: auto; bottom: 0; width: 100%; max-width: 100%; }
@@ -369,6 +585,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 @media (prefers-reduced-motion: reduce) {
   #glow, #wash, #wash::before, #wash::after, .halo, .tw.on, .chat-say .cur, .spinner, .rip.run { animation: none !important; }
   .pulse { display: none; }
-  #sky, #glow, #wash, .glass, .gcard, .gcard .fill, .drawer-body, .rail-body, body { transition: none !important; }
+  #sky, #glow, #wash, .glass, .gcard, .fit-bar, .chev, .drawer-body, .rail-body, body { transition: none !important; }
+  .gcard:hover { transform: none; }
   .gcard.flying { animation: none; opacity: 0; }
 }

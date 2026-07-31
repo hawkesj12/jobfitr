@@ -40,6 +40,10 @@ const el = {
   resultsView: $("#results-view"),
   formView: $("#form-view"),
   notice: $("#notice"),
+  criteria: $("#criteria"),
+  proof: $("#proof"),
+  starters: $("#starters"),
+  chatSay: $("#chat-say"),
   carousel: $("#carousel"),
   summary: $("#result-summary"),
   loading: $("#loading"),
@@ -371,24 +375,29 @@ function buildCard(job, index, total) {
   const node = el.cardTpl.content.firstElementChild.cloneNode(true);
   node.dataset.url = job.url;
 
+  // The fit gutter. `fit_pct` is normalized against the TOP match in the set (see
+  // server _fit_pct), so it is a relative rank signal, not an absolute score out of
+  // 100 — the toolbar says so once, and no row implies otherwise with a "/100".
   const pct = Math.max(0, Math.min(100, job.fit_pct || 0));
-  requestAnimationFrame(() => ($(".fill", node).style.width = pct + "%"));
+  const t = tierFor(pct);
+  $(".fit-num", node).textContent = pct;
+  const bar = $(".fit-bar", node);
+  bar.classList.add(t.cls);
+  requestAnimationFrame(() => (bar.style.width = pct + "%"));
+  $(".fit-word", node).textContent = `${t.word.replace(/ fit$/, "")} · #${index + 1} of ${total}`;
 
   $(".role", node).textContent = job.title || "Untitled role";
   $(".company", node).textContent = job.company || "—";
   $(".loc", node).textContent = cleanLoc(job.location, job);
-  const t = tierFor(pct);
-  const tierEl = $(".tier", node);
-  tierEl.textContent = t.word;
-  tierEl.classList.add(t.cls);
-  $(".rank", node).textContent = `#${index + 1} of ${total}`;
 
   // always visible on the small card — everyone wants salary + posted at a glance
   $(".salary", node).textContent = cleanSalary(job.salary);
   $(".posted", node).textContent = job.posted ? `Posted ${job.posted}` : "";
   $(".source", node).textContent = job.source ? `via ${job.source}` : "";
 
-  // shown when the card is expanded: the why chips + the bulleted description
+  // The matched signals, on the COLLAPSED row — the ranking has to explain itself at
+  // the moment the user is judging it, not after a click. These are the real scorer
+  // signals; when nothing matched the list stays empty and CSS collapses it.
   const why = $(".why", node);
   (job.why || "").split(",").map((w) => w.trim()).filter(Boolean).slice(0, 5).forEach((w) => {
     const li = document.createElement("li");
@@ -420,6 +429,82 @@ function toggleExpand(node) {
     node.classList.add("expanded");
     node.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "nearest" });
   }
+}
+
+// ── the criteria bar: THE HANDOFF ────────────────────────────────────────────
+// Four answered questions are not worth 40% of the viewport while you read results,
+// but they still have to be visible and editable — otherwise the board is a black box
+// you can only escape by starting over. So the transcript collapses to this: one pill
+// per answer, each removable, plus a Refine that reopens the conversation.
+const CRIT_FIELDS = [
+  { key: "titles", neg: false },
+  { key: "location", neg: false },
+  { key: "boosts", neg: false },
+  { key: "exclude", neg: true },
+  { key: "rank_down", neg: true },
+];
+
+function critText(key, value) {
+  if (key === "location") return value;
+  return Array.isArray(value) ? value.join(" · ") : value;
+}
+
+function renderCriteria() {
+  if (!el.criteria) return;
+  const cfg = state.cfg || {};
+  el.criteria.textContent = "";
+
+  const lab = document.createElement("span");
+  lab.className = "crit-lab";
+  lab.textContent = "searching";
+  el.criteria.appendChild(lab);
+
+  let any = false;
+  for (const f of CRIT_FIELDS) {
+    const raw = cfg[f.key];
+    const value = Array.isArray(raw) ? raw.filter(Boolean) : (raw || "").trim();
+    if (!value || (Array.isArray(value) && !value.length)) continue;
+    any = true;
+
+    const pill = document.createElement("span");
+    pill.className = f.neg ? "crit neg" : "crit";
+    const txt = document.createElement("span");
+    txt.className = "txt";
+    txt.textContent = critText(f.key, value);
+    pill.title = `${f.key.replace(/_/g, " ")}: ${txt.textContent}`;
+
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.setAttribute("aria-label", `Remove ${txt.textContent} from the search`);
+    x.textContent = "✕";
+    x.addEventListener("click", () => dropCriterion(f.key));
+
+    pill.append(txt, x);
+    el.criteria.appendChild(pill);
+  }
+
+  const refine = document.createElement("button");
+  refine.type = "button";
+  refine.className = "crit-refine";
+  refine.textContent = "Refine ⌄";
+  refine.addEventListener("click", showChat);
+  el.criteria.appendChild(refine);
+
+  show(el.criteria, any);
+}
+
+// Dropping a criterion re-scores. That is a real request, so guard against a user
+// clearing four pills in a row and firing four searches — coalesce to the last one.
+let _critTimer = null;
+function dropCriterion(key) {
+  const cfg = { ...(state.cfg || {}) };
+  if (key === "location") delete cfg.location;
+  else cfg[key] = [];
+  state.cfg = cfg;
+  renderCriteria();
+  clearTimeout(_critTimer);
+  _critTimer = setTimeout(() => run(cfg), 450);
 }
 
 // ── two-step apply / dismiss ────────────────────────────────────────────────
@@ -557,7 +642,9 @@ function show(node, on) {
   if (node) node.hidden = !on;
 }
 function showResults() {
-  // board mode: the AI stays on screen (chat + echo up top), the job carousel below.
+  // THE HANDOFF. The chat stops being the page and becomes the control strip FOR the
+  // page: the transcript collapses into the criteria bar, and the input docks to the
+  // bottom instead of floating over the results header it used to collide with.
   const bar = el.chatView.querySelector(".barwrap");
   const entering = !document.body.classList.contains("board");
   const first = entering && bar ? bar.getBoundingClientRect() : null;
@@ -566,16 +653,21 @@ function showResults() {
   show(el.formView, false);
   show(el.chatView, true);
   show(el.resultsView, true);
-  show(el.filters, true); // the left filter drawer is only available on the board
+  show(el.filters, true); // the filter panel is only available on the board
   state.focusIndex = 0;
 
-  // On a fresh search: FLIP the chat bar from its centered spot UP into its board
-  // position, and flow the results up beneath it.
+  // The assistant's last line was "Pulling your matches…" — once the board is here it
+  // is stale, and it used to sit there contradicting the results underneath it.
+  if (el.chatSay) el.chatSay.textContent = "";
+  renderCriteria();
+
+  // On a fresh search: FLIP the chat bar from its centered spot DOWN into the dock,
+  // and flow the results up beneath the criteria bar.
   if (first && bar && !reduceMotion()) {
     const dy = first.top - bar.getBoundingClientRect().top;
     if (Math.abs(dy) > 4) {
       bar.style.transition = "none";
-      bar.style.transform = `translateY(${dy}px)`;
+      bar.style.transform = `translateX(-50%) translateY(${dy}px)`;
       requestAnimationFrame(() => {
         bar.style.transition = "transform 620ms cubic-bezier(0.22, 1, 0.36, 1)";
         bar.style.transform = "";
@@ -625,6 +717,13 @@ el.sort.addEventListener("change", () => {
 el.filtersToggle.addEventListener("click", () => {
   const open = el.filters.classList.toggle("open");
   el.filtersToggle.setAttribute("aria-expanded", String(open));
+  // Hang the panel off the ACTUAL bottom of the sticky header group. Its height is not
+  // fixed — the criteria pills wrap to a second line on a narrow screen — so a CSS
+  // constant here would either overlap the toolbar or float away from it.
+  if (open) {
+    const bar = document.querySelector(".boardbar");
+    if (bar) el.filters.style.top = Math.round(bar.getBoundingClientRect().bottom + 6) + "px";
+  }
 });
 el.fFit.addEventListener("input", () => {
   state.filters.fit = +el.fFit.value;
@@ -679,9 +778,57 @@ function confirmConfig(cfg) {
 
 window.jobfitr = { run, showChat, showResults, showForm, confirm: confirmConfig };
 
+// ── the front door: proof + starters ─────────────────────────────────────────
+// The proof line uses ONLY what /api/meta really returns (pool size + harvest date).
+// No invented "N company boards" — an unverifiable number on the honesty pitch would
+// undercut the whole product.
+function fmtCount(n) {
+  return Number(n).toLocaleString("en-US");
+}
+async function loadProof() {
+  if (!el.proof) return;
+  try {
+    const r = await fetch("/api/meta");
+    if (!r.ok) return;
+    const m = await r.json();
+    if (!m.count) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const fresh = m.harvested_at === today ? "today" : m.harvested_at || "recently";
+    el.proof.innerHTML =
+      `<span class="dot"></span><b>${fmtCount(m.count)}</b> live roles` +
+      `<span class="sep">·</span>refreshed <b>${escapeHtml(fresh)}</b>` +
+      `<span class="sep">·</span>no account, no tracking`;
+  } catch {
+    /* the proof line is a nicety — a cold front door still works without it */
+  }
+}
+
+// Real searches a visitor can run in one click. A blank first screen with a bare
+// input tells them nothing about what the assistant can actually do.
+const STARTERS = [
+  { label: "Remote AI engineering", text: "Remote AI engineering roles" },
+  { label: "Data roles, $150k+", text: "Data engineering roles paying $150k or more" },
+  { label: "Posted this week, no agencies", text: "Roles posted this week, no staffing agencies" },
+];
+function renderStarters() {
+  if (!el.starters) return;
+  for (const s of STARTERS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "starter";
+    b.innerHTML = `${escapeHtml(s.label)} <span class="arw" aria-hidden="true">→</span>`;
+    // chat.js registers `seed` (it owns the conversation); without the AI the
+    // starter is inert rather than broken, and the form fallback still works.
+    b.addEventListener("click", () => window.jobfitr.seed && window.jobfitr.seed(s.text));
+    el.starters.appendChild(b);
+  }
+}
+
 // ── boot ─────────────────────────────────────────────────────────────────────
 (function init() {
   renderRail();
+  loadProof();
+  renderStarters();
   // A plain reload starts fresh at the chat front door. Only a shared link
   // (a #q= hash someone was sent) runs a search straight away.
   const fromHash = decodeHash();
