@@ -103,7 +103,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -233,16 +233,16 @@ wheels = [
 
 [[package]]
 name = "job-radar"
-version = "0.5.0"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rapidfuzz" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/cd/671024062e396a670e135671c974c23221772e751a71e5189b55a2c60d18/job_radar-0.5.0.tar.gz", hash = "sha256:4c1bdb60271d966b5c23a722770122b63e0e8aac9fb4a59fdcf55fc7b81e6af1", size = 105138, upload-time = "2026-07-31T21:51:27.488Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/1a/0b1c7c57552cbdc3efc50a96f7e98a996fd6c0aafd698dd22c40f0588208/job_radar-0.5.1.tar.gz", hash = "sha256:9440f4709da85ea0b06ce51f1d255a20f1819a94b7329544ae4b5703ed5a530b", size = 106049, upload-time = "2026-07-31T22:14:27.484Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/6c/3e8a0c631dd09be98f00d573b9ee26cc8082435c482a338d0c8fab0ee980/job_radar-0.5.0-py3-none-any.whl", hash = "sha256:ea7c6393a337c7f5b82cb41982b545a00f70b332d4b917be4830e2b0934f5149", size = 75722, upload-time = "2026-07-31T21:51:25.739Z" },
+    { url = "https://files.pythonhosted.org/packages/48/02/5651efdebbf713e66b0c868e40ef45379701ad803a2c94fa1a771959f465/job_radar-0.5.1-py3-none-any.whl", hash = "sha256:963435f43200d8d816ba9e414760bb3ae04e1de7a4182575dd73df1ae9068656", size = 76189, upload-time = "2026-07-31T22:14:26.154Z" },
 ]
 
 [[package]]

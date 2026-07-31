@@ -27,6 +27,7 @@ KICKOFF-PROMPT.md
 BUILD-PLAN.md
 HANDOFF.md
 HANDOFF-*.md
+JOB-RADAR-*-BRIEF.md
 
 # Design workshop — studies, boards, and screenshots kept local. It accumulates
 # (phone screenshots, prototypes), so it is deny-by-default rather than per-file.
