@@ -98,6 +98,99 @@ def test_turn_remote_counts_as_location(monkeypatch):
     assert out["ready"] is True  # remote_only is a valid location answer
 
 
+def test_the_boosts_and_avoid_questions_carry_a_forced_hint(monkeypatch):
+    """Two live runs proved the model will not explain these mechanics on request — the
+    standing 'ONE short sentence' rule wins — so the server supplies the line."""
+    boosts_turn = {
+        **FULL_TURN,
+        "titles": ["engineer"],
+        "location": "remote",
+        "boosts": [],
+        "exclude": [],
+        "rank_down": [],
+        "ready": False,
+        "hint": "",
+    }
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(boosts_turn))
+    out = _run(chat.turn([{"role": "user", "content": "remote"}], {}))
+    assert "Specific beats generic" in out["hint"]
+    assert "Three to six" in out["hint"]
+
+    avoid_turn = {**boosts_turn, "boosts": ["RAG"]}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(avoid_turn))
+    out = _run(chat.turn([{"role": "user", "content": "rag"}], {}))
+    assert "removed from your results entirely" in out["hint"]
+
+
+def test_no_hint_is_forced_once_the_search_is_ready(monkeypatch):
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call({**FULL_TURN, "hint": ""}))
+    out = _run(chat.turn([{"role": "user", "content": "go"}], {}))
+    assert out["ready"] is True and out["hint"] == ""
+
+
+def test_the_avoid_question_leads_with_real_dealbreakers(monkeypatch):
+    """Measured against the live model: asked what to AVOID for an AI-engineering
+    search it offered Python, MLOps, DevOps and AI Engineering — the user's own boosts,
+    inverted. The client renders only the first few chips, so the curated set leads."""
+    obj = {
+        **FULL_TURN,
+        "titles": ["applied ai engineer"],
+        "location": "remote",
+        "boosts": ["RAG"],
+        "exclude": [],
+        "rank_down": [],
+        "chips": ["Python", "MLOps", "DevOps"],
+    }
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "rag"}], {}))
+    assert out["chips"][:2] == ["Staffing", "Recruiting agencies"]
+    assert "Internships" in out["chips"]
+    assert out["chips"][-1] == "DevOps"  # model suggestions survive, but behind
+
+
+def test_curated_avoid_chips_only_apply_on_the_avoid_turn(monkeypatch):
+    """Before boosts are known the question is still about boosts — don't hijack it."""
+    obj = {
+        **FULL_TURN,
+        "titles": ["applied ai engineer"],
+        "location": "remote",
+        "boosts": [],
+        "exclude": [],
+        "rank_down": [],
+        "chips": ["RAG", "LLMs"],
+    }
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "remote"}], {}))
+    assert out["chips"] == ["RAG", "LLMs"]
+    assert "Staffing" not in out["chips"]
+
+
+def test_chips_never_repeat_something_the_user_already_gave(monkeypatch):
+    """Observed live: after five forward-deployed titles the boosts question still
+    offered Python / Machine Learning / NLP. The prompt already forbids it; this is the
+    deterministic backstop, because a suggestion already acted on is worse than none."""
+    obj = {
+        **FULL_TURN,
+        "titles": ["forward deployed engineer"],
+        "boosts": ["RAG", "Python"],
+        "rank_down": ["staffing"],  # past the avoid turn, so no curated chips prepend
+        "chips": ["Python", "rag", "LLMs", "PyTorch", "LLMs"],
+    }
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "rag and python"}], {}))
+    assert out["chips"] == [
+        "LLMs",
+        "PyTorch",
+    ]  # chosen dropped (any case), dupe dropped
+
+
+def test_chip_filtering_is_case_insensitive_against_the_location(monkeypatch):
+    obj = {**FULL_TURN, "location": "Remote", "chips": ["remote", "Hybrid"]}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "remote"}], {}))
+    assert out["chips"] == ["Hybrid"]
+
+
 def test_remote_only_is_nullable_so_unaddressed_is_expressible(monkeypatch):
     # Strict mode requires every key every turn. With a bare boolean the model had no
     # way to say "the user hasn't told me" and emitted false as a placeholder, which

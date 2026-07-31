@@ -56,20 +56,34 @@ TURN_SYSTEM_PROMPT = (
     "chatting naturally with the user, then hand it off to run their search. You do "
     "nothing else.\n"
     "Each turn: write a `reply` that is ONE short, plain sentence — just the next "
-    "question (or a brief hand-off). Do NOT restate, summarize, or echo back what the "
+    "question (or a brief hand-off). The ONLY exception is the boosts question and the "
+    "avoid question, where you MUST add one short second sentence explaining how that "
+    "answer is used (see below) — a user cannot guess those mechanics, and getting them "
+    "wrong quietly ruins their results. Do NOT restate, summarize, or echo back what the "
     "user just told you, and do NOT open with filler affirmations ('Great!', 'Awesome', "
     "'Got it', 'Perfect', 'Nice', 'Great choice'). Just ask the next thing directly. "
     "Fill the `config` from EVERYTHING said so far (re-derive the whole config each turn; "
     "never blank out a field you already learned), and offer tappable `chips`.\n"
     "What you need:\n"
     "- titles: the role(s) they want. Aim for 2-3 related titles when natural (e.g. "
-    "['product manager','program manager']); one is fine.\n"
+    "['product manager','program manager']); one is fine. When you ask this, SAY that "
+    "they can give more than one — most roles are advertised under several different "
+    "titles, and a user who names only one silently misses the rest of the market. "
+    "Phrase it so listing a few reads as normal, not advanced.\n"
     "- location: a place, or 'remote', or 'anywhere'. A bare city is ambiguous "
     "(Madison, IN vs Madison, WI), so if they give a city with no state, ASK which "
     "state and store it as 'City, ST'. If they say remote, set remote_only=true.\n"
-    "- boosts: skills/tools/industry to rank HIGHER.\n"
+    "- boosts: skills/tools/industry to rank HIGHER. When you ask this, tell them what "
+    "makes a GOOD boost, because the mechanic is impossible to guess: a term only helps "
+    "if it would NOT show up in a random posting in their field. 'Python' appears in "
+    "nearly every AI job description, so it lifts everything and separates nothing; "
+    "'multi-agent orchestration' actually discriminates. Say that three to six specific "
+    "terms work best — more is not better.\n"
     "- exclude (title words to hide entirely, e.g. intern/volunteer) and rank_down "
-    "(sink signals, e.g. staffing/agency/recruiting): what they want to AVOID.\n"
+    "(sink signals, e.g. staffing/agency/recruiting): what they want to AVOID. When you "
+    "ask this, make the difference explicit: anything they name to HIDE removes a "
+    "listing from the results entirely, so it should be real dealbreakers only, while "
+    "rank-down just pushes a listing lower. Never put the same term in both.\n"
     "REQUIRED before searching = titles AND location. After BOTH are answered, ask "
     "exactly two more questions, ONE per turn, in this order: first what should rank "
     "HIGHER (boosts), then what to AVOID or push down (exclude / rank_down). Ask the "
@@ -144,6 +158,14 @@ TURN_SCHEMA = {
                     "items": {"type": "string"},
                     "description": "4-8 short tappable example answers for the current question ([] if none help).",
                 },
+                # A separate field, not a longer `reply`. Two live runs showed the model
+                # drops "explain the mechanic" instructions under this prompt + strict
+                # schema, because the standing "ONE short sentence" rule wins. Splitting
+                # it out lets the server force the text where it actually matters.
+                "hint": {
+                    "type": "string",
+                    "description": "One short plain-language line under the question explaining how the answer is used ('' when the question is self-evident).",
+                },
             },
             "required": [
                 "reply",
@@ -155,6 +177,7 @@ TURN_SCHEMA = {
                 "location",
                 "remote_only",
                 "chips",
+                "hint",
             ],
         },
     },
@@ -250,6 +273,71 @@ def merge_config(current: dict | None, delta: dict | None) -> dict:
     return out
 
 
+# The avoid question's chips, enforced rather than requested. The prompt has always
+# said to lead with staffing/recruiting, and the model ignores it: asked what to AVOID
+# for an AI-engineering search it suggested "Python", "MLOps", "DevOps" and "AI
+# Engineering" — the user's own boosts, inverted. A wrong suggestion here is worse than
+# a generic one, because acting on it hides the jobs they came for.
+_AVOID_CHIPS = (
+    "Staffing",
+    "Recruiting agencies",
+    "Internships",
+    "Contract",
+    "Junior",
+    "On-site",
+    "Clearance required",
+)
+
+
+# The two mechanics a user cannot guess, and that the model would not reliably explain.
+# Forced server-side for the same reason as _AVOID_CHIPS: measured, not assumed.
+_BOOSTS_HINT = (
+    "Specific beats generic — “multi-agent orchestration” separates listings, "
+    "“Python” doesn’t. Three to six works best."
+)
+_AVOID_HINT = (
+    "Anything you name here is removed from your results entirely, "
+    "so keep it to real dealbreakers."
+)
+
+
+def _is_boosts_turn(cfg: dict) -> bool:
+    """True when the next question is 'what should rank higher' — the required answers
+    are in, but no boosts have been recorded yet."""
+    return _has_titles(cfg) and _has_location(cfg) and not cfg.get("boosts")
+
+
+def _is_avoid_turn(cfg: dict) -> bool:
+    """True when the next question is 'what should I avoid' — titles, location and
+    boosts are known, but nothing to avoid has been recorded yet."""
+    has_boosts = bool(cfg.get("boosts"))
+    has_avoid = bool(cfg.get("exclude")) or bool(cfg.get("rank_down"))
+    return _has_titles(cfg) and _has_location(cfg) and has_boosts and not has_avoid
+
+
+def _already_chosen(cfg: dict) -> set[str]:
+    """Every value the user has already given, lowercased — for filtering chips.
+
+    The prompt tells the model never to repeat a chip the user picked, and it does it
+    anyway: after five forward-deployed titles it still offered Python / Machine
+    Learning / NLP. A suggestion the user has already acted on is worse than no
+    suggestion, so this is the deterministic backstop rather than trusting the model.
+    """
+    chosen: set[str] = set()
+    for key in ("titles", "boosts", "exclude", "rank_down"):
+        value = cfg.get(key)
+        if isinstance(value, str):
+            value = [value]
+        for item in value or []:
+            text = str(item).strip().lower()
+            if text:
+                chosen.add(text)
+    location = cfg.get("location")
+    if isinstance(location, str) and location.strip():
+        chosen.add(location.strip().lower())
+    return chosen
+
+
 def _has_titles(cfg: dict) -> bool:
     v = (cfg or {}).get("titles")
     if isinstance(v, str):
@@ -321,6 +409,7 @@ async def turn(messages: list, current_config: dict | None = None) -> dict:
             "config": dict(current_config or {}),
             "ready": False,
             "chips": [],
+            "hint": "",
             "error": f"upstream: {type(e).__name__}",
         }
 
@@ -331,5 +420,35 @@ async def turn(messages: list, current_config: dict | None = None) -> dict:
     merged = merge_config(current_config, delta)
     ready = _has_titles(merged) and _has_location(merged) and model_ready
     raw_chips = parsed.get("chips") if isinstance(parsed.get("chips"), list) else []
-    chips = [str(c).strip() for c in raw_chips if str(c).strip()][:10]
-    return {"reply": reply, "config": merged, "ready": ready, "chips": chips}
+    if _is_avoid_turn(merged):
+        # Lead, don't replace: the client renders only the first few, so the curated
+        # dealbreakers are what the user actually sees, while any genuinely tailored
+        # model suggestion still survives further down the pool.
+        raw_chips = [*_AVOID_CHIPS, *raw_chips]
+    chosen = _already_chosen(merged)
+    seen: set[str] = set()
+    chips = []
+    for c in raw_chips:
+        text = str(c).strip()
+        key = text.lower()
+        if not text or key in chosen or key in seen:
+            continue  # already answered, or a duplicate within this turn
+        seen.add(key)
+        chips.append(text)
+        if len(chips) == 10:
+            break
+    # The hint the client renders under the question. Forced on the two turns whose
+    # mechanic is invisible; otherwise the model's own line (often just "").
+    hint = parsed.get("hint") if isinstance(parsed.get("hint"), str) else ""
+    if not ready:
+        if _is_boosts_turn(merged):
+            hint = _BOOSTS_HINT
+        elif _is_avoid_turn(merged):
+            hint = _AVOID_HINT
+    return {
+        "reply": reply,
+        "config": merged,
+        "ready": ready,
+        "chips": chips,
+        "hint": hint.strip(),
+    }
