@@ -96,7 +96,20 @@ DESC_CHARS = 1200
 CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized rerank
 
 # Rerank weights (in BM25 units, ~0-5): a boost match nudges up, a rank_down sinks.
-BOOST_W = 2.0
+# BOOST_MAX is the TOTAL boost swing available to any one listing, no matter how many
+# boosts the user entered. A flat per-match bonus made the swing scale with the boost
+# count (nine boosts = up to +18), which swamped BM25 relevance entirely and let a
+# keyword-stuffed off-title listing outrank an exact-title one. Capping the total keeps
+# boosts a nudge on top of relevance instead of a replacement for it.
+BOOST_MAX = 4.0
+# A boost in the TITLE is strong evidence; one buried in the body is weaker.
+TITLE_CREDIT = 1.0
+BODY_CREDIT = 0.5
+# A listing with NO body is missing evidence, not lacking it. Scoring an absent body as
+# zero matches punished whole sources (Greenhouse rows arrive body-less) for something
+# they never had a chance to carry, so the unobserved portion is imputed at a neutral
+# rate rather than counted against them.
+NO_BODY_PRIOR = 0.5
 PENALTY_W = 3.0
 # min_score keyword → keep candidates scoring >= frac × the top result's score.
 MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
@@ -234,6 +247,65 @@ def _spread_companies(scored: list, cap: int | None = None) -> list:
     return keep
 
 
+def _norm_key(value) -> str:
+    """Lowercase + collapse whitespace/punctuation, for identity comparison."""
+    return " ".join(
+        "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
+    ).lower()
+
+
+def _dedupe_listings(candidates: list) -> list:
+    """Collapse rows that are the same job posted twice, keeping the richest one.
+
+    The same opening reaches the pool from more than one source (an aggregator and the
+    employer's own ATS), and the two rows are rarely byte-identical — different URLs,
+    different salary formatting — so the store cannot dedup them on a key. To a user
+    they are simply the same job listed twice, which reads as a broken search: the live
+    run showed one role at both #17 and #18 and another at #5 and #6.
+
+    Identity is (normalized company, normalized title). Where duplicates disagree we
+    keep the row with the LONGEST body, because body text is what the rerank and the
+    card's description bullets both feed on — keeping the thin copy would throw away
+    evidence and, under the boost scoring above, quietly change where the job ranks.
+    """
+    best: dict[tuple[str, str], int] = {}
+    out: list = []
+    for c in candidates:
+        key = (_norm_key(c.get("company")), _norm_key(c.get("title")))
+        if not any(key):  # no company AND no title — nothing to dedup on
+            out.append(c)
+            continue
+        idx = best.get(key)
+        if idx is None:
+            best[key] = len(out)
+            out.append(c)
+        elif len(c.get("body") or "") > len(out[idx].get("body") or ""):
+            out[idx] = c
+    return out
+
+
+def _boost_bonus(title: str, body: str, boosts: list) -> float:
+    """The capped, evidence-weighted boost bonus for one listing.
+
+    Returns a value in [0, BOOST_MAX] scaled by the FRACTION of the user's boosts the
+    listing matches — not a flat sum per match — so adding more boosts sharpens the
+    signal instead of inflating the ceiling.
+    """
+    terms = [x for x in boosts if x]
+    if not terms:
+        return 0.0
+    has_body = bool(body.strip())
+    credit = 0.0
+    for x in terms:
+        if x in title:
+            credit += TITLE_CREDIT
+        elif has_body and x in body:
+            credit += BODY_CREDIT
+        elif not has_body:
+            credit += BODY_CREDIT * NO_BODY_PRIOR  # unobserved, not absent
+    return BOOST_MAX * min(1.0, credit / len(terms))
+
+
 def _rank(
     candidates,
     titles,
@@ -251,15 +323,19 @@ def _rank(
     why_terms = [t for t in (titles + boosts) if t]
     for c in candidates:
         title = (c.get("title") or "").lower()
-        if any(x in title for x in exclude):
+        # Exclusions test the COMPANY as well as the title: "recruiting agency" is an
+        # employer trait, not a job trait, so a title-only test let a staffing firm's
+        # normal-sounding listings through under the very term meant to remove them.
+        if any(x in f"{title} {(c.get('company') or '').lower()}" for x in exclude):
             continue
         if remote_only and c.get("remote") != "remote":
             continue
         age = age_int(c.get("posted", ""))
         if age is not None and age > max_age_days:
             continue
-        blob = f"{title} {(c.get('body') or '').lower()}"
-        bonus = sum(BOOST_W for x in boosts if x and x in blob)
+        body = (c.get("body") or "").lower()
+        blob = f"{title} {body}"
+        bonus = _boost_bonus(title, body, boosts)
         pen = sum(PENALTY_W for x in penalties if x and x in blob)
         final = float(c.get("bm25", 0.0)) + bonus - pen
         why = ", ".join([t for t in why_terms if t in blob][:4])
@@ -329,7 +405,14 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
 
     degraded = _warm_cache(titles, location)
 
-    candidates = store.bm25_candidates(titles, limit=CANDIDATE_LIMIT) if titles else []
+    # Dedup ONCE here rather than inside _rank — the ladder below re-ranks this same
+    # candidate set up to five times, so collapsing duplicates per pass would repeat
+    # identical work for an identical result.
+    candidates = (
+        _dedupe_listings(store.bm25_candidates(titles, limit=CANDIDATE_LIMIT))
+        if titles
+        else []
+    )
     # The deterministic ladder: start fresh + strong, relax only as far as needed to
     # reach TARGET_RESULTS. The first tier that clears the bar wins (freshest/strongest);
     # if none does, the loosest tier's set is kept. Cheap — a re-rank over the same pool.

@@ -200,6 +200,202 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     assert d["degraded"] is None
 
 
+# ── Phase A: ranking correctness ──────────────────────────────────────────────
+def _no_fetch(monkeypatch):
+    monkeypatch.setattr(
+        live,
+        "coalesced_fetch",
+        lambda *a: (_ for _ in ()).throw(AssertionError("fresh cache must not fetch")),
+    )
+
+
+def _filler(n=40):
+    """Unrelated rows so BM25 behaves like it does against the real ~10k pool.
+
+    NOT padding — load-bearing. BM25 scores a term by how RARE it is, so in a corpus
+    of two documents that both contain the query terms the IDF collapses to zero and
+    every candidate ties at 0.000, leaving the rerank to decide everything. That is an
+    artifact of a toy corpus, not of the app. These rows restore the discrimination
+    real users get; delete them and the ranking assertions below stop meaning anything.
+    """
+    return [
+        _job(
+            f"Warehouse Associate {i}",
+            text="forklift picking packing shift work",
+            company=f"Filler{i}",
+            location="Louisville, KY",
+            url=f"https://x/filler-{i}",
+        )
+        for i in range(n)
+    ]
+
+
+def test_exact_title_with_no_body_outranks_a_keyword_stuffed_off_title_listing(
+    client, monkeypatch
+):
+    """The regression the live run demanded: a perfect-title match must not lose to a
+    listing that merely repeats the user's boost words.
+
+    Observed before the fix: a $235k-$315k "Senior Principal Forward Deployed AI
+    Engineer" ranked #21 of 30, below a $94,876 off-title listing. Boosts were summed
+    flat over title+body, so nine boosts handed the keyword-stuffed row up to +18 while
+    the body-less Greenhouse row could earn nothing at all — a swing BM25 could never
+    overcome, and one structurally unavailable to the better job.
+    """
+    boosts = [
+        "rag",
+        "multi-agent orchestration",
+        "llm application development",
+        "python",
+        "customer discovery",
+        "postgres",
+        "azure",
+        "warehouse automation",
+        "logistics",
+    ]
+    _seed(
+        [
+            # the real role — exact title, and NO body (Greenhouse rows arrive this way)
+            _job(
+                "Senior Principal Forward Deployed AI Engineer",
+                text="",
+                company="Smartsheet",
+                salary="$235,000-$315,000",
+                url="https://x/smartsheet",
+            ),
+            # the impostor — off title, body stuffed with every boost term
+            _job(
+                "Consultant",
+                company="Bright Vision Technologies",
+                text="forward deployed ai engineer " + " ".join(boosts),
+                salary="$94,876",
+                url="https://x/brightvision",
+            ),
+            *_filler(),
+        ]
+    )
+    _mark_fresh(["forward deployed ai engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post(
+        "/api/score",
+        json={"titles": ["forward deployed ai engineer"], "boosts": boosts},
+    ).json()
+    titles = [j["title"] for j in d["jobs"]]
+    assert titles, "both listings should be candidates"
+    assert titles[0] == "Senior Principal Forward Deployed AI Engineer"
+
+
+def test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence(client, monkeypatch):
+    """Two identical titles, one with a body and one without, must score close — the
+    body-less row is missing evidence, not failing it."""
+    _seed(
+        [
+            _job("Data Engineer", text="", company="NoBody Corp", url="https://x/nb"),
+            _job(
+                "Data Engineer",
+                text="python postgres airflow",
+                company="HasBody Corp",
+                url="https://x/hb",
+            ),
+        ]
+    )
+    _mark_fresh(["data engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post(
+        "/api/score",
+        json={"titles": ["data engineer"], "boosts": ["python", "postgres"]},
+    ).json()
+    by_company = {j["company"]: j["fit_score"] for j in d["jobs"]}
+    assert len(by_company) == 2
+    # the bodied row may still win, but not by the whole boost ceiling
+    assert by_company["HasBody Corp"] - by_company["NoBody Corp"] < server.BOOST_MAX
+
+
+def test_boost_swing_is_capped_regardless_of_how_many_boosts_are_given(client):
+    """Adding more boosts must sharpen the signal, not raise the ceiling — the cap is
+    what keeps BM25 relevance meaningful (and what makes 'more boosts is better' false)."""
+    body = " ".join(f"term{i}" for i in range(12))
+    title = "engineer"
+    assert server._boost_bonus(title, body, ["term0"]) <= server.BOOST_MAX
+    many = server._boost_bonus(title, body, [f"term{i}" for i in range(12)])
+    assert many <= server.BOOST_MAX
+
+
+def test_exclude_matches_the_company_not_just_the_title(client, monkeypatch):
+    """'recruiting agency' is an employer trait, not a job trait. Testing the title
+    alone let 'Recruiting From Scratch' rank #20 under the very term meant to kill it."""
+    _seed(
+        [
+            _job(
+                "Software Engineer",
+                text="python",
+                company="Recruiting From Scratch",
+                url="https://x/rfs",
+            ),
+            _job(
+                "Software Engineer",
+                text="python",
+                company="Acme Robotics",
+                url="https://x/acme",
+            ),
+        ]
+    )
+    _mark_fresh(["software engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post(
+        "/api/score",
+        json={"titles": ["software engineer"], "exclude": ["recruiting"]},
+    ).json()
+    companies = [j["company"] for j in d["jobs"]]
+    assert "Recruiting From Scratch" not in companies
+    assert "Acme Robotics" in companies
+
+
+def test_duplicate_listings_collapse_to_the_richest_copy(client, monkeypatch):
+    """The same opening reaching the pool twice reads as a broken search — the live run
+    showed one role at both #17 and #18. Identity ignores punctuation/spacing drift."""
+    _seed(
+        [
+            _job(
+                "Forward Deployed Engineer",
+                text="short",
+                company="iSpace, Inc",
+                url="https://x/dup-a",
+            ),
+            _job(
+                "Forward Deployed Engineer",
+                text="a much longer body carrying the real detail about this role",
+                company="iSpace,  Inc.",
+                url="https://x/dup-b",
+            ),
+        ]
+    )
+    _mark_fresh(["forward deployed engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post("/api/score", json={"titles": ["forward deployed engineer"]}).json()
+    assert len(d["jobs"]) == 1  # one job, not two
+    assert "much longer body" in d["jobs"][0]["description"]  # kept the richer copy
+
+
+def test_dedup_keeps_genuinely_different_roles_at_the_same_company(client, monkeypatch):
+    """The cap must not swallow real variety — same employer, different titles stay."""
+    _seed(
+        [
+            _job("Data Engineer", company="Acme", url="https://x/de"),
+            _job("Data Analyst", company="Acme", url="https://x/da"),
+        ]
+    )
+    _mark_fresh(["data"])
+    _no_fetch(monkeypatch)
+
+    d = client.post("/api/score", json={"titles": ["data"]}).json()
+    assert len({j["title"] for j in d["jobs"]}) == 2
+
+
 def test_score_miss_triggers_live_fetch(client, monkeypatch):
     calls = {"n": 0}
 

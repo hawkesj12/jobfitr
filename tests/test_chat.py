@@ -98,6 +98,30 @@ def test_turn_remote_counts_as_location(monkeypatch):
     assert out["ready"] is True  # remote_only is a valid location answer
 
 
+def test_remote_only_is_nullable_so_unaddressed_is_expressible(monkeypatch):
+    # Strict mode requires every key every turn. With a bare boolean the model had no
+    # way to say "the user hasn't told me" and emitted false as a placeholder, which
+    # merge_config (booleans overwrite by design) then applied as a real answer.
+    props = chat.TURN_SCHEMA["json_schema"]["schema"]["properties"]
+    assert props["remote_only"]["type"] == ["boolean", "null"]
+
+
+def test_a_null_remote_only_cannot_erase_an_earlier_remote_answer(monkeypatch):
+    # The live failure: the user answered "Remote", a later turn about boosts returned
+    # remote_only=false, the flag was wiped, and a third of the board came back
+    # on-site (Amsterdam, Munich, Austin). A null turn must leave the answer alone.
+    obj = {**FULL_TURN, "titles": [], "location": "", "remote_only": None}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(
+        chat.turn(
+            [{"role": "user", "content": "add python to the boosts"}],
+            {"titles": ["engineer"], "location": "remote", "remote_only": True},
+        )
+    )
+    assert out["config"]["remote_only"] is True  # preserved, not clobbered
+    assert config_from_dict(out["config"]).remote_only is True  # survives the real path
+
+
 def test_turn_empty_delta_preserves_prior_config(monkeypatch):
     # the model returns empty titles this turn — the known title must NOT be wiped.
     obj = {**FULL_TURN, "titles": [], "location": "", "remote_only": False}
