@@ -22,8 +22,11 @@ jobs.db
 *.db-shm
 shortlist.csv
 
-# Local session-workflow file (not part of the product)
+# Local session-workflow files (not part of the product)
 KICKOFF-PROMPT.md
+BUILD-PLAN.md
+HANDOFF.md
+HANDOFF-*.md
 
 # Editors / IDEs
 .idea/
