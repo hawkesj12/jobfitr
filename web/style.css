@@ -543,13 +543,15 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 17p
 input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); cursor: pointer; }
 
 /* ── the applied rail (right edge) ──────────────────────────────────────────── */
-/* Above the board chrome (masthead 20, boardbar 15). The rail predates both and kept
-   z-index 8, so the new sticky header and criteria bar were painting over it: the
-   "N applied" button hit-tested as .site-header / .m-link / .criteria at every width
-   from 390 to 1000, i.e. the applied list was effectively unreachable. It is a floating
-   right-edge control by design, so riding above the chrome is the correct layer for it —
-   nudging its `top` only moved the collision from one bar to the next. */
-.rail { position: fixed; top: 20px; right: 0; z-index: 25; text-align: right; }
+/* The rail hangs BELOW the search/refine/filter header rather than over it. It predates
+   that chrome and kept z-index 8, so the sticky masthead (20) and boardbar (15) painted
+   straight over it — the "N applied" button hit-tested as .site-header / .m-link /
+   .criteria at every width from 390 to 1000, making the applied list unreachable.
+   `--rail-top` is measured from the real header stack in app.js because that stack is
+   148-182px tall depending on how the criteria pills lay out; any hard-coded value
+   collides at one width or leaves a gap at another. The fallback covers the tallest
+   case for the frame before the first measurement. */
+.rail { position: fixed; top: var(--rail-top, 190px); right: 0; z-index: 12; text-align: right; }
 /* The rail is a fixed box sized to its WIDEST child — the 260px body — even while that
    body is translated off-screen. So it sits as an invisible ~260x200 sheet over the
    top-right of the page and eats clicks meant for whatever is under it. On a phone that
