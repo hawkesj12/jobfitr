@@ -10,6 +10,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# Re-exec from a copy OUTSIDE the working tree before doing anything else.
+# This script lives in the repo it checks out, and bash reads a script incrementally —
+# so `git checkout` swaps the file out from under the running shell and the remaining
+# lines are read from the NEW file at the OLD byte offset. Observed 2026-07-31: a deploy
+# printed the previous version's log line and silently ran the previous version's install
+# command, which resolved a version range instead of the lockfile and put an untested
+# dependency on the slot. It reported success. Copy first, then run.
+if [[ "${JOBFITR_DEPLOY_REEXEC:-}" != "1" ]]; then
+	_self=$(mktemp /tmp/deploy-slot.XXXXXX.sh)
+	cp "$0" "$_self"
+	JOBFITR_DEPLOY_REEXEC=1 exec bash "$_self" "$@"
+fi
+trap 'rm -f "$0"' EXIT   # $0 is the temp copy in the re-exec'd process
+
 REF="${1:-main}"
 STATE=/etc/jobfitr/active-slot
 UV="/opt/jobfitr/.local/bin/uv"
