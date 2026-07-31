@@ -396,6 +396,52 @@ def test_dedup_keeps_genuinely_different_roles_at_the_same_company(client, monke
     assert len({j["title"] for j in d["jobs"]}) == 2
 
 
+def test_fit_gauge_stays_readable_when_relevance_alone_cannot_separate(
+    client, monkeypatch
+):
+    """The board rendered fifty identical "3 · Fair" rows for a plain one-word search.
+
+    BM25 rates fifty jobs all titled "...Engineer" as equally relevant — which is
+    CORRECT — but the old gauge divided by the top score, so a top of <= 0 floored every
+    card at the minimum and the ranking looked broken. The gauge is relative to the best
+    match, so it is normalized across the returned set instead.
+    """
+    assert server._fit_pcts([]) == []
+    # a real spread renders as a real gradient, best pinned to 100
+    spread = server._fit_pcts([5.0, 3.0, 1.0])
+    assert spread[0] == 100 and spread[-1] == server._FIT_FLOOR
+    assert spread[0] > spread[1] > spread[2]
+    # no spread at all: honest and uniform, never a fabricated gradient and never a 3
+    flat = server._fit_pcts([2.0, 2.0, 2.0])
+    assert flat == [server._FIT_FLAT] * 3
+    # negative scores (the case that broke it) still produce a usable gauge
+    neg = server._fit_pcts([-0.4, -0.9, -1.6])
+    assert neg[0] == 100 and min(neg) >= server._FIT_FLOOR
+
+
+def test_a_plain_one_word_search_still_produces_a_usable_board(client, monkeypatch):
+    _seed(
+        [
+            _job(
+                "Senior Engineer",
+                text="python kubernetes",
+                company="A",
+                url="https://x/1",
+            ),
+            _job("Staff Engineer", text="python", company="B", url="https://x/2"),
+            _job("Engineer", text="", company="C", url="https://x/3"),
+            *_filler(20),
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["engineer"]}).json()
+    pcts = [j["fit_pct"] for j in d["jobs"]]
+    assert pcts, "the search should return something"
+    assert max(pcts) == 100  # the best match always anchors the gauge
+    assert min(pcts) >= server._FIT_FLOOR  # nothing shown collapses to a 3
+
+
 # ── Phase B: data hygiene at the source ───────────────────────────────────────
 def test_html_bodies_render_as_clean_text(client, monkeypatch):
     """The P0 leak: Greenhouse ships the JD as HTML and the top card opened with a

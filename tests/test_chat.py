@@ -113,8 +113,10 @@ def test_the_boosts_and_avoid_questions_carry_a_forced_hint(monkeypatch):
     }
     monkeypatch.setattr(chat, "_call_openrouter", _fake_call(boosts_turn))
     out = _run(chat.turn([{"role": "user", "content": "remote"}], {}))
-    assert "Specific beats generic" in out["hint"]
-    assert "Three to six" in out["hint"]
+    # the hint must say what boosts DO — they are the ranking signal, not a nicety —
+    # and must not cap the user, since extra terms now buy resolution, not swing
+    assert "rank your list" in out["hint"]
+    assert "as many as you can" in out["hint"]
 
     avoid_turn = {**boosts_turn, "boosts": ["RAG"]}
     monkeypatch.setattr(chat, "_call_openrouter", _fake_call(avoid_turn))

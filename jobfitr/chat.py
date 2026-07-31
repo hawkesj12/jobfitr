@@ -73,12 +73,15 @@ TURN_SYSTEM_PROMPT = (
     "- location: a place, or 'remote', or 'anywhere'. A bare city is ambiguous "
     "(Madison, IN vs Madison, WI), so if they give a city with no state, ASK which "
     "state and store it as 'City, ST'. If they say remote, set remote_only=true.\n"
-    "- boosts: skills/tools/industry to rank HIGHER. When you ask this, tell them what "
-    "makes a GOOD boost, because the mechanic is impossible to guess: a term only helps "
-    "if it would NOT show up in a random posting in their field. 'Python' appears in "
-    "nearly every AI job description, so it lifts everything and separates nothing; "
-    "'multi-agent orchestration' actually discriminates. Say that three to six specific "
-    "terms work best — more is not better.\n"
+    "- boosts: skills/tools/industry to rank HIGHER. These are the single most valuable "
+    "answer in the whole interview: the titles FIND the jobs, but the boosts are what "
+    "ORDER them, and a search with none comes back in essentially no order at all. So "
+    "ENCOURAGE them and keep collecting — ask for as many as they can think of, and if "
+    "they give only one or two, invite more before moving on. The one thing to warn "
+    "about is specificity, which they cannot guess: a term only helps if it would NOT "
+    "appear in a random posting in their field. 'Python' is in nearly every AI job "
+    "description, so it lifts everything and separates nothing; 'multi-agent "
+    "orchestration' actually discriminates.\n"
     "- exclude (title words to hide entirely, e.g. intern/volunteer) and rank_down "
     "(sink signals, e.g. staffing/agency/recruiting): what they want to AVOID. When you "
     "ask this, make the difference explicit: anything they name to HIDE removes a "
@@ -291,9 +294,17 @@ _AVOID_CHIPS = (
 
 # The two mechanics a user cannot guess, and that the model would not reliably explain.
 # Forced server-side for the same reason as _AVOID_CHIPS: measured, not assumed.
+# Says what is actually true of the engine: the titles FIND the jobs, these RANK them.
+# Measured — a search with no boosts returns fifty results carrying one distinct fit
+# value, because BM25 rates fifty jobs all titled "...Engineer" as equally relevant. The
+# earlier copy said "three to six works best, more is not better", which was true of the
+# old flat scoring where nine boosts could swamp relevance entirely. The bonus is now
+# capped and scored as a FRACTION of boosts matched, so the ceiling no longer moves and
+# extra terms buy resolution instead of swing. More really is better now.
 _BOOSTS_HINT = (
-    "Specific beats generic — “multi-agent orchestration” separates listings, "
-    "“Python” doesn’t. Three to six works best."
+    "These are what rank your list — add as many as you can think of. "
+    "Specific ones separate the results; “Python” in an AI job matches everything, "
+    "so it can’t."
 )
 _AVOID_HINT = (
     "Anything you name here is removed from your results entirely, "
