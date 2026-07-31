@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=45" />
+    <link rel="stylesheet" href="style.css?v=47" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -157,6 +157,22 @@
           <span class="spacer"></span>
           <span class="fit-note">fit is relative to your best match</span>
           <span class="result-summary" id="result-summary" aria-live="polite"></span>
+
+          <!-- The applied rail lives IN the toolbar rather than floating over the board.
+               As a fixed overlay it covered the first result card at every width below
+               ~1300px; docked here it is part of the header furniture and can never sit
+               on a listing. -->
+          <aside class="rail" id="rail" aria-label="Jobs you've applied to" hidden>
+            <button class="rail-toggle" id="rail-toggle" aria-expanded="false">
+              <span class="rail-count" id="rail-count">0</span>
+              <span class="rail-word">applied</span>
+            </button>
+            <div class="rail-body glass" id="rail-body">
+              <p class="rail-head">Applied</p>
+              <ul class="rail-list" id="rail-list"></ul>
+              <button type="button" class="rail-share" id="rail-share" hidden>Share these</button>
+            </div>
+          </aside>
         </div>
         </div>
 
@@ -265,18 +281,6 @@
     </aside>
 
     <!-- ── the applied rail (right edge, persists in localStorage) ──────────── -->
-    <aside class="rail" id="rail" aria-label="Jobs you've applied to" hidden>
-      <button class="rail-toggle" id="rail-toggle" aria-expanded="false">
-        <span class="rail-count" id="rail-count">0</span>
-        <span class="rail-word">applied</span>
-      </button>
-      <div class="rail-body glass" id="rail-body">
-        <p class="rail-head">Applied</p>
-        <ul class="rail-list" id="rail-list"></ul>
-        <button type="button" class="rail-share" id="rail-share" hidden>Share these</button>
-      </div>
-    </aside>
-
     <!-- ── the gauge-card template ──────────────────────────────────────────── -->
     <template id="card-template">
       <article class="gcard glass">
@@ -309,7 +313,7 @@
     </template>
 
     <script src="atmosphere.js?v=40"></script>
-    <script src="app.js?v=46"></script>
+    <script src="app.js?v=47"></script>
     <script src="chat.js?v=44"></script>
   </body>
 </html>

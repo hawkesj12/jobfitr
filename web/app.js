@@ -594,44 +594,10 @@ function flyToRail(cardNode, done) {
 }
 
 // ── the applied rail ─────────────────────────────────────────────────────────
-// The applied rail hangs below the search/refine/filter header. That header stack is not
-// a fixed height — the criteria pills lay out differently by width, so its bottom lands
-// anywhere from 148px to 182px — which is why the offset is MEASURED here and published
-// as --rail-top rather than hard-coded in the stylesheet.
-function syncRailTop() {
-  const bar =
-    (document.body.classList.contains("board") && $(".boardbar")) || $(".site-header");
-  if (!bar) return;
-  const top = Math.round(bar.getBoundingClientRect().bottom + 8);
-  document.documentElement.style.setProperty("--rail-top", `${top}px`);
-}
-let _railTopQueued = false;
-function queueRailTop() {
-  if (_railTopQueued) return;
-  _railTopQueued = true;
-  requestAnimationFrame(() => {
-    _railTopQueued = false;
-    syncRailTop();
-  });
-}
-window.addEventListener("resize", queueRailTop);
-// Observe the bar itself, not just the window. A one-shot measurement lands DURING the
-// flow-up animation and freezes the offset at the header's transient height (190px for a
-// bar that settles at 148), and the criteria pills re-wrap on their own — neither of
-// which fires a window resize. The observer re-measures whenever the bar actually moves.
-if (typeof ResizeObserver !== "undefined") {
-  const railObserver = new ResizeObserver(queueRailTop);
-  for (const sel of [".boardbar", ".site-header"]) {
-    const node = $(sel);
-    if (node) railObserver.observe(node);
-  }
-}
-
 function renderRail() {
   const applied = store.get(KEY.applied, {});
   const items = Object.values(applied).sort((a, b) => (b.appliedAt || 0) - (a.appliedAt || 0));
   el.railCount.textContent = items.length;
-  queueRailTop();
   show(el.rail, items.length > 0);
   show(el.railShare, items.length > 0);
   el.railList.textContent = "";
@@ -733,7 +699,6 @@ function showResults() {
   const first = entering && bar ? bar.getBoundingClientRect() : null;
 
   document.body.classList.add("board");
-  queueRailTop();
   show(el.formView, false);
   show(el.chatView, true);
   show(el.resultsView, true);
