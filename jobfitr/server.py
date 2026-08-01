@@ -25,6 +25,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from job_radar.util import age_int
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -118,8 +119,23 @@ MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
 
 # Deterministic freshness/pickiness ladder — replaces the "how picky?" + recency
 # questions. Start tight (fresh + strong), relax only as far as needed to reach TARGET
-# results; cap the shown set at TARGET. (max_age_days, min_score), tight → loose.
+# results. (max_age_days, min_score), tight → loose.
+#
+# TARGET_RESULTS and RESULT_CAP are two different jobs that used to be one number, and
+# conflating them capped the board at 50 rows:
+#
+#   TARGET_RESULTS — the SUFFICIENCY bar. "Has this tier found enough?" Raising it does
+#   not give you more results, it makes the ladder relax further to hit a bigger number
+#   — trading fresh+strong for old+weak. It stays at 50 on purpose.
+#
+#   RESULT_CAP — the DELIVERY slice. How many of the winning tier's rows we actually
+#   hand the client. Nothing about tier selection changes when this moves; the same
+#   tier wins, we just stop throwing away its tail.
+#
+# The tail is what the client-side filters eat. A user who filters 50 rows by salary
+# and work style is left with a handful; the same filters over 200 still leave a board.
 TARGET_RESULTS = 50
+RESULT_CAP = int(os.environ.get("JOBFITR_RESULT_CAP", "200"))
 # Most results one employer may contribute to the front of the board. See
 # _spread_companies — this is a reordering, not a filter, so nothing is ever hidden.
 MAX_PER_COMPANY = int(os.environ.get("JOBFITR_MAX_PER_COMPANY", "4"))
@@ -142,6 +158,12 @@ SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
 ADZUNA_DAILY_CEILING = int(os.environ.get("ADZUNA_DAILY_CEILING", "200"))
 
 app = FastAPI(title="jobfitr", version="0.1.0", lifespan=lifespan)
+
+# The scoring response is repetitive JSON, which is what gzip is best at: the measured
+# 50-row payload is 55 KB raw and 13 KB compressed, so at RESULT_CAP=200 this is the
+# difference between shipping ~220 KB and ~52 KB per search. Two lines, and it is what
+# makes a bigger board cheap enough to hand a phone on cell data.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Per-IP rate limiting.
 limiter = Limiter(key_func=get_remote_address)
@@ -535,10 +557,10 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
             min_key,
             cfg.remote_only,
             max_age,
-            TARGET_RESULTS,
+            RESULT_CAP,  # deliver the tier's whole tail…
         )
         tier = {"max_age_days": max_age, "min_score": min_key}
-        if len(kept) >= TARGET_RESULTS:
+        if len(kept) >= TARGET_RESULTS:  # …but judge sufficiency on the first 50
             break
     pcts = _fit_pcts([final for _, final, _ in kept])
     results = [

@@ -73,13 +73,13 @@ cp .env.example .env
 
 Same-origin; the front end talks to these directly.
 
-| Method & path     | Purpose                                                                                                                                                                             |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /api/score` | Score the cached snapshot against a config body (`titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`, `min_score`, `limit`). Returns ranked jobs. |
-| `POST /api/chat`  | One conversational turn: `{messages, config, refining}` → `{reply, config, ready, chips}` (structured output). The only thing that reaches scoring is the config it fills. `refining` switches from the intake interview to editing a search that is already on screen. |
-| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer. |
-| `GET /api/meta`   | Snapshot freshness — `count` (pool size) and `harvested_at`. Drives the front door's proof line. |
-| `GET /api/health` | Liveness check.                                                                                                                                                                     |
+| Method & path        | Purpose                                                                                                                                                                                                                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /api/score`    | Score the cached snapshot against a config body (`titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`, `min_score`). Returns up to `JOBFITR_RESULT_CAP` (default 200) ranked jobs, gzipped. The size of the board is not a request parameter. |
+| `POST /api/chat`     | One conversational turn: `{messages, config, refining}` → `{reply, config, ready, chips}` (structured output). The only thing that reaches scoring is the config it fills. `refining` switches from the intake interview to editing a search that is already on screen.        |
+| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer.                                                                                                                                                                                    |
+| `GET /api/meta`      | Snapshot freshness — `count` (pool size) and `harvested_at`. Drives the front door's proof line.                                                                                                                                                                               |
+| `GET /api/health`    | Liveness check.                                                                                                                                                                                                                                                                |
 
 ## Project layout
 

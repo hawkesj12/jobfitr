@@ -482,8 +482,12 @@ def test_a_body_truncated_mid_tag_does_not_leak_markup(client, monkeypatch):
     left an unterminated one that rendered as literal markup on the card
     ('<a href="https://www.cnbc.com/2022/05'). A real less-than must still survive."""
     assert server._plain_text('has <a href="https://www.cnbc.com/2022') == "has"
-    assert server._plain_text("<p>Complete</p> tags are fine") == "Complete tags are fine"
-    assert server._plain_text("a < b is a real less-than") == "a < b is a real less-than"
+    assert (
+        server._plain_text("<p>Complete</p> tags are fine") == "Complete tags are fine"
+    )
+    assert (
+        server._plain_text("a < b is a real less-than") == "a < b is a real less-than"
+    )
     assert server._plain_text("trailing <") == "trailing <"
 
     _seed(
@@ -684,6 +688,33 @@ def test_score_ladder_relaxes_freshness_to_find_matches(client):
     ).json()
     assert d["jobs"] and d["jobs"][0]["title"] == "Staff Data Scientist"
     assert d["tier"]["max_age_days"] >= 60  # relaxed past the tight tiers to include it
+
+
+def test_score_delivers_past_fifty_without_relaxing_the_ladder(client):
+    # The two numbers are NOT one number. RESULT_CAP is how many rows ship;
+    # TARGET_RESULTS is only the bar the ladder judges a tier by. Re-conflating them
+    # (the pre-2026-08-01 behaviour) fails this test in one of two ways: either the
+    # board is capped back to 50, or the ladder relaxes to old/weak rows to reach 200.
+    _seed(
+        [
+            _job(
+                f"Data Engineer {i}",
+                text="data engineer pipeline etl",
+                company=f"Company {i}",  # unlike names, so MAX_PER_COMPANY cannot bite
+                url=f"https://x/de{i}",
+            )
+            for i in range(120)
+        ]
+    )
+    _mark_fresh(["data engineer"], "remote")
+    d = client.post(
+        "/api/score", json={"titles": ["data engineer"], "location": "remote"}
+    ).json()
+    assert len(d["jobs"]) > server.TARGET_RESULTS  # the tail is delivered, not dropped
+    assert len(d["jobs"]) <= server.RESULT_CAP
+    # every seeded row is fresh and strong, so the tightest tier must still win
+    assert d["tier"]["max_age_days"] == server.RESULT_LADDER[0][0]
+    assert d["tier"]["min_score"] == server.RESULT_LADDER[0][1]
 
 
 def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):

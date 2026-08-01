@@ -39,3 +39,9 @@ JOB-RADAR-*-BRIEF.md
 
 # OS
 .DS_Store
+
+# ── private lab: never published ──────────────────────────────────────────
+# Retrieval experiments, the before/after harness, frozen corpus copies, and the
+# personal search configs they run on. This repo is PUBLIC; nothing in here is
+# meant to be. One line, whole tree, no exceptions to get wrong.
+_private/
