@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Office/Business",
 ]
 dependencies = [
-    "job-radar>=0.5,<0.6",
+    "job-radar>=0.6,<0.7",
     "pyyaml>=6.0",
 ]
 
