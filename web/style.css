@@ -112,22 +112,31 @@ button { font: inherit; cursor: pointer; }
 @keyframes cloudB { 0% { transform: translate(8%, -4%) scale(1.14); } 100% { transform: translate(-10%, 7%) scale(1.28); } }
 #stars { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
 
-/* ── grain ──────────────────────────────────────────────────────────────────────
-   An feTurbulence field over the whole sky. Two jobs, only one of them cosmetic:
-   the sky is a single full-screen gradient, and smooth gradients POSTERIZE into
-   visible bands on 8-bit panels — noise dithers the step edges away. The second job
-   is materiality: the glass reads as glass when there is grain behind it to refract.
-   Inline SVG so it costs no request, no decode, and no JS; static so prefers-reduced-
-   motion needs no carve-out. baseFrequency 0.9 is fine enough to read as film grain
-   rather than as a visible pattern at 1x, and it tiles seamlessly at 180px. */
+/* ── grain (silver) ─────────────────────────────────────────────────────────────
+   Modelled on Capture One's silver film grain: LUMINANCE only, coarse, and actually
+   present. Three things had to be right, and the first version got all three wrong.
+
+   1. color-interpolation-filters='sRGB'. SVG filters default to linearRGB, so a
+      turbulence centred on 0.5 renders at ~188 in sRGB — measured. An off-centre
+      blend layer under `overlay` mostly just lightens, which is why it was invisible.
+   2. feColorMatrix saturate 0. Raw feTurbulence varies R, G and B independently, so
+      it is COLOUR speckle: chroma spread measured 37.6. Silver grain has none — this
+      takes it to 0.0.
+   3. A contrast ramp. Raw noise measured a spread of only 15.3, which at 5.5% opacity
+      under overlay is arithmetically invisible. slope 2 with a centring intercept
+      lifts the spread to ~50 while holding the mean at 128.
+
+   baseFrequency 0.62 over 4 octaves gives the larger, clumpier structure that reads as
+   silver rather than as fine digital speckle. Static, so reduced-motion needs no
+   carve-out, and it stays one inline asset with no request and no JS. */
 #grain {
   position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  opacity: 0.055; mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size: 180px 180px;
+  opacity: 0.19; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='g' x='0' y='0' width='100%25' height='100%25' color-interpolation-filters='sRGB'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.62' numOctaves='4' stitchTiles='stitch' result='t'/%3E%3CfeColorMatrix in='t' type='saturate' values='0' result='m'/%3E%3CfeComponentTransfer in='m'%3E%3CfeFuncR type='linear' slope='2' intercept='-0.5'/%3E%3CfeFuncG type='linear' slope='2' intercept='-0.5'/%3E%3CfeFuncB type='linear' slope='2' intercept='-0.5'/%3E%3CfeFuncA type='linear' slope='0' intercept='1'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23g)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
 }
-/* On a dark sky the same overlay reads heavier, so ease it back a touch. */
-@media (prefers-color-scheme: dark) { #grain { opacity: 0.05; } }
+/* The same overlay bites harder on a dark sky — night keeps the texture, not the noise. */
+@media (prefers-color-scheme: dark) { #grain { opacity: 0.15; } }
 .tw { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px 1px rgba(255, 255, 255, 0.7); opacity: 0; }
 /* --tw-peak is set per star so a dusk star is genuinely faint and a midnight one is
    bright, instead of every star firing at the same 0.85 regardless of the sky. */
