@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=57" />
+    <link rel="stylesheet" href="style.css?v=63" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -85,9 +85,6 @@
             </p>
             <p class="proof" id="proof"></p>
           </div>
-          <div class="transcript">
-            <div class="echo" id="echo" aria-hidden="true"></div>
-          </div>
         </div>
 
         <!-- The live conversation — what the assistant just said, the box, and its
@@ -96,6 +93,15 @@
              in the front-door column instead meant a refinement typed on the board
              rendered into a hidden element: the text vanished and nothing answered. -->
         <div class="convo">
+          <!-- The answered questions live WITH the live conversation, not with the hero.
+               They share a container no longer: the hero is hidden the moment the chat
+               starts (chat.js), so a block holding both ends up pinned wherever the HERO
+               wants to be — which stranded the transcript at the top of the screen, far
+               from the question being asked. Transcript, current question and input are
+               one continuous block, because that is what a conversation is. -->
+          <div class="transcript">
+            <div class="echo" id="echo" aria-hidden="true"></div>
+          </div>
           <div class="sayrow">
             <span class="steps" id="steps" aria-hidden="true"></span>
             <p class="chat-say" id="chat-say" aria-live="polite"></p>

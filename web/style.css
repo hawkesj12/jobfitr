@@ -57,6 +57,14 @@
      down to the 560 breakpoint and 68px below it (the applied rail's 44px toggle sets
      the height now that the nav links are gone). */
   --masthead: 72px;
+
+  /* The front door's vertical rhythm. Every gap below was a fixed pixel, which made the
+     whole page a constant ~828px tall on EVERY screen — so it overflowed any window
+     shorter than that and left slack on taller ones. These scale continuously with the
+     viewport instead, so there is no breakpoint tuned to any particular laptop. */
+  --v-gap: clamp(18px, 4.5vh, 52px);   /* hero → bar: the separation actually asked for */
+  --v-tight: clamp(10px, 1.6vh, 18px); /* small structural gaps */
+  --v-rule: clamp(14px, 2.4vh, 26px);  /* above the explainer rule */
 }
 
 * { box-sizing: border-box; }
@@ -177,16 +185,22 @@ button { font: inherit; cursor: pointer; }
 .brand-name { font-size: var(--t-body); }
 .site-header .spacer { flex: 1; }
 .freshness { font-family: var(--mono); font-size: var(--t-micro); color: var(--sub); }
-.stage { max-width: var(--maxw); margin: 0 auto; padding: 24px 20px 120px; }
+/* padding-bottom is small here on purpose: the 120px runway is for the BOARD, whose
+   cards scroll, and on the front door it was pure dead space that forced a scrollbar
+   onto a page that otherwise fits one screen. body.board sets its own. */
+/* padding-bottom stays small: the 120px runway is for the BOARD, whose cards scroll, and
+   body.board sets its own. On the front door it was dead space that forced a scrollbar
+   onto a page that otherwise fits. */
+.stage { max-width: var(--maxw); margin: 0 auto; padding: var(--v-tight) 20px 0; }
 
 /* ── the front-door hero: what a cold visitor reads in three seconds ─────────── */
-.hero { width: min(640px, calc(100% - 40px)); text-align: center; margin-bottom: 26px; }
+.hero { width: min(640px, calc(100% - 40px)); text-align: center; margin-bottom: 0; }
 .hero-prop {
   font-size: var(--t-hero); font-weight: 680; letter-spacing: -0.025em;
   line-height: 1.15; text-wrap: balance; margin-bottom: 10px;
 }
 .hero-prop em { font-style: normal; color: var(--anchor); }
-.hero-sub { font-size: var(--t-body); color: var(--sub); text-wrap: balance; max-width: 46ch; margin: 0 auto 20px; }
+.hero-sub { font-size: var(--t-body); color: var(--sub); text-wrap: balance; max-width: 46ch; margin: 0 auto 14px; }
 /* the proof line — real numbers from /api/meta, never invented ones */
 .proof {
   display: inline-flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: center;
@@ -207,24 +221,11 @@ button { font: inherit; cursor: pointer; }
 /* front door: the BAR is pinned dead-center; the transcript stacks upward above it,
    so answering a question never moves the bar. Cancels the stage's asymmetric padding. */
 .chat-view {
-  display: grid;
-  /* minmax(0,1fr), not 1fr. A bare `1fr` is minmax(AUTO,1fr), so the first row grows
-     to fit the hero and shoves the bar down — measured 73px off centre on desktop and
-     221px on a phone, where the headline wraps to three lines. Flooring the minimum at
-     0 makes the outer rows true equal halves, so the bar sits at the viewport centre
-     regardless of how tall the marketing block above it happens to be. */
-  /* Row 1 is minmax(MIN-CONTENT, 1fr): when the viewport has room the outer rows are
-     equal halves and the bar sits dead centre; when the hero is too tall to fit in half
-     a short screen, row 1 grows to its content instead and the bar drifts down rather
-     than the hero overlapping it. Centred when it can be, never broken when it can't. */
-  grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr);
-  justify-items: center;
-  /* The section spans the FULL viewport, pulled up under the masthead, so its centre
-     IS the viewport centre — anchoring it below the header instead just moved the
-     centre down by the header's height. The hero clears the masthead with padding
-     inside row 1 rather than by offsetting the whole box. */
-  min-height: 100dvh;
-  margin-block: calc(-1 * (var(--masthead) + 24px)) -120px;
+  /* Deliberately NOT a full-height centring grid. Every version that claimed 100dvh
+     pushed the starters and the explainer blocks past the fold and put the desktop
+     into a scroll it does not need — the whole front door fits one screen. This is a
+     plain column: hero, a real gap, the bar, and the rest flows under it. */
+  display: flex; flex-direction: column; align-items: center;
 }
 /* the hero and the transcript share row 1 — hero on top, transcript hugging the bar */
 /* The hero rides at the TOP of row 1, not the bottom of it. Those are two different
@@ -232,15 +233,20 @@ button { font: inherit; cursor: pointer; }
    column including the input, whereas flipping this alignment lifts only the marketing
    block and leaves the bar centred in the viewport where it belongs — the input is the
    thing a returning user comes for, and it should sit in the same place every time. */
+/* The separation between the proposition and the bar — the one thing that was
+   actually asked for. A margin, not a layout system. */
 .doorhead {
-  grid-row: 1; align-self: start; width: 100%; padding-top: var(--masthead);
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  width: 100%; margin-bottom: var(--v-gap);
+  display: flex; flex-direction: column; align-items: center;
 }
+/* Sits INSIDE .convo now, immediately above the question — full width of the column,
+   not its own centred box, so the transcript and the question share one left edge. */
 .transcript {
-  width: min(560px, calc(100% - 40px));
+  width: 100%;
   display: flex; flex-direction: column; justify-content: flex-end;
-  gap: 10px; padding-bottom: 14px; overflow: hidden; /* no scroll — old lines clip/fade */
+  gap: 10px; padding-bottom: var(--v-tight); overflow: hidden; /* no scroll — old lines clip/fade */
 }
+.transcript:has(.echo:empty) { display: none; } /* nothing answered yet → no empty box */
 .echo { width: 100%; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; color: var(--sub); }
 .echo .row { transition: opacity 600ms ease; margin-bottom: 10px; }
 .echo .row .q-asked { color: var(--ink); opacity: 0.72; }          /* the question, flush left */
@@ -271,9 +277,8 @@ button { font: inherit; cursor: pointer; }
 .rip.run { animation: ripOut 1.7s ease-out forwards; }
 .rip.dub { animation-duration: 1.5s; }
 /* the live conversation block: what was just said + the box + its chips, as one unit */
-.doorextra { width: min(560px, calc(100% - 40px)); margin: 0 auto; }
-.doorextra { width: min(560px, calc(100% - 40px)); margin: 0 auto; }
-.convo { grid-row: 2; width: min(560px, calc(100% - 40px)); }
+.doorextra { width: min(560px, calc(100% - 40px)); margin: var(--v-rule) auto 0; }
+.convo { width: min(560px, calc(100% - 40px)); }
 /* no outer window — the bar itself is the glass; halo + pulse hug the BAR, not the taller wrap */
 .barwrap { position: relative; }
 .chat-say { font-size: var(--t-lead); font-weight: 560; letter-spacing: -0.01em; line-height: 1.35; min-height: 1.35em; margin-bottom: 14px; padding: 0 4px; text-wrap: balance; }
@@ -324,11 +329,10 @@ button { font: inherit; cursor: pointer; }
 }
 .starter:hover { color: var(--ink); border-style: solid; background: var(--card-bg); }
 .starter .arw { opacity: 0.5; }
-.doorextra { grid-row: 3; align-self: start; width: min(560px, calc(100% - 40px)); margin-top: 26px; }
 /* the two things a sceptical visitor actually wants to know before typing anything */
-.doornotes { display: grid; gap: 20px; margin-top: 40px; padding-top: 22px; border-top: 1px solid var(--card-brd); }
+.doornotes { display: grid; gap: 20px; margin-top: var(--v-rule); padding-top: var(--v-rule); border-top: 1px solid var(--card-brd); }
 .doornotes h2 { font-size: var(--t-small); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink); margin-bottom: 6px; }
-.doornotes p { font-size: var(--t-small); color: var(--sub); line-height: 1.6; }
+.doornotes p { font-size: var(--t-small); color: var(--sub); line-height: 1.5; }
 @media (min-width: 620px) { .doornotes { grid-template-columns: 1fr 1fr; gap: 26px; } }
 /* suggested-chips row — sits just under the pinned bar (grid row 3); hidden when empty.
    Populated later (fixed per-question or model-suggested); the front door stays bare for now. */
@@ -466,7 +470,12 @@ body.board #results-view { margin-top: 0; }
    behind it let the notice text and card edges read straight through. It also stops
    the blur stacking (glass over glass is where legibility goes to die). */
 body.board .boardbar {
-  position: sticky; top: 52px; z-index: 15;
+  /* Sticks BELOW the masthead, not 20px under it. This was 52px, which was right when
+     the header was shorter; the applied rail's 44px toggle now sets the header height,
+     so a hardcoded offset let the bar slide beneath it and the applied pill overlapped
+     the plate's top-right corner. Tied to the same variable the header height comes
+     from, so the two cannot drift apart again. */
+  position: sticky; top: var(--masthead); z-index: 15;
   /* Deliberately more opaque than --plate. Every other glass surface only has the sky
      behind it, but this one has moving CARDS behind it, and at --plate's ~50% alpha
      their text read straight through the toolbar. This is the one surface that has to
@@ -668,7 +677,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   .fit-num { font-size: var(--t-body); }
   .site-header { padding: 12px 14px; }
   body.board #stage { padding: 0 14px 56px; }
-  body.board .boardbar { top: 48px; }
+  body.board .boardbar { top: var(--masthead); }
   body.board .drawer { top: auto !important; bottom: 0; left: 0; transform: none; width: 100%; max-width: 100%; }
   body.board .drawer-body { border-radius: var(--radius) var(--radius) 0 0; max-height: 62vh; }
 
