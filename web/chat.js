@@ -67,6 +67,32 @@
     if (doorExtra) doorExtra.hidden = true;
   }
 
+  // The way back to a blank search. Without this the board was a dead end: the refine
+  // prompt is told the interview is over, so "I want to restart" came back as
+  // "re-scoring." with nothing cleared. Reloading worked, but nobody should have to
+  // discover that. Everything the conversation accumulated is dropped here — answers,
+  // transcript, chips, step dots, the prefetch latch — so the next question starts from
+  // genuinely nothing rather than from a half-cleared config.
+  function restartConversation() {
+    config = {};
+    messages.length = 0;
+    answered = 0;
+    prefetched = false;
+    turnHint = "";
+    currentQuestion = OPENER;
+    if (echo) echo.textContent = "";
+    setChips([]);
+    renderSteps();
+    try { localStorage.removeItem("jobfitr.config"); } catch { /* storage off */ }
+    if (heroEl) heroEl.hidden = false;
+    if (doorExtra) doorExtra.hidden = false;
+    if (window.jobfitr && window.jobfitr.showChat) window.jobfitr.showChat();
+    input.value = "";
+    syncReady();
+    typeInto(OPENER);
+    input.focus();
+  }
+
   function pushEcho(question, answer) {
     const row = document.createElement("div");
     row.className = "row";
@@ -226,6 +252,14 @@
       const data = resp.ok ? await resp.json() : null;
       if (!data || data.error) {
         unavailable();
+        return;
+      }
+
+      // Restart wins over everything else this turn: do not record the exchange, do not
+      // re-score, do not keep the config it was applied to.
+      if (data.restart) {
+        typeInto(data.reply || "Starting fresh.");
+        setTimeout(restartConversation, 700);
         return;
       }
 

@@ -113,6 +113,8 @@ TURN_SYSTEM_PROMPT = (
     "with 'Remote', 'Hybrid', 'On-site' (add a couple relevant cities after if useful). "
     "Return [] only when chips truly cannot apply. Never repeat a chip the user already "
     "chose.\n"
+    "If they ask to start over, restart, or clear what they have told you, set "
+    "`restart`=true and reply with one short line confirming it.\n"
     "For fields the user hasn't addressed, return them empty ([] or ''). For "
     "`remote_only` specifically, return null unless the user actually told you whether "
     "they want remote — NEVER false as a placeholder, because false is a real answer "
@@ -165,6 +167,11 @@ TURN_SCHEMA = {
                 # drops "explain the mechanic" instructions under this prompt + strict
                 # schema, because the standing "ONE short sentence" rule wins. Splitting
                 # it out lets the server force the text where it actually matters.
+                # A user on the board had no conversational way back to a blank search:
+                # the refine prompt says the interview is over, so "I want to restart"
+                # was answered with "re-scoring." and nothing changed. The model can now
+                # say so explicitly and the client resets.
+                "restart": {"type": "boolean"},
                 "hint": {
                     "type": "string",
                     "description": "One short plain-language line under the question explaining how the answer is used ('' when the question is self-evident).",
@@ -181,6 +188,7 @@ TURN_SCHEMA = {
                 "remote_only",
                 "chips",
                 "hint",
+                "restart",
             ],
         },
     },
@@ -422,6 +430,10 @@ REFINE_SYSTEM_PROMPT = (
     "chips: 4-8 SHORT (1-3 word) tappable follow-up refinements that make sense for what "
     "they are looking at, e.g. 'Posted this week', 'Drop contract roles', '$150k+', "
     "'Remote only'. Never repeat something already in their config. Set `hint` to ''.\n"
+    "RESTART: if they ask to start over, start again, restart, reset, do a new search, "
+    "or clear everything, set `restart`=true, leave `ready` false, and reply with one "
+    "short line confirming it. That is the ONLY way back to a blank search from here, so "
+    "honour it whenever they clearly mean it rather than treating it as a refinement.\n"
     "Salary and recency are handled by the board's own filters — if they ask for those, "
     "apply what you can to the config and say so plainly rather than refusing."
 )
@@ -476,6 +488,7 @@ async def turn(
             "ready": False,
             "chips": [],
             "hint": "",
+            "restart": False,
             "error": f"upstream: {type(e).__name__}",
         }
 
@@ -513,8 +526,10 @@ async def turn(
             hint = _BOOSTS_HINT
         elif _is_avoid_turn(merged):
             hint = _AVOID_HINT
+    restart = bool(parsed.get("restart"))
     return {
         "reply": reply,
+        "restart": restart,
         "config": merged,
         "ready": ready,
         "chips": chips,

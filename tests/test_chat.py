@@ -193,6 +193,29 @@ def test_chip_filtering_is_case_insensitive_against_the_location(monkeypatch):
     assert out["chips"] == ["Hybrid"]
 
 
+def test_a_restart_request_is_surfaced_to_the_client(monkeypatch):
+    """Without this the board is a dead end. The refine prompt is told the interview is
+    over, so "I want to restart" came back as "re-scoring." with nothing cleared and no
+    conversational way to a blank search."""
+    obj = {**FULL_TURN, "restart": True, "ready": False, "reply": "Starting fresh."}
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(obj))
+    out = _run(chat.turn([{"role": "user", "content": "I want to restart"}], {}, refining=True))
+    assert out["restart"] is True
+    assert out["ready"] is False  # a restart must never also re-score the old search
+
+
+def test_an_ordinary_turn_does_not_report_a_restart(monkeypatch):
+    monkeypatch.setattr(chat, "_call_openrouter", _fake_call(FULL_TURN))
+    out = _run(chat.turn([{"role": "user", "content": "senior only"}], {}, refining=True))
+    assert out["restart"] is False
+
+
+def test_restart_is_in_the_schema_so_the_model_can_say_it(monkeypatch):
+    props = chat.TURN_SCHEMA["json_schema"]["schema"]["properties"]
+    assert props["restart"]["type"] == "boolean"
+    assert "restart" in chat.TURN_SCHEMA["json_schema"]["schema"]["required"]
+
+
 def test_remote_only_is_nullable_so_unaddressed_is_expressible(monkeypatch):
     # Strict mode requires every key every turn. With a bare boolean the model had no
     # way to say "the user hasn't told me" and emitted false as a placeholder, which

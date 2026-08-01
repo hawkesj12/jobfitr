@@ -494,12 +494,19 @@ body.board .criteria {
   padding: 6px 6px 2px; margin-bottom: 0;
 }
 body.board .toolbar { margin-bottom: 0; padding: 6px 6px 8px; }
-/* Rows fade into the sky before they reach the masthead. The header group below it
-   is its own opaque plate, so this only has to cover the masthead strip. */
+/* Rows must never be visible above the header group. This covers the masthead strip;
+   the boardbar below it is its own opaque plate, so the two together are a continuous
+   lid over the scrolling cards.
+
+   Height is var(--masthead) — the SAME value the boardbar sticks at — because a
+   hardcoded 60px against a plate that starts at 72px leaves a 12px band of bare card
+   scrolling between them. It is opaque for its full height rather than fading out at
+   88%, since the plate takes over at exactly that line and a fade would show a sliver
+   of whatever is underneath. */
 body.board::before {
-  content: ""; position: fixed; left: 0; right: 0; top: 0; height: 60px; z-index: 4; pointer-events: none;
-  /* opaque all the way to where the header plate takes over (its sticky top is 52px) */
-  background: linear-gradient(to bottom, var(--sky-top) 0%, var(--sky-top) 88%, transparent);
+  content: ""; position: fixed; left: 0; right: 0; top: 0;
+  height: var(--masthead); z-index: 4; pointer-events: none;
+  background: var(--sky-top);
 }
 
 /* ── the criteria bar: the four answers, as editable pills ───────────────────── */
