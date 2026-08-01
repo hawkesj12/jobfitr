@@ -174,6 +174,13 @@ def _note_fetch() -> None:
 # client fixes every consumer at once and shrinks the payload.
 _SCRIPT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _TAG_RE = re.compile(r"<[^>]+>")
+# A tag needs a closing '>' to match above, and the harvest caps body text at ~2000
+# chars — so a body cut mid-tag ends with an UNTERMINATED one that survived the strip
+# and rendered as literal markup on the card ('<a href="https://www.cnbc.com/2022/05').
+# Anchored at the end AND requiring a tag name right after the '<', so a real
+# less-than survives: "a < b" has a space next and is left alone, as is a bare
+# trailing '<'.
+_DANGLING_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*$")
 
 
 def _plain_text(text) -> str:
@@ -187,6 +194,7 @@ def _plain_text(text) -> str:
         return ""
     s = _SCRIPT_RE.sub(" ", text)  # drop script/style bodies outright
     s = _TAG_RE.sub(" ", s)
+    s = _DANGLING_TAG_RE.sub(" ", s)  # a body truncated mid-tag leaves an unclosed one
     s = html.unescape(s)  # &amp; &nbsp; &#8217; …
     return " ".join(s.split())  # collapses \xa0 too — it is whitespace to str.split
 

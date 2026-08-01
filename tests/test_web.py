@@ -476,6 +476,32 @@ def test_html_bodies_render_as_clean_text(client, monkeypatch):
     assert "About Arize AI is rapidly" in top["description"]
 
 
+def test_a_body_truncated_mid_tag_does_not_leak_markup(client, monkeypatch):
+    """Found live on production after shipping the HTML strip. The tag regex needs a
+    closing '>', and the harvest caps body text at ~2000 chars — so a body cut mid-tag
+    left an unterminated one that rendered as literal markup on the card
+    ('<a href="https://www.cnbc.com/2022/05'). A real less-than must still survive."""
+    assert server._plain_text('has <a href="https://www.cnbc.com/2022') == "has"
+    assert server._plain_text("<p>Complete</p> tags are fine") == "Complete tags are fine"
+    assert server._plain_text("a < b is a real less-than") == "a < b is a real less-than"
+    assert server._plain_text("trailing <") == "trailing <"
+
+    _seed(
+        [
+            _job(
+                "Engineer",
+                text='We raised a round. <a href="https://example.com/very/long/url',
+                url="https://x/cut",
+            )
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    top = client.post("/api/score", json={"titles": ["engineer"]}).json()["jobs"][0]
+    assert "<a" not in top["description"] and "href" not in top["description"]
+    assert "We raised a round." in top["description"]
+
+
 def test_employment_type_spellings_collapse_to_one_facet(client, monkeypatch):
     """Four spellings of full-time split 621 live rows across four unfilterable chips."""
     _seed(
