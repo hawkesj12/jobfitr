@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=49" />
+    <link rel="stylesheet" href="style.css?v=50" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -40,6 +40,11 @@
     <div id="glow" aria-hidden="true"></div>
     <div id="wash" aria-hidden="true"></div>
     <div id="stars" aria-hidden="true"></div>
+    <!-- Grain sits ON TOP of the whole sky stack. It is not decoration: a full-screen
+         smooth gradient posterizes into visible bands on 8-bit displays, and dithering
+         it with noise is the standard cure. It also gives the glass something with
+         texture to sit on. Static, so reduced-motion needs no exception. -->
+    <div id="grain" aria-hidden="true"></div>
 
     <header class="site-header">
       <a class="brand" href="/">
@@ -314,7 +319,7 @@
       </article>
     </template>
 
-    <script src="atmosphere.js?v=49"></script>
+    <script src="atmosphere.js?v=51"></script>
     <script src="app.js?v=47"></script>
     <script src="chat.js?v=44"></script>
   </body>

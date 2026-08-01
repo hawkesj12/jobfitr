@@ -111,8 +111,27 @@ button { font: inherit; cursor: pointer; }
 @keyframes cloudA { 0% { transform: translate(-9%, 3%) scale(1.06); } 100% { transform: translate(9%, -6%) scale(1.24); } }
 @keyframes cloudB { 0% { transform: translate(8%, -4%) scale(1.14); } 100% { transform: translate(-10%, 7%) scale(1.28); } }
 #stars { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+
+/* ── grain ──────────────────────────────────────────────────────────────────────
+   An feTurbulence field over the whole sky. Two jobs, only one of them cosmetic:
+   the sky is a single full-screen gradient, and smooth gradients POSTERIZE into
+   visible bands on 8-bit panels — noise dithers the step edges away. The second job
+   is materiality: the glass reads as glass when there is grain behind it to refract.
+   Inline SVG so it costs no request, no decode, and no JS; static so prefers-reduced-
+   motion needs no carve-out. baseFrequency 0.9 is fine enough to read as film grain
+   rather than as a visible pattern at 1x, and it tiles seamlessly at 180px. */
+#grain {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  opacity: 0.055; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+}
+/* On a dark sky the same overlay reads heavier, so ease it back a touch. */
+@media (prefers-color-scheme: dark) { #grain { opacity: 0.05; } }
 .tw { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; box-shadow: 0 0 4px 1px rgba(255, 255, 255, 0.7); opacity: 0; }
-@keyframes tw { 0% { opacity: 0; transform: scale(0.4); } 45% { opacity: 0.85; transform: scale(1); } 100% { opacity: 0; transform: scale(0.6); } }
+/* --tw-peak is set per star so a dusk star is genuinely faint and a midnight one is
+   bright, instead of every star firing at the same 0.85 regardless of the sky. */
+@keyframes tw { 0% { opacity: 0; transform: scale(0.4); } 45% { opacity: var(--tw-peak, 0.85); transform: scale(1); } 100% { opacity: 0; transform: scale(0.6); } }
 .tw.on { animation: tw 2.6s ease-in-out; }
 
 /* ── glass ──────────────────────────────────────────────────────────────────── */

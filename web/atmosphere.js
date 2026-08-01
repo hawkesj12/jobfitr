@@ -64,6 +64,7 @@
   }
 
   let starsOn = false;
+  let starDepth = 0; // 0 at first light, 1 at true dark — drives count, size, brightness
   function apply(minute) {
     const fr = frame(minute);
     root.style.setProperty("--sky-top", cssRgb(fr.top));
@@ -115,27 +116,41 @@
     // the heartbeat slows toward sleep as it darkens
     bpm = 46 + fr.lum * 20; // ~46 bpm deep night → ~66 bpm midday
 
-    const wantStars = fr.lum < 0.2 && !reduce && starsLayer; // twinkles out by ~10pm
+    // Stars used to snap on below lum 0.2 — about 10pm — so the sky sat empty through
+    // the whole dusk window, which is exactly when a real one is filling with them.
+    // They now begin at STAR_FROM and DEEPEN: `starDepth` runs 0→1 as the light goes,
+    // driving how many appear, how big, and how bright. First stars are single and
+    // faint; deep night is a proper field.
+    const wantStars = fr.lum < STAR_FROM && !reduce && starsLayer;
+    starDepth = wantStars ? Math.min(1, (STAR_FROM - fr.lum) / STAR_FROM) : 0;
     if (wantStars && !starsOn) { starsOn = true; startStars(); }
     else if (!wantStars && starsOn) { starsOn = false; stopStars(); }
   }
 
-  // ── deep-night twinkles ─────────────────────────────────────────────────────
+  // ── twinkles, from first light at dusk to a full field at night ──────────────
+  const STAR_FROM = 0.44; // first stars ~8pm instead of ~10pm
+  const SPAWN_MS = 300; // tick rate; how many appear per tick is what scales
   let starTimer = null;
   function spawnStar() {
-    const n = 1 + Math.floor(Math.random() * 2);
+    // 1 star at first light, up to 8 at true dark. The cap keeps the DOM bounded:
+    // each lives 2.7s against a 300ms tick, so the field tops out near 70 nodes and
+    // cannot grow without limit.
+    const n = 1 + Math.round(starDepth * 7);
     for (let i = 0; i < n; i++) {
       const s = document.createElement("div");
       s.className = "tw on";
       s.style.left = Math.random() * 100 + "%";
-      s.style.top = Math.random() * 72 + "%";
-      const px = (1.5 + Math.random() * 1.8).toFixed(1) + "px";
+      // they fill DOWNWARD as night deepens — first stars stay high, near the zenith
+      s.style.top = Math.random() * (46 + starDepth * 32) + "%";
+      const px = (1.2 + Math.random() * (1.1 + starDepth * 1.4)).toFixed(1) + "px";
       s.style.width = s.style.height = px;
+      // the animation's peak opacity is a variable, so dusk stars are genuinely faint
+      s.style.setProperty("--tw-peak", (0.3 + starDepth * 0.6).toFixed(2));
       starsLayer.appendChild(s);
       setTimeout(() => s.remove(), 2700);
     }
   }
-  function startStars() { if (!starTimer) starTimer = setInterval(spawnStar, 620); }
+  function startStars() { if (!starTimer) starTimer = setInterval(spawnStar, SPAWN_MS); }
   function stopStars() {
     if (starTimer) { clearInterval(starTimer); starTimer = null; }
     if (starsLayer) starsLayer.textContent = "";
