@@ -34,6 +34,14 @@
   const pnum = (s) => parseFloat(s);
   const WHITE = [255, 255, 255];
   const NIGHT = [16, 19, 31];
+  // The two inks the scene chooses between, and the WCAG maths to choose with.
+  const INK_LIGHT = [244, 246, 251]; // #f4f6fb
+  const INK_DARK = [11, 15, 26]; // #0b0f1a
+  const relLum = (c) => {
+    const ch = (v) => ((v /= 255), v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+    return 0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2]);
+  };
+  const contrast = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
 
   function frame(minute) {
     const t = ((minute % 1440) + 1440) % 1440;
@@ -68,7 +76,15 @@
     root.style.setProperty("--wash-a", rgba(fr.glow, 0.24));
     root.style.setProperty("--wash-b", rgba(fr.acc, 0.24));
 
-    const bright = fr.lum > 0.5;
+    // Pick the ink that reads worst-case best against the ACTUAL sky, rather than
+    // trusting `lum` — which is a hand-authored artistic brightness per keyframe, not a
+    // measurement of the three stops the text sits on. At dusk those stops straddle the
+    // old >0.5 threshold (top 0.20, mid 0.49, bot 0.53), so the average tipped "dark",
+    // near-white ink went onto the palest part of the sky, and the body copy rendered at
+    // 1.68:1 — WCAG wants 4.5. Choosing by worst stop instead gives 4.53 there.
+    const stopLums = [fr.top, fr.mid, fr.bot].map(relLum);
+    const worstAgainst = (ink) => Math.min(...stopLums.map((s) => contrast(relLum(ink), s)));
+    const bright = worstAgainst(INK_DARK) > worstAgainst(INK_LIGHT);
     const tint = bright ? lerp(fr.mid, WHITE, 0.5) : lerp(fr.mid, NIGHT, 0.55);
     // the sun-glow flips dark WITH the glass — when the UI goes to night, so does the sun
     root.style.setProperty("--glow", cssRgb(bright ? fr.glow : lerp(fr.glow, NIGHT, 0.6)));
