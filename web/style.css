@@ -169,10 +169,18 @@ button { font: inherit; cursor: pointer; }
 }
 
 /* ── header + stage ─────────────────────────────────────────────────────────── */
+/* min-height, not just padding: the applied rail is hidden until something has been
+   applied to, and without it the header collapses from 72px to 55px. Everything that
+   positions against the header — the sticky boardbar, the lid that hides scrolling
+   cards, the filter drawer — reads --masthead, so a header that silently changed height
+   left the boardbar pinned 17px below its own flow position and the first result card
+   slid underneath it. Fixing the height also removes the jank of the whole page shifting
+   down the moment a user applies to their first job. */
 .site-header {
   position: sticky; top: 0; z-index: 20;
   display: flex; align-items: center; gap: 12px;
   max-width: 940px; margin: 0 auto; padding: 14px 22px;
+  min-height: var(--masthead); box-sizing: border-box;
 }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); text-decoration: none; }
 /* plane 3 — the monogram is one of the four objects allowed the full ink jump */
@@ -368,6 +376,18 @@ button { font: inherit; cursor: pointer; }
    its own aligned track: a number plus a bar on a common baseline, which is the
    most accurate encoding available in a list row. ──────────────────────────────── */
 .carousel { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; }
+/* The scroll lives HERE, not on the page. Cards are clipped by this box, so they can
+   never appear above the refiner — which is what lets the header stay transparent
+   instead of needing an opaque strip painted over them. */
+body.board .carousel {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding-bottom: 56px; scrollbar-width: thin;
+}
+/* Cards must NOT shrink. The carousel is a flex column with a constrained height now,
+   and flex items shrink by default — so every card was squeezed to a ~32px sliver with
+   its text clipped and overlapping the next one. Measurements all passed; only the
+   screenshot showed it. */
+body.board .carousel > * { flex: 0 0 auto; }
 .gcard {
   position: relative; width: 100%; overflow: hidden; isolation: isolate;
   display: grid; grid-template-columns: 92px 1fr auto; align-items: start; gap: 14px;
@@ -428,7 +448,14 @@ button { font: inherit; cursor: pointer; }
 /* ── board mode: ONE continuous scroll surface. The chat sits centered at the top;
    scroll down and the board flows up while the chat bar STICKS to the top; scroll back
    to the top and the chat re-centers. ─────────────────────────────────────────────── */
-body.board #stage { max-width: 900px; min-height: 100dvh; display: block; margin: 0 auto; padding: 0 24px 64px; }
+/* height, not min-height: the board owns the viewport below the masthead and scrolls
+   INSIDE itself, so the page never scrolls and the cards are clipped by their own
+   container rather than masked by a strip painted over them. */
+body.board #stage {
+  max-width: 900px; height: calc(100dvh - var(--masthead)); margin: 0 auto;
+  padding: 0 24px 0; overflow: hidden;
+  display: flex; flex-direction: column; min-height: 0;
+}
 body.board #chat-view { display: contents; } /* dissolve so the bar can dock independently */
 /* THE HANDOFF. The transcript has done its job — four answered questions are not
    worth 40% of the viewport while you are reading results. It collapses into the
@@ -462,7 +489,11 @@ body.board .chips-hint { text-align: left; }
 /* the halo breathes on the front door; on the board it would pulse over the results */
 body.board .halo, body.board .pulse { display: none; }
 .crit-refine[aria-expanded="true"] { background: var(--anchor); }
-body.board #results-view { margin-top: 0; }
+/* flex:1 rather than height:100% — the board FILLS whatever the stage has left after
+   anything above it, instead of assuming it starts at the stage's top edge. It does
+   not: chat-view is display:contents on the board, so its leftovers still take part in
+   the flow, and a fixed 100% pushed the list 34px past the fold. */
+body.board #results-view { margin-top: 0; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 /* The criteria bar + toolbar stick as ONE group and carry ONE glass plate between
    them. Two reasons: a criteria bar that wraps to a second line can never collide
    with a toolbar pinned at a constant offset, and a single surface means rows
@@ -475,7 +506,10 @@ body.board .boardbar {
      so a hardcoded offset let the bar slide beneath it and the applied pill overlapped
      the plate's top-right corner. Tied to the same variable the header height comes
      from, so the two cannot drift apart again. */
-  position: sticky; top: var(--masthead); z-index: 15;
+  /* Static, not sticky. It is the first row of a flex column that owns the viewport,
+     so it stays put by construction — no `top` offset to drift out of sync with the
+     masthead height, which is exactly what put the first card underneath it. */
+  position: relative; z-index: 15; flex: none;
   /* Deliberately more opaque than --plate. Every other glass surface only has the sky
      behind it, but this one has moving CARDS behind it, and at --plate's ~50% alpha
      their text read straight through the toolbar. This is the one surface that has to
@@ -494,20 +528,8 @@ body.board .criteria {
   padding: 6px 6px 2px; margin-bottom: 0;
 }
 body.board .toolbar { margin-bottom: 0; padding: 6px 6px 8px; }
-/* Rows must never be visible above the header group. This covers the masthead strip;
-   the boardbar below it is its own opaque plate, so the two together are a continuous
-   lid over the scrolling cards.
-
-   Height is var(--masthead) — the SAME value the boardbar sticks at — because a
-   hardcoded 60px against a plate that starts at 72px leaves a 12px band of bare card
-   scrolling between them. It is opaque for its full height rather than fading out at
-   88%, since the plate takes over at exactly that line and a fade would show a sliver
-   of whatever is underneath. */
-body.board::before {
-  content: ""; position: fixed; left: 0; right: 0; top: 0;
-  height: var(--masthead); z-index: 4; pointer-events: none;
-  background: var(--sky-top);
-}
+/* No lid over the cards: they are clipped by their own scroll container now, so the
+   masthead is plain transparent glass over the sky, the way the front door is. */
 
 /* ── the criteria bar: the four answers, as editable pills ───────────────────── */
 .criteria {
