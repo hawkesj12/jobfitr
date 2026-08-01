@@ -381,13 +381,41 @@ button { font: inherit; cursor: pointer; }
    instead of needing an opaque strip painted over them. */
 body.board .carousel {
   flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding-bottom: 56px; scrollbar-width: thin;
+  padding-bottom: 56px;
+  /* The list still scrolls — the bar itself is hidden. A visible track cut a hard
+     grey edge through the glass on every screen; the cards fading under the refiner
+     are the affordance instead. Same treatment as the criteria/toolbar rails. */
+  scrollbar-width: none; -ms-overflow-style: none;
 }
+body.board .carousel::-webkit-scrollbar { display: none; }
 /* Cards must NOT shrink. The carousel is a flex column with a constrained height now,
    and flex items shrink by default — so every card was squeezed to a ~32px sliver with
    its text clipped and overlapping the next one. Measurements all passed; only the
    screenshot showed it. */
 body.board .carousel > * { flex: 0 0 auto; }
+
+/* ── the fold ──────────────────────────────────────────────────────────────────
+   What the hidden scrollbar gave up: the fact that there is more. A fade pinned to
+   the bottom of the board, dissolving the last card into the sky instead of letting
+   the window edge cut it in half. The gradient runs to --sky-bot — the same variable
+   the page's own bottom is painted with, and the same one atmosphere.js retints
+   through the day, so it never reads as a grey overlay at any hour.
+
+   Hidden by opacity rather than [hidden] so it can fade in and out with the list. */
+.fold {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 96px; z-index: 12;
+  pointer-events: none; /* it must not eat clicks meant for the last card */
+  opacity: 0; transition: opacity 260ms ease;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--sky-bot) 55%, transparent) 45%,
+    color-mix(in srgb, var(--sky-bot) 92%, transparent) 78%,
+    var(--sky-bot) 100%
+  );
+}
+.fold.on { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .fold { transition: none; } }
 .gcard {
   position: relative; width: 100%; overflow: hidden; isolation: isolate;
   display: grid; grid-template-columns: 92px 1fr auto; align-items: start; gap: 14px;
@@ -493,7 +521,9 @@ body.board .halo, body.board .pulse { display: none; }
    anything above it, instead of assuming it starts at the stage's top edge. It does
    not: chat-view is display:contents on the board, so its leftovers still take part in
    the flow, and a fixed 100% pushed the list 34px past the fold. */
-body.board #results-view { margin-top: 0; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* position: relative so the fold can pin itself to the board's bottom edge — which,
+   because the stage owns the viewport, IS the bottom of the screen. */
+body.board #results-view { position: relative; margin-top: 0; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 /* The criteria bar + toolbar stick as ONE group and carry ONE glass plate between
    them. Two reasons: a criteria bar that wraps to a second line can never collide
    with a toolbar pinned at a constant offset, and a single surface means rows
@@ -706,7 +736,10 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   .fit-num { font-size: var(--t-body); }
   .site-header { padding: 12px 14px; }
   body.board #stage { padding: 0 14px 56px; }
-  body.board .boardbar { top: var(--masthead); }
+  /* No `top` here any more. It was the sticky bar's offset; the bar is position:
+     relative now, where a `top` does not pin anything — it just SHIFTS the element
+     down 72px out of its own flow slot, so on phones the bar sat on top of the first
+     card and hid its title while leaving a gap where the bar should have been. */
   body.board .drawer { top: auto !important; bottom: 0; left: 0; transform: none; width: 100%; max-width: 100%; }
   body.board .drawer-body { border-radius: var(--radius) var(--radius) 0 0; max-height: 62vh; }
 

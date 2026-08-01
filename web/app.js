@@ -46,6 +46,7 @@ const el = {
   doorextra: $("#doorextra"),
   chatSay: $("#chat-say"),
   carousel: $("#carousel"),
+  fold: $("#fold"),
   summary: $("#result-summary"),
   loading: $("#loading"),
   empty: $("#empty"),
@@ -102,6 +103,7 @@ const state = {
   filters: { fit: 0, minSalary: 0, facets: {}, agency: false, seen: true },
   sort: "fit",
   view: [], // the current filtered/sorted list the board pages through
+  rendered: 0, // how much of `view` is actually in the DOM (the rest is one scroll away)
   focusIndex: 0, // which job is the big primary card
 };
 function selectedFacets(key) {
@@ -303,6 +305,7 @@ function applyFilters(animateCount) {
   updateFilterCount(list.length);
   show(el.empty, !list.length);
   show(el.carousel, !!list.length);
+  updateFold(); // after the show — a hidden list has no scrollHeight to compare
 }
 
 function tierFor(pct) {
@@ -345,14 +348,60 @@ function cleanSalary(s) {
 // The board is a SCROLLABLE vertical carousel of small cards. Each is compact by
 // default (title · place, salary · posted, fit + rank); click it to expand the full
 // detail (bulleted description + Apply / Pass), click again to collapse. One open at a time.
+// The server now delivers up to RESULT_CAP (200) rows rather than 50, because the
+// filters run in here and 50 rows minus a salary floor minus a work style is not a
+// board. Those rows are all in memory; the DOM gets them a page at a time, so first
+// paint costs the same as it did at 50 and scrolling never hits a build-200-cards
+// stall. No extra request — "load more" is a render, not a fetch.
+const PAGE = 50;
 function renderCarousel() {
-  const list = state.view;
   el.carousel.textContent = "";
-  if (!list.length) return;
-  const frag = document.createDocumentFragment();
-  list.forEach((job, i) => frag.appendChild(buildCard(job, i, list.length)));
-  el.carousel.appendChild(frag);
+  state.rendered = 0;
+  if (!state.view.length) { updateFold(); return; }
+  appendPage();
+  el.carousel.scrollTop = 0; // a new result set starts at its own top, not the old offset
+  // The fold is NOT updated here: this runs while the list is still hidden behind the
+  // loading state, and a hidden element has no scrollHeight to compare — it would
+  // conclude there is nothing below. applyFilters updates it once the list is shown.
 }
+function appendPage() {
+  const list = state.view;
+  const from = state.rendered;
+  const to = Math.min(from + PAGE, list.length);
+  if (to <= from) return false;
+  const frag = document.createDocumentFragment();
+  for (let i = from; i < to; i++) frag.appendChild(buildCard(list[i], i, list.length));
+  el.carousel.appendChild(frag);
+  state.rendered = to;
+  return true;
+}
+
+// ── the fold ─────────────────────────────────────────────────────────────────
+// The fade at the bottom of the list, on whenever there is anything below it and
+// off the moment you reach the end — a permanent fade over the last card would be
+// a hint that there is more when there is not. Three scroll-box properties, no DOM
+// walk, so it is cheap enough to run on every scroll frame.
+function updateFold() {
+  if (!el.fold) return;
+  const c = el.carousel;
+  const bottomGap = c.scrollHeight - (c.scrollTop + c.clientHeight);
+  // Grow the DOM BEFORE the user reaches the end, so the next page is already laid out
+  // by the time it scrolls into view and the list never visibly stops.
+  if (!c.hidden && bottomGap < c.clientHeight && state.rendered < state.view.length) {
+    if (appendPage()) return updateFold(); // re-measure against the taller list
+  }
+  // 2px of slack for sub-pixel layout, which otherwise leaves the last card "0.4px
+  // short" of the edge and the fade permanently lit on a list you have read to the end
+  el.fold.classList.toggle("on", !c.hidden && bottomGap > 2);
+}
+let foldTick = false;
+function scheduleFold() {
+  if (foldTick) return;
+  foldTick = true;
+  requestAnimationFrame(() => { foldTick = false; updateFold(); });
+}
+el.carousel.addEventListener("scroll", scheduleFold, { passive: true });
+window.addEventListener("resize", scheduleFold, { passive: true });
 
 // Split a JD blob into a few readable bullet points — meaty sentences only, skipping
 // the title echoed back and ID-number noise the harvest sometimes leaves in.
@@ -431,6 +480,9 @@ function toggleExpand(node) {
     // after the card has actually grown, not before
     requestAnimationFrame(() => revealCard(node));
   }
+  // a card that grew or shrank moved every card under it — the count is stale until
+  // the new heights are laid out
+  requestAnimationFrame(updateFold);
 }
 
 // Keep an expanded card clear of the sticky header. scrollIntoView({block:"nearest"})
@@ -438,18 +490,24 @@ function toggleExpand(node) {
 // so a card that grew pushed its own title up underneath the header — you clicked a
 // row and the thing you clicked disappeared.
 function revealCard(node) {
-  const header = document.querySelector(".boardbar");
-  const ceiling = header ? header.getBoundingClientRect().bottom : 0;
+  // The LIST scrolls, not the page — window.scrollBy moves nothing here, so a card
+  // that grew past the bottom edge simply stayed cut off. Both bounds come from the
+  // scroll container itself: its top edge is the ceiling (the boardbar sits above it
+  // in flow, so nothing can hide under the header any more), and its bottom edge is
+  // the floor, less the fold's fade when that is showing.
+  const box = el.carousel.getBoundingClientRect();
   const gap = 10;
+  const ceiling = box.top + gap;
+  const floor = box.bottom - (el.fold && el.fold.classList.contains("on") ? 82 : gap);
   const r = node.getBoundingClientRect();
   let dy = 0;
-  if (r.top < ceiling + gap) {
-    dy = r.top - ceiling - gap; // tucked under the header — bring it down
-  } else if (r.bottom > window.innerHeight - gap) {
-    // running off the bottom: scroll up, but never so far that the top hides again
-    dy = Math.min(r.bottom - window.innerHeight + gap, r.top - ceiling - gap);
+  if (r.top < ceiling) {
+    dy = r.top - ceiling; // tucked under the top edge — bring it down
+  } else if (r.bottom > floor) {
+    // running off the bottom: scroll down, but never so far that the title hides
+    dy = Math.min(r.bottom - floor, r.top - ceiling);
   }
-  if (dy) window.scrollBy({ top: dy, behavior: reduceMotion() ? "auto" : "smooth" });
+  if (dy) el.carousel.scrollBy({ top: dy, behavior: reduceMotion() ? "auto" : "smooth" });
 }
 
 // ── the criteria bar: THE HANDOFF ────────────────────────────────────────────
