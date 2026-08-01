@@ -51,6 +51,12 @@
   --t-lead: 20px;
   --t-head: 25px;
   --t-hero: 31px;
+
+  /* The masthead is in normal flow above the front door, so a 100dvh section beneath
+     it hangs exactly that far past the fold and its centre lands low. Measured 72px
+     down to the 560 breakpoint and 68px below it (the applied rail's 44px toggle sets
+     the height now that the nav links are gone). */
+  --masthead: 72px;
 }
 
 * { box-sizing: border-box; }
@@ -202,20 +208,33 @@ button { font: inherit; cursor: pointer; }
    so answering a question never moves the bar. Cancels the stage's asymmetric padding. */
 .chat-view {
   display: grid;
-  /* The bar is the middle auto row, but the rows are DELIBERATELY uneven: a true
-     1fr/1fr centres the bar in the viewport, which pushed the proposition and the
-     proof line into the lower half of the first screen with a large empty sky above
-     them. Weighting the top row lighter lifts the whole group — headline, sub, proof,
-     question, bar — into the upper-middle where a cold visitor actually reads, while
-     the heavier bottom row keeps the starters from crowding the bar. */
-  grid-template-rows: 0.42fr auto 1fr;
+  /* minmax(0,1fr), not 1fr. A bare `1fr` is minmax(AUTO,1fr), so the first row grows
+     to fit the hero and shoves the bar down — measured 73px off centre on desktop and
+     221px on a phone, where the headline wraps to three lines. Flooring the minimum at
+     0 makes the outer rows true equal halves, so the bar sits at the viewport centre
+     regardless of how tall the marketing block above it happens to be. */
+  /* Row 1 is minmax(MIN-CONTENT, 1fr): when the viewport has room the outer rows are
+     equal halves and the bar sits dead centre; when the hero is too tall to fit in half
+     a short screen, row 1 grows to its content instead and the bar drifts down rather
+     than the hero overlapping it. Centred when it can be, never broken when it can't. */
+  grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr);
   justify-items: center;
-  min-height: 100dvh; margin-block: -24px -120px;
+  /* The section spans the FULL viewport, pulled up under the masthead, so its centre
+     IS the viewport centre — anchoring it below the header instead just moved the
+     centre down by the header's height. The hero clears the masthead with padding
+     inside row 1 rather than by offsetting the whole box. */
+  min-height: 100dvh;
+  margin-block: calc(-1 * (var(--masthead) + 24px)) -120px;
 }
 /* the hero and the transcript share row 1 — hero on top, transcript hugging the bar */
+/* The hero rides at the TOP of row 1, not the bottom of it. Those are two different
+   things and only one of them moves the chat: shrinking the grid rows lifts the whole
+   column including the input, whereas flipping this alignment lifts only the marketing
+   block and leaves the bar centred in the viewport where it belongs — the input is the
+   thing a returning user comes for, and it should sit in the same place every time. */
 .doorhead {
-  grid-row: 1; align-self: end; width: 100%;
-  display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+  grid-row: 1; align-self: start; width: 100%; padding-top: var(--masthead);
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
 }
 .transcript {
   width: min(560px, calc(100% - 40px));
@@ -252,6 +271,8 @@ button { font: inherit; cursor: pointer; }
 .rip.run { animation: ripOut 1.7s ease-out forwards; }
 .rip.dub { animation-duration: 1.5s; }
 /* the live conversation block: what was just said + the box + its chips, as one unit */
+.doorextra { width: min(560px, calc(100% - 40px)); margin: 0 auto; }
+.doorextra { width: min(560px, calc(100% - 40px)); margin: 0 auto; }
 .convo { grid-row: 2; width: min(560px, calc(100% - 40px)); }
 /* no outer window — the bar itself is the glass; halo + pulse hug the BAR, not the taller wrap */
 .barwrap { position: relative; }
@@ -676,6 +697,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 }
 
 @media (max-width: 560px) {
+  :root { --masthead: 68px; }
   .split { grid-template-columns: 1fr; }
   .drawer { top: auto; bottom: 0; width: 100%; max-width: 100%; }
   .drawer-body { transform: translateY(100%); border-radius: var(--radius) var(--radius) 0 0; }
