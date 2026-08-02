@@ -687,10 +687,36 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     return await chatmod.turn(messages, current, refining=refining)
 
 
+def _code_sha() -> str:
+    """The commit THIS process is running, resolved once at import.
+
+    The server is the only thing that knows which checkout it was started from. A
+    measurement harness reading git from its own directory records where the SCRIPT
+    lives, not where the CODE came from — which silently mislabels every run made
+    against a worktree, exactly the setup the three-version comparison depends on.
+    """
+    import subprocess
+
+    try:
+        return subprocess.run(
+            ["git", "-C", str(Path(__file__).parent.parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+CODE_SHA = _code_sha()
+
+
 @app.get("/api/meta")
 def meta() -> dict:
-    """Pool freshness for the UI (how many jobs, newest posting)."""
-    return {"count": store.pool_size(), "harvested_at": store.newest_posted()}
+    """Pool freshness for the UI (how many jobs, newest posting) + which build is live."""
+    return {
+        "count": store.pool_size(),
+        "harvested_at": store.newest_posted(),
+        "code_sha": CODE_SHA,
+    }
 
 
 @app.get("/api/health")
