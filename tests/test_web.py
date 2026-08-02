@@ -286,9 +286,18 @@ def test_exact_title_with_no_body_outranks_a_keyword_stuffed_off_title_listing(
     assert titles[0] == "Senior Principal Forward Deployed AI Engineer"
 
 
-def test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence(client, monkeypatch):
-    """Two identical titles, one with a body and one without, must score close — the
-    body-less row is missing evidence, not failing it."""
+def test_a_missing_body_simply_earns_no_boost_points(client, monkeypatch):
+    """Replaces test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence.
+
+    The old test asserted that a body-less listing was IMPUTED neutral boost credit, on
+    the stated premise that "Greenhouse rows arrive body-less". Measured against the
+    39,597-row corpus, Greenhouse has ZERO body-less rows (only 46 SmartRecruiters and 12
+    Lever do), so the premise was false and NO_BODY_PRIOR was compensating for a problem
+    that did not exist.
+
+    The scoreboard is honest instead: no body means no boost evidence, so no boost points.
+    The title still carries the listing, which is the whole reason the title is the anchor.
+    """
     _seed(
         [
             _job("Data Engineer", text="", company="NoBody Corp", url="https://x/nb"),
@@ -307,20 +316,33 @@ def test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence(client, monke
         "/api/score",
         json={"titles": ["data engineer"], "boosts": ["python", "postgres"]},
     ).json()
-    by_company = {j["company"]: j["fit_score"] for j in d["jobs"]}
-    assert len(by_company) == 2
-    # the bodied row may still win, but not by the whole boost ceiling
-    assert by_company["HasBody Corp"] - by_company["NoBody Corp"] < server.BOOST_MAX
+    by_company = {j["company"]: j["points"] for j in d["jobs"]}
+    # Both are an exact title match; only the one with evidence earns boost points.
+    assert by_company["NoBody Corp"] == 100, "exact title alone"
+    assert by_company["HasBody Corp"] == 116, "exact title + two boosts at one hit each"
 
 
-def test_boost_swing_is_capped_regardless_of_how_many_boosts_are_given(client):
-    """Adding more boosts must sharpen the signal, not raise the ceiling — the cap is
-    what keeps BM25 relevance meaningful (and what makes 'more boosts is better' false)."""
-    body = " ".join(f"term{i}" for i in range(12))
-    title = "engineer"
-    assert server._boost_bonus(title, body, ["term0"]) <= server.BOOST_MAX
-    many = server._boost_bonus(title, body, [f"term{i}" for i in range(12)])
-    assert many <= server.BOOST_MAX
+def test_more_boosts_can_never_lower_a_score(client):
+    """Replaces test_boost_swing_is_capped_regardless_of_how_many_boosts_are_given.
+
+    The old cap existed to stop nine boosts swamping relevance. It also produced the
+    perverse result that made the cap worth removing: because the bonus was a FRACTION of
+    the boosts given, a listing matching 3 of 14 boosts scored LOWER than one matching
+    0 of 0 — so the interview's own advice ("name as many skills as you can think of")
+    punished everyone who followed it.
+
+    The scoreboard promises the opposite, and this is that promise as a test: evidence
+    only ever adds, so naming another skill can never cost you.
+    """
+    title, company, body = "data engineer", "acme", "python postgres airflow kafka spark"
+    prev = -1
+    for n in range(0, 6):
+        boosts = ["python", "postgres", "airflow", "kafka", "spark"][:n]
+        pts = server.scoreboard(title, company, body, ["data engineer"], boosts, [])["points"]
+        assert pts >= prev, f"adding a boost lowered the score at n={n}"
+        prev = pts
+    # And nothing is capped: five matching boosts are worth five boosts.
+    assert prev == 100 + 5 * 8
 
 
 def test_exclude_matches_the_company_not_just_the_title(client, monkeypatch):

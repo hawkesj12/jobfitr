@@ -35,7 +35,7 @@ from slowapi.util import get_remote_address
 from . import chat as chatmod
 from . import live, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
-from .match import norm_key
+from .match import has_term, norm_key, term_hits, title_points
 from .snapshot import load_dotenv
 
 _ET = ZoneInfo("America/New_York")
@@ -99,22 +99,38 @@ SNIPPET_CHARS = 240
 DESC_CHARS = 1200
 CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized rerank
 
-# Rerank weights (in BM25 units, ~0-5): a boost match nudges up, a rank_down sinks.
-# BOOST_MAX is the TOTAL boost swing available to any one listing, no matter how many
-# boosts the user entered. A flat per-match bonus made the swing scale with the boost
-# count (nine boosts = up to +18), which swamped BM25 relevance entirely and let a
-# keyword-stuffed off-title listing outrank an exact-title one. Capping the total keeps
-# boosts a nudge on top of relevance instead of a replacement for it.
-BOOST_MAX = 4.0
-# A boost in the TITLE is strong evidence; one buried in the body is weaker.
-TITLE_CREDIT = 1.0
-BODY_CREDIT = 0.5
-# A listing with NO body is missing evidence, not lacking it. Scoring an absent body as
-# zero matches punished whole sources (Greenhouse rows arrive body-less) for something
-# they never had a chance to carry, so the unobserved portion is imputed at a neutral
-# rate rather than counted against them.
-NO_BODY_PRIOR = 0.5
-PENALTY_W = 3.0
+# ── the scoreboard ────────────────────────────────────────────────────────────
+# A listing's score is a plain integer a person can read off the card and check:
+#
+#     points = title tier  +  Σ boost points  −  20 × penalty hits
+#
+# It replaced `bm25 + boost_bonus − penalties`, a float with two defects. First it was
+# unreadable — nobody could say why a job scored 4.31. Second, and worse, the boost half
+# was a FRACTION of the boosts the user gave, so a listing matching 3 of 14 boosts scored
+# LOWER than one matching 0 of 0. The interview tells people to name as many skills as
+# they can think of; the scorer then punished everyone who did.
+#
+# A scoreboard has neither problem. Nothing is earned except by evidence, and evidence
+# only ever adds — so naming another skill can never cost you.
+#
+# BM25 is deliberately absent. It is still what decides which 500 candidates exist; it is
+# no longer part of what a job is WORTH.
+BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term → 20 max
+# Penalties read the BODY as well as the title and company, weighted by where the tell
+# appears. An earlier version scored title+company only, on the measured grounds that
+# "senior" is 18.8% of bodies and "sales" 13.1% — but those are EXCLUDE terms, which hide
+# a listing, not rank_down terms, which sink it. Measured against the rank_down terms the
+# 57 test users actually use, the worst is "our client" at 4.1% of bodies and the most
+# popular ("staffing", 14 users) is 0.5%.
+#
+# And three of the clearest agency tells — "our client", "consultancy", "staff
+# augmentation" — appear in ZERO titles or company names. A title-only rule caught none
+# of them, which is precisely the listing type users are asking to sink.
+#
+# One hit per term, strongest wins: a term in the title/company does NOT also collect the
+# body penalty.
+PENALTY_TITLE = 30  # the tell is in the title or the employer's own name
+PENALTY_BODY = 15  # the tell is buried in the description
 # min_score keyword → keep candidates scoring >= frac × the top result's score.
 MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
 
@@ -322,7 +338,7 @@ def _fit_pcts(scores: list) -> list:
     ]
 
 
-def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
+def _shape(c: dict, points: int, why: str, fit_pct: int, parts: list) -> dict:
     """The lean per-card payload the front end renders (store row → card)."""
     body = c.get("body") or c.get("text") or ""
     # the derived facet tags (real facets category/employment_type sit in their own keys)
@@ -338,8 +354,12 @@ def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
         "category": _norm_category(c.get("category")),
         "employment_type": _norm_employment_type(c.get("employment_type")),
         "tags": tags,
-        "fit_score": fit_score,  # the reranked score (canonical)
-        "fit_pct": fit_pct,  # derived gauge value (presentation only)
+        "points": points,  # THE score — an absolute integer, the same meaning every day
+        "parts": parts,  # what earned it: [(label, delta)] — the receipt under the number
+        # fit_score/fit_pct are the outgoing relative gauge, kept only so the current
+        # card keeps rendering until 1.5 rewires it. Both leave in 1.4.
+        "fit_score": points,
+        "fit_pct": fit_pct,
         "why": why,  # the title/boost signals that matched
         "snippet": _snippet(body),
         "description": _description(body),
@@ -408,26 +428,74 @@ def _dedupe_listings(candidates: list) -> list:
     return out
 
 
-def _boost_bonus(title: str, body: str, boosts: list) -> float:
-    """The capped, evidence-weighted boost bonus for one listing.
+# ═══════════════════════════════════════════════════════════════
+# scoreboard()
+# ═══════════════════════════════════════════════════════════════
+# Score one listing and SHOW THE WORKING. Returns the total plus the
+# parts that made it, because the parts are the deliverable: the card
+# renders them as the receipt under the number, and the arithmetic
+# tests read them to prove each component independently. A scorer
+# that returned one opaque integer would make both impossible.
+#
+# Where each signal is read from is measured, not assumed:
+#   BOOSTS  → title + body. "rag" appears in 42 titles and 4,274
+#             bodies; "fastapi" in 0 titles and 11. The signal lives
+#             in the body, and repetition is real evidence — a posting
+#             naming RAG twenty times is more about RAG than one that
+#             mentions it once.
+#   PENALTIES → title + company ONLY. Whole-word in bodies, "senior"
+#             is 18.8% of the corpus and "sales" 13.1% — ordinary
+#             prose, not signals. Penalising on the body would sink
+#             a fifth of every board for saying "senior engineer".
+#
+# Freshness is absent by design. A three-day-old wrong job is not a
+# better fit than a month-old perfect one; recency is a filter.
+# ═══════════════════════════════════════════════════════════════
+def scoreboard(
+    title: str, company: str, body: str, titles: list, boosts: list, penalties: list
+) -> dict:
+    parts: list[tuple[str, int]] = []
 
-    Returns a value in [0, BOOST_MAX] scaled by the FRACTION of the user's boosts the
-    listing matches — not a flat sum per match — so adding more boosts sharpens the
-    signal instead of inflating the ceiling.
-    """
-    terms = [x for x in boosts if x]
-    if not terms:
-        return 0.0
-    has_body = bool(body.strip())
-    credit = 0.0
-    for x in terms:
-        if x in title:
-            credit += TITLE_CREDIT
-        elif has_body and x in body:
-            credit += BODY_CREDIT
-        elif not has_body:
-            credit += BODY_CREDIT * NO_BODY_PRIOR  # unobserved, not absent
-    return BOOST_MAX * min(1.0, credit / len(terms))
+    # Title: the BEST single tier against the best-matching title the user gave.
+    # Tiers do not stack and titles do not add — one role, one score.
+    title_pts = max((title_points(t, title) for t in titles if t), default=0)
+    if title_pts:
+        parts.append(("title", title_pts))
+
+    boost_pts = 0
+    for term in boosts:
+        if not term:
+            continue
+        hits = term_hits(term, f"{title} {body}")
+        if not hits:
+            continue
+        # Diminishing per occurrence: the 5th mention says little the 4th did not,
+        # and the decay is what stops a term like "data" — 46% of the corpus —
+        # from running away with the board on sheer repetition.
+        pts = sum(BOOST_DECAY[:hits])
+        boost_pts += pts
+        parts.append((f"{term} ×{hits}", pts))
+
+    penalty_pts = 0
+    for term in penalties:
+        if not term:
+            continue
+        if has_term(term, f"{title} {company}"):
+            hit = PENALTY_TITLE  # naming itself a staffing firm is the strongest tell
+        elif has_term(term, body):
+            hit = PENALTY_BODY  # "our client…" buried in the description
+        else:
+            continue
+        penalty_pts += hit
+        parts.append((term, -hit))
+
+    return {
+        "points": title_pts + boost_pts - penalty_pts,
+        "title_points": title_pts,
+        "boost_points": boost_pts,
+        "penalty_points": penalty_pts,
+        "parts": parts,
+    }
 
 
 def _rank(
@@ -441,10 +509,14 @@ def _rank(
     max_age_days,
     limit,
 ):
-    """Personalized rerank over BM25 candidates: relevance + boosts − penalties,
-    hard-filtered by exclude/remote/age, cut relative to the top score by pickiness."""
+    """Score the BM25 candidates on the scoreboard, hard-filtered by
+    exclude/remote/age, cut relative to the top score by pickiness.
+
+    The tuple is (candidate, points, why, parts). It stays POSITIONAL on purpose:
+    _spread_companies indexes item[0] and the sort reads t[1], so widening it from
+    three to four costs them nothing.
+    """
     scored = []
-    why_terms = [t for t in (titles + boosts) if t]
     for c in candidates:
         title = (c.get("title") or "").lower()
         # Exclusions test the COMPANY as well as the title: "recruiting agency" is an
@@ -458,15 +530,18 @@ def _rank(
         if age is not None and age > max_age_days:
             continue
         body = (c.get("body") or "").lower()
-        blob = f"{title} {body}"
-        bonus = _boost_bonus(title, body, boosts)
-        pen = sum(PENALTY_W for x in penalties if x and x in blob)
-        final = float(c.get("bm25", 0.0)) + bonus - pen
-        why = ", ".join([t for t in why_terms if t in blob][:4])
-        scored.append((c, final, why))
+        board = scoreboard(
+            title, (c.get("company") or "").lower(), body, titles, boosts, penalties
+        )
+        # `why` is built FROM the parts, not computed separately. It used to test
+        # `term in blob` — the same substring bug removed from scoring — so boosting
+        # "rag" listed "rag" as a matched signal because "leverage" contains it. One
+        # computation now feeds both the number and the chips that explain it.
+        why = ", ".join(label for label, _ in board["parts"][:4])
+        scored.append((c, board["points"], why, board["parts"]))
     scored.sort(key=lambda t: t[1], reverse=True)
     scored = _spread_companies(scored)
-    top = scored[0][1] if scored else 0.0
+    top = scored[0][1] if scored else 0
     floor = top * MIN_SCORE_FRAC.get(min_score_key, 0.35) if top > 0 else -1e18
     return [x for x in scored if x[1] >= floor][:limit], top
 
@@ -556,10 +631,10 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         tier = {"max_age_days": max_age, "min_score": min_key}
         if len(kept) >= TARGET_RESULTS:  # …but judge sufficiency on the first 50
             break
-    pcts = _fit_pcts([final for _, final, _ in kept])
+    pcts = _fit_pcts([points for _, points, _, _ in kept])
     results = [
-        _shape(c, round(final), why, pct)
-        for (c, final, why), pct in zip(kept, pcts, strict=True)
+        _shape(c, points, why, pct, parts)
+        for (c, points, why, parts), pct in zip(kept, pcts, strict=True)
     ]
     # Count facets over NORMALIZED rows so the counts match the chips the cards produce.
     # Normalizing on a copy (not the shaped result) keeps remote/seniority/salary_band,
@@ -571,7 +646,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
                 "category": _norm_category(c.get("category")),
                 "employment_type": _norm_employment_type(c.get("employment_type")),
             }
-            for c, _, _ in kept
+            for c, _, _, _ in kept
         ]
     )
     return {

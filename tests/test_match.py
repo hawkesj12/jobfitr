@@ -80,12 +80,12 @@ def test_empty_and_missing_inputs_are_safe():
 WANT = "Senior AI Product Builder"
 
 TIERS = [
-    ("Senior AI Product Builder", 50, "exact"),
-    ("senior  ai   product builder", 50, "exact after normalisation"),
-    ("AI Product Builder, Senior", 40, "all words, any order"),
-    ("Staff AI Product Builder", 30, "core role, different seniority"),
-    ("Principal AI Product Builder", 30, "core role, different seniority"),
-    ("AI Product Manager", 15, "related — 2 of 4 words"),
+    ("Senior AI Product Builder", 100, "exact"),
+    ("senior  ai   product builder", 100, "exact after normalisation"),
+    ("AI Product Builder, Senior", 80, "all words, any order"),
+    ("Staff AI Product Builder", 60, "core role, different seniority"),
+    ("Principal AI Product Builder", 60, "core role, different seniority"),
+    ("AI Product Manager", 30, "related — 2 of 4 words"),
     ("Registered Nurse", 0, "unrelated"),
     ("", 0, "empty job title"),
 ]
@@ -99,8 +99,19 @@ def test_title_tiers(job, pts, why):
 
 
 def test_tiers_do_not_stack():
-    """An exact match scores 50, not 50+40+30 — the best single tier only."""
-    assert title_points(WANT, WANT) == 50
+    """An exact match scores 100, not 100+80+60 — the best single tier only."""
+    assert title_points(WANT, WANT) == 100
+
+
+def test_title_outweighs_a_keyword_stuffed_body():
+    """The regression that forced the doubling: an exact title must beat a listing with
+    NO title match whose body merely repeats the user's boost terms.
+
+    Observed in production — a $235-315k exact-title role ranked below a $94,876
+    off-title listing. At the old 50/40/30/15 values only 7 single-occurrence boosts
+    were needed to overturn an exact title; it now takes 13.
+    """
+    assert title_points(WANT, WANT) > 8 * 12  # 12 boosts, one occurrence each
 
 
 def test_empty_user_title_scores_nothing():

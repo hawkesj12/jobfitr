@@ -65,10 +65,22 @@ SENIORITY_PREFIXES = (
     "jr",
 )
 
-_TIER_EXACT = 50
-_TIER_ALL_WORDS = 40
-_TIER_CORE = 30
-_TIER_RELATED = 15
+# Doubled from 50/40/30/15 on 2026-08-02. The original values let a listing with NO
+# title match at all out-score a perfect one: a "Consultant" whose body repeated all nine
+# of a user's boost terms scored 64 against an exact-title $235-315k role's 40. Boosts are
+# meant to be a bonus ON TOP of wanting the role, not a substitute for it, and at the old
+# values only 7 single-occurrence boosts were needed to overwhelm an exact title.
+#
+# Doubling makes the title the anchor it is supposed to be — an exact match now needs 13
+# such boosts to be overturned, which covers 39 of the 57 test users outright. It does NOT
+# fully close the gap for the 18 users who give 9+ boosts, and that residual is deliberate:
+# whether a heavily-matching listing with an unrecognisable title is a keyword-stuffed
+# impostor or a genuinely good job under an odd name is not something the arithmetic can
+# see. That is what the judged comparison is for.
+_TIER_EXACT = 100
+_TIER_ALL_WORDS = 80
+_TIER_CORE = 60
+_TIER_RELATED = 30
 _TIER_NONE = 0
 
 # Fraction of the user's title words a job title must carry to count as a related role.
