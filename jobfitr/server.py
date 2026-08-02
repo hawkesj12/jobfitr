@@ -35,6 +35,7 @@ from slowapi.util import get_remote_address
 from . import chat as chatmod
 from . import live, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
+from .match import norm_key
 from .snapshot import load_dotenv
 
 _ET = ZoneInfo("America/New_York")
@@ -377,13 +378,6 @@ def _spread_companies(scored: list, cap: int | None = None) -> list:
     return keep
 
 
-def _norm_key(value) -> str:
-    """Lowercase + collapse whitespace/punctuation, for identity comparison."""
-    return " ".join(
-        "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
-    ).lower()
-
-
 def _dedupe_listings(candidates: list) -> list:
     """Collapse rows that are the same job posted twice, keeping the richest one.
 
@@ -401,7 +395,7 @@ def _dedupe_listings(candidates: list) -> list:
     best: dict[tuple[str, str], int] = {}
     out: list = []
     for c in candidates:
-        key = (_norm_key(c.get("company")), _norm_key(c.get("title")))
+        key = (norm_key(c.get("company")), norm_key(c.get("title")))
         if not any(key):  # no company AND no title — nothing to dedup on
             out.append(c)
             continue

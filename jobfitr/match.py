@@ -1,0 +1,194 @@
+"""Term matching and title tiering — the foundation the whole scoreboard stands on.
+
+Pure stdlib, no project imports, so it is unit-testable without a server and so the
+scoring rewrite that consumes it stays a separate, reviewable change.
+
+WHY THIS MODULE EXISTS. The matcher it replaces was a plain substring test
+(`if term in title`). Measured against the 39,597-row corpus, a user boosting "rag" —
+retrieval-augmented generation, the thing Atlas actually is — matched 6,958 listings of
+which 171 were real. 97.3% false, almost all of them the word "leverage", plus "storage"
+and "coverage". Every AI job description says "leverage". The boost was doing nothing but
+adding noise, and every number computed downstream of it inherited that noise.
+
+WHY WHOLE-WORD + PLURAL, AND NOT PORTER STEMMING. Four strategies were measured on the
+same corpus. Substring is catastrophic. Whole-word alone is too strict — it rejects
+"stakeholders" and loses 83% of genuine `stakeholder` matches. Porter stemming and
+whole-word+plural tie on everything that matters:
+
+    term          substring   whole-word   word+plural   Porter
+    rag               6,958          171           171      171
+    stakeholder       3,269          559         3,259    3,264
+    warehouse           719          539           719      724
+    startup           2,378        1,083         2,377    2,377
+    icu               1,443           15            15       15
+    excel             4,624          498           646    4,596   <-- the tiebreaker
+    agent             4,324        1,167         3,263    4,292
+
+`excel` decides it: Porter stems "excellent" to "excel", so a user boosting the
+spreadsheet would match 4,596 rows instead of 646 — reintroducing the exact 89%-false
+failure being removed here. (`excel` is a live boost in the test corpus.) The only thing
+Porter wins is `agent`, where it also catches "agentic"; that miss is accepted, and a
+user who wants agentic systems can type "agentic".
+
+The result needs no stemmer dependency and no exception list.
+"""
+
+from __future__ import annotations
+
+import re
+
+__all__ = [
+    "SENIORITY_PREFIXES",
+    "has_term",
+    "norm_key",
+    "term_hits",
+    "term_pattern",
+    "title_points",
+]
+
+# A term shorter than this gets no plural suffix. "icu" + "s" would match "icus", which is
+# harmless, but the guard keeps very short terms from growing surprising surface area.
+_MIN_PLURAL_LEN = 4
+
+# Leading words stripped from BOTH sides before the core-role comparison, so that
+# "Senior AI Product Builder" and "Staff AI Product Builder" are recognised as the same
+# role at a different level rather than as unrelated titles.
+SENIORITY_PREFIXES = (
+    "head of",
+    "director of",
+    "senior",
+    "staff",
+    "principal",
+    "junior",
+    "lead",
+    "sr",
+    "jr",
+)
+
+_TIER_EXACT = 50
+_TIER_ALL_WORDS = 40
+_TIER_CORE = 30
+_TIER_RELATED = 15
+_TIER_NONE = 0
+
+# Fraction of the user's title words a job title must carry to count as a related role.
+# A defensible default, NOT a measured one — the calibration pass is what tunes it.
+_RELATED_FRACTION = 0.5
+
+_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# norm_key()
+# ═══════════════════════════════════════════════════════════════
+# Lowercase + collapse whitespace/punctuation, for identity comparison.
+# Moved here from server.py so the matcher and the deduper share one
+# normaliser instead of drifting apart.
+# ═══════════════════════════════════════════════════════════════
+def norm_key(value) -> str:
+    return " ".join(
+        "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
+    ).lower()
+
+
+# ═══════════════════════════════════════════════════════════════
+# term_pattern()
+# ═══════════════════════════════════════════════════════════════
+# Compile a search term into a whole-word regex that also accepts a
+# plural. Multi-word terms match as a PHRASE — the words joined by
+# whitespace, with the suffix applied to the last word only. Matching
+# them independently would count "warehouse ... automation" scattered
+# across a paragraph as a hit and inflate every downstream number.
+# Cached, because the same handful of terms is tested against tens of
+# thousands of listings per request.
+# ═══════════════════════════════════════════════════════════════
+def term_pattern(term: str) -> re.Pattern[str] | None:
+    key = norm_key(term)
+    if not key:
+        return None
+    cached = _PATTERN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    words = key.split()
+    body = r"\s+".join(re.escape(w) for w in words[:-1] + [words[-1]])
+    if len(words[-1]) >= _MIN_PLURAL_LEN:
+        body += r"(?:s|es)?"
+    pattern = re.compile(rf"\b{body}\b", re.IGNORECASE)
+    _PATTERN_CACHE[key] = pattern
+    return pattern
+
+
+# ═══════════════════════════════════════════════════════════════
+# term_hits()
+# ═══════════════════════════════════════════════════════════════
+# How many times the term occurs in the text. Occurrences are what the
+# scoreboard's 8/6/4/2 decay reads: a listing that names RAG twenty
+# times is more about RAG than one that mentions it once, and that is
+# real signal rather than length noise.
+# Non-overlapping (re.finditer); only the first four occurrences carry
+# any points, so overlap semantics are not load-bearing.
+# ═══════════════════════════════════════════════════════════════
+def term_hits(term: str, text: str) -> int:
+    pattern = term_pattern(term)
+    if pattern is None or not text:
+        return 0
+    return sum(1 for _ in pattern.finditer(text))
+
+
+# ═══════════════════════════════════════════════════════════════
+# has_term()
+# ═══════════════════════════════════════════════════════════════
+# Presence test. Short-circuits on the first hit rather than counting
+# them all — used by the penalty path, which only cares whether the
+# term is there.
+# ═══════════════════════════════════════════════════════════════
+def has_term(term: str, text: str) -> bool:
+    pattern = term_pattern(term)
+    if pattern is None or not text:
+        return False
+    return pattern.search(text) is not None
+
+
+def _strip_seniority(normalised: str) -> str:
+    """Drop one leading seniority marker. Applied to both sides of a comparison."""
+    for prefix in SENIORITY_PREFIXES:
+        if normalised.startswith(prefix + " "):
+            return normalised[len(prefix) + 1 :]
+    return normalised
+
+
+# ═══════════════════════════════════════════════════════════════
+# title_points()
+# ═══════════════════════════════════════════════════════════════
+# Score one job title against one title the user asked for, on a fixed
+# five-tier scale. Returns the BEST single tier — tiers do not add, so a
+# listing cannot collect 50 and 40 and 30 for the same title.
+#
+# Mechanical by design: no similarity model, no embedding, no judgment
+# call. Users supply their own related titles via the interview's
+# related-title chips, so the ranker never has to guess what counts as
+# "close enough".
+# ═══════════════════════════════════════════════════════════════
+def title_points(user_title: str, job_title: str) -> int:
+    want = norm_key(user_title)
+    got = norm_key(job_title)
+    if not want or not got:
+        return _TIER_NONE
+
+    if want == got:
+        return _TIER_EXACT
+
+    want_words = want.split()
+    got_words = set(got.split())
+
+    if all(w in got_words for w in want_words):
+        return _TIER_ALL_WORDS
+
+    if _strip_seniority(want) == _strip_seniority(got):
+        return _TIER_CORE
+
+    overlap = sum(1 for w in want_words if w in got_words)
+    if overlap / len(want_words) >= _RELATED_FRACTION:
+        return _TIER_RELATED
+
+    return _TIER_NONE
