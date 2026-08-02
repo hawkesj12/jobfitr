@@ -97,12 +97,11 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
 SNIPPET_CHARS = 240
 DESC_CHARS = 1200
-CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized rerank
 
 # ── the scoreboard ────────────────────────────────────────────────────────────
 # A listing's score is a plain integer a person can read off the card and check:
 #
-#     points = title tier  +  Σ boost points  −  20 × penalty hits
+#     points = title tier  +  Σ boost points  −  penalties (30 title/company, 15 body)
 #
 # It replaced `bm25 + boost_bonus − penalties`, a float with two defects. First it was
 # unreadable — nobody could say why a job scored 4.31. Second, and worse, the boost half
@@ -113,8 +112,8 @@ CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized r
 # A scoreboard has neither problem. Nothing is earned except by evidence, and evidence
 # only ever adds — so naming another skill can never cost you.
 #
-# BM25 is deliberately absent. It is still what decides which 500 candidates exist; it is
-# no longer part of what a job is WORTH.
+# BM25 is deliberately absent. It is still what ORDERS the candidates coming out of FTS5;
+# it is no longer part of what a job is WORTH.
 BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term → 20 max
 # Penalties read the BODY as well as the title and company, weighted by where the tell
 # appears. An earlier version scored title+company only, on the measured grounds that
@@ -131,38 +130,42 @@ BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term →
 # body penalty.
 PENALTY_TITLE = 30  # the tell is in the title or the employer's own name
 PENALTY_BODY = 15  # the tell is buried in the description
-# min_score keyword → keep candidates scoring >= frac × the top result's score.
-MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
 
-# Deterministic freshness/pickiness ladder — replaces the "how picky?" + recency
-# questions. Start tight (fresh + strong), relax only as far as needed to reach TARGET
-# results. (max_age_days, min_score), tight → loose.
+# ── the one cap left, and why the other four are gone ────────────────────────
 #
-# TARGET_RESULTS and RESULT_CAP are two different jobs that used to be one number, and
-# conflating them capped the board at 50 rows:
+# RESULT_CAP is the DELIVERY slice: how many scored rows we hand the client. It is about
+# BANDWIDTH, not taste — 200 rows cost 54.6 KB gzipped, and the tail is what the board's
+# own salary/work-style filters eat. It is the only limit the server still imposes.
 #
-#   TARGET_RESULTS — the SUFFICIENCY bar. "Has this tier found enough?" Raising it does
-#   not give you more results, it makes the ladder relax further to hit a bigger number
-#   — trading fresh+strong for old+weak. It stays at 50 on purpose.
+# Four other mechanisms used to sit between the score and the user. Measured across the
+# 57 test users, together they withheld 4,766 of 7,995 already-scored listings — 60% of
+# the board, computed and then thrown away:
 #
-#   RESULT_CAP — the DELIVERY slice. How many of the winning tier's rows we actually
-#   hand the client. Nothing about tier selection changes when this moves; the same
-#   tier wins, we just stop throwing away its tail.
+#   RESULT_LADDER    five re-ranking passes over the same pool, tightening freshness and
+#                    pickiness until ~50 results were found. 34 of 57 users fell all the
+#                    way to the loosest rung — whose floor is 0.0 — and still averaged 22
+#                    results. Five passes to arrive at "don't filter."
 #
-# The tail is what the client-side filters eat. A user who filters 50 rows by salary
-# and work style is left with a handful; the same filters over 200 still leave a board.
-TARGET_RESULTS = 50
+#   MIN_SCORE_FRAC   kept only candidates scoring above a fraction of the TOP score. Being
+#                    relative to the top made it read the score SCALE: when the scorer
+#                    moved from floats to integers, the rung distribution shifted from 8
+#                    to 14 users on the strictest tier with retrieval byte-identical. A
+#                    filter that moves when an unrelated number moves cannot be reasoned
+#                    about. Pickiness is the board's fit slider now.
+#
+#   MAX_PER_COMPANY  capped one employer's contribution — by DROPPING their listings past
+#                    the 4th, not demoting them. It was solving a real problem (Anduril
+#                    has 1,063 rows, VHA 915) with an instrument that deletes evidence
+#                    invisibly. If one employer dominates a board, the user should be able
+#                    to SEE that and filter it, not have it quietly corrected.
+#
+#   CANDIDATE_LIMIT  scored only the top 500 BM25 candidates. Retrieval was deciding what
+#                    the ranker was allowed to consider. Scoring is deterministic Python
+#                    and it is cheap: uncapped, the widest user in the fixture is 5,129
+#                    rows in 1.14s (fetch + score). Cost tracks boost count × body length
+#                    rather than row count — the 6,012-row user scores FASTER — so a row
+#                    limit was never protecting the expensive thing anyway.
 RESULT_CAP = int(os.environ.get("JOBFITR_RESULT_CAP", "200"))
-# Most results one employer may contribute to the front of the board. See
-# _spread_companies — this is a reordering, not a filter, so nothing is ever hidden.
-MAX_PER_COMPANY = int(os.environ.get("JOBFITR_MAX_PER_COMPANY", "4"))
-RESULT_LADDER = [
-    (15, "strong"),
-    (30, "strong"),
-    (30, "balanced"),
-    (60, "balanced"),
-    (90, "plenty"),
-]
 
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
@@ -366,38 +369,6 @@ def _shape(c: dict, points: int, why: str, fit_pct: int, parts: list) -> dict:
     }
 
 
-def _spread_companies(scored: list, cap: int | None = None) -> list:
-    """Drop each employer's roles beyond `cap` so no one company monopolises the board.
-
-    Ranking by score alone is fine when the biggest employer has a handful of roles.
-    It stops being fine at scale: the pool carries employers with 900+ open jobs
-    (Veterans Health Administration) and 600+ (Accenture Federal Services), and a
-    title that matches them well would otherwise hand a user fifty near-identical rows
-    from one company. That reads as a broken search, not a thorough one.
-
-    This DROPS the overflow rather than demoting it. An earlier version pushed the
-    excess to the back of the list, but the caller then truncates to a fixed window
-    (`_rank` does `[:limit]`), and for a shallow query the truncation sliced straight
-    back into that demoted overflow — so "nurse" showed 19 of 50 rows from one
-    employer. Dropping is also what lets the RESULT_LADDER work: a capped set that
-    comes up short is the honest signal that makes the ladder relax and pull a more
-    diverse set, instead of being silently padded back to full by the dominant
-    employer. A user who wants only that employer searches more specifically.
-    """
-    cap = MAX_PER_COMPANY if cap is None else cap
-    if cap <= 0:
-        return scored
-    seen: dict[str, int] = {}
-    keep = []
-    for item in scored:
-        company = (item[0].get("company") or "").strip().lower()
-        n = seen.get(company, 0) + 1
-        seen[company] = n
-        if n <= cap:
-            keep.append(item)
-    return keep
-
-
 def _dedupe_listings(candidates: list) -> list:
     """Collapse rows that are the same job posted twice, keeping the richest one.
 
@@ -504,17 +475,23 @@ def _rank(
     boosts,
     penalties,
     exclude,
-    min_score_key,
     remote_only,
     max_age_days,
     limit,
 ):
-    """Score the BM25 candidates on the scoreboard, hard-filtered by
-    exclude/remote/age, cut relative to the top score by pickiness.
+    """Score every candidate on the scoreboard, hard-filtered by exclude/remote/age,
+    sorted by points, sliced to `limit`.
 
-    The tuple is (candidate, points, why, parts). It stays POSITIONAL on purpose:
-    _spread_companies indexes item[0] and the sort reads t[1], so widening it from
-    three to four costs them nothing.
+    ONE pass. It used to run five times over the same pool under a freshness/pickiness
+    ladder, then cut everything below a fraction of the top score, then drop each
+    employer's roles past the fourth. All three are gone — the only thing between a
+    listing's score and the user is now `limit`, which is a bandwidth decision.
+
+    The three filters that remain are the ones the USER asked for: terms they said to
+    hide, remote-only if they chose it, and their own recency preference.
+
+    The tuple is (candidate, points, why, parts) and stays POSITIONAL: the sort reads
+    t[1] and the caller unpacks all four.
     """
     scored = []
     for c in candidates:
@@ -526,9 +503,13 @@ def _rank(
             continue
         if remote_only and c.get("remote") != "remote":
             continue
-        age = age_int(c.get("posted", ""))
-        if age is not None and age > max_age_days:
-            continue
+        # `None` means the user never expressed a recency preference, so we do not
+        # invent one. The old ladder always imposed an age — 90 days at its loosest —
+        # which meant nothing older was reachable no matter what anyone wanted.
+        if max_age_days is not None:
+            age = age_int(c.get("posted", ""))
+            if age is not None and age > max_age_days:
+                continue
         body = (c.get("body") or "").lower()
         board = scoreboard(
             title, (c.get("company") or "").lower(), body, titles, boosts, penalties
@@ -540,10 +521,8 @@ def _rank(
         why = ", ".join(label for label, _ in board["parts"][:4])
         scored.append((c, board["points"], why, board["parts"]))
     scored.sort(key=lambda t: t[1], reverse=True)
-    scored = _spread_companies(scored)
     top = scored[0][1] if scored else 0
-    floor = top * MIN_SCORE_FRAC.get(min_score_key, 0.35) if top > 0 else -1e18
-    return [x for x in scored if x[1] >= floor][:limit], top
+    return scored[:limit], top
 
 
 def _warm_cache(titles: list, location: str) -> str | None:
@@ -604,33 +583,28 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
 
     degraded = _warm_cache(titles, location)
 
-    # Dedup ONCE here rather than inside _rank — the ladder below re-ranks this same
-    # candidate set up to five times, so collapsing duplicates per pass would repeat
-    # identical work for an identical result.
-    candidates = (
-        _dedupe_listings(store.bm25_candidates(titles, limit=CANDIDATE_LIMIT))
-        if titles
-        else []
+    # Every listing FTS5 matches, not a top-N slice of them. Retrieval decides what is
+    # RELEVANT; it has no business deciding what the ranker is allowed to consider.
+    candidates = _dedupe_listings(store.bm25_candidates(titles)) if titles else []
+
+    # Read recency off the payload rather than cfg, because cfg.max_age_days carries a
+    # 60-day DEFAULT and a default is not a preference. Absent → no age filter at all.
+    raw_age = payload.get("max_age_days")
+    max_age_days = (
+        int(raw_age)
+        if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool)
+        else None
     )
-    # The deterministic ladder: start fresh + strong, relax only as far as needed to
-    # reach TARGET_RESULTS. The first tier that clears the bar wins (freshest/strongest);
-    # if none does, the loosest tier's set is kept. Cheap — a re-rank over the same pool.
-    kept, top, tier = [], 0.0, RESULT_LADDER[-1]
-    for max_age, min_key in RESULT_LADDER:
-        kept, top = _rank(
-            candidates,
-            titles,
-            boosts,
-            penalties,
-            exclude,
-            min_key,
-            cfg.remote_only,
-            max_age,
-            RESULT_CAP,  # deliver the tier's whole tail…
-        )
-        tier = {"max_age_days": max_age, "min_score": min_key}
-        if len(kept) >= TARGET_RESULTS:  # …but judge sufficiency on the first 50
-            break
+    kept, top = _rank(
+        candidates,
+        titles,
+        boosts,
+        penalties,
+        exclude,
+        cfg.remote_only,
+        max_age_days,
+        RESULT_CAP,
+    )
     pcts = _fit_pcts([points for _, points, _, _ in kept])
     results = [
         _shape(c, points, why, pct, parts)
@@ -654,7 +628,6 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         "degraded": degraded,
         "facets": facets,
         "pool": store.pool_size(),
-        "tier": tier,
         "jobs": results,
     }
 
@@ -698,10 +671,22 @@ def _code_sha() -> str:
     import subprocess
 
     try:
-        return subprocess.run(
-            ["git", "-C", str(Path(__file__).parent.parent), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip() or "unknown"
+        return (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(Path(__file__).parent.parent),
+                    "rev-parse",
+                    "--short",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or "unknown"
+        )
     except Exception:
         return "unknown"
 

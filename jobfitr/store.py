@@ -651,25 +651,36 @@ def _fts_query(titles: list[str]) -> str:
 
 
 def bm25_candidates(
-    titles: list[str], limit: int = 500, path: str | None = None
+    titles: list[str], limit: int | None = None, path: str | None = None
 ) -> list[dict]:
-    """Return the top-`limit` jobs matching the user's titles, ranked by BM25.
+    """Return the jobs matching the user's titles, ranked by BM25.
 
     Title column weighted heavily over body. Returns dicts (row + `bm25` base
     score, higher = better) for the personalized rerank in server.py.
+
+    `limit=None` (the default, and what the server passes) means EVERY match. It used
+    to be a mandatory 500, which quietly made retrieval the arbiter of what the ranker
+    could even see. Scoring is deterministic Python and cheap — the widest user in the
+    test fixture is 5,129 rows in about a second — so there is no reason to decide in
+    advance that the 501st match cannot possibly be the best job for someone.
+
+    The parameter stays because tests pin small pools with it and the semantic arm may
+    want a bounded first stage.
     """
     q = _fts_query(titles)
     if not q:
         return []
+    sql = """SELECT j.*, bm25(jobs_fts, 8.0, 2.0, 1.0) AS rank
+             FROM jobs_fts JOIN jobs j ON j.rowid = jobs_fts.rowid
+             WHERE jobs_fts MATCH ?
+             ORDER BY rank"""
+    params: tuple = (q,)
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (q, limit)
     with _conn(path) as c:
         try:
-            rows = c.execute(
-                """SELECT j.*, bm25(jobs_fts, 8.0, 2.0, 1.0) AS rank
-                   FROM jobs_fts JOIN jobs j ON j.rowid = jobs_fts.rowid
-                   WHERE jobs_fts MATCH ?
-                   ORDER BY rank LIMIT ?""",
-                (q, limit),
-            ).fetchall()
+            rows = c.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []  # a malformed MATCH never 500s the request
     out = []

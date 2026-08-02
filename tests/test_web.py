@@ -334,11 +334,17 @@ def test_more_boosts_can_never_lower_a_score(client):
     The scoreboard promises the opposite, and this is that promise as a test: evidence
     only ever adds, so naming another skill can never cost you.
     """
-    title, company, body = "data engineer", "acme", "python postgres airflow kafka spark"
+    title, company, body = (
+        "data engineer",
+        "acme",
+        "python postgres airflow kafka spark",
+    )
     prev = -1
     for n in range(0, 6):
         boosts = ["python", "postgres", "airflow", "kafka", "spark"][:n]
-        pts = server.scoreboard(title, company, body, ["data engineer"], boosts, [])["points"]
+        pts = server.scoreboard(title, company, body, ["data engineer"], boosts, [])[
+            "points"
+        ]
         assert pts >= prev, f"adding a boost lowered the score at n={n}"
         prev = pts
     # And nothing is capped: five matching boosts are worth five boosts.
@@ -574,7 +580,7 @@ def test_category_keeps_job_fields_and_drops_employers_and_levels(client, monkey
     put a USAJOBS agency there, one puts a seniority, one an internal ATS code."""
     _seed(
         [
-            # distinct companies: five rows at one employer would trip MAX_PER_COMPANY
+            # distinct companies, kept from when the employer cap could have bitten
             _job("Role A", company="Ay", department="IT Jobs", url="https://x/it"),
             _job(
                 "Role B",
@@ -690,10 +696,14 @@ def test_prefetch_without_titles_is_a_noop(client, monkeypatch):
     assert calls["n"] == 0  # nothing to fetch without a title
 
 
-def test_score_ladder_relaxes_freshness_to_find_matches(client):
-    # A 40-day-old job is excluded by the tight 15/30-day tiers but included once the
-    # deterministic ladder relaxes past 30 days — no "how picky?" or recency question.
-    old = (date.today() - timedelta(days=40)).isoformat()
+def test_an_old_job_is_reachable_when_the_user_set_no_recency_preference(client):
+    """Replaces test_score_ladder_relaxes_freshness_to_find_matches.
+
+    The ladder always imposed an age, 90 days at its loosest, so nothing older was
+    reachable by anyone. Now the only age filter is one the USER asked for — and a
+    120-day-old job, previously invisible, comes back.
+    """
+    old = (date.today() - timedelta(days=120)).isoformat()
     _seed(
         [
             _job(
@@ -709,20 +719,44 @@ def test_score_ladder_relaxes_freshness_to_find_matches(client):
         "/api/score", json={"titles": ["data scientist"], "location": "remote"}
     ).json()
     assert d["jobs"] and d["jobs"][0]["title"] == "Staff Data Scientist"
-    assert d["tier"]["max_age_days"] >= 60  # relaxed past the tight tiers to include it
+    assert "tier" not in d  # the ladder is gone, and so is its receipt
 
 
-def test_score_delivers_past_fifty_without_relaxing_the_ladder(client):
-    # The two numbers are NOT one number. RESULT_CAP is how many rows ship;
-    # TARGET_RESULTS is only the bar the ladder judges a tier by. Re-conflating them
-    # (the pre-2026-08-01 behaviour) fails this test in one of two ways: either the
-    # board is capped back to 50, or the ladder relaxes to old/weak rows to reach 200.
+def test_a_recency_preference_the_user_DID_set_is_still_honoured(client):
+    """The flip side: dropping the ladder must not drop the user's own age filter."""
+    old = (date.today() - timedelta(days=120)).isoformat()
+    _seed(
+        [
+            _job(
+                "Staff Data Scientist",
+                text="ml data scientist role",
+                posted=old,
+                url="https://x/sds",
+            )
+        ]
+    )
+    _mark_fresh(["data scientist"], "remote")
+    d = client.post(
+        "/api/score",
+        json={"titles": ["data scientist"], "location": "remote", "max_age_days": 30},
+    ).json()
+    assert d["jobs"] == []
+
+
+def test_the_whole_tail_ships_up_to_the_delivery_cap(client):
+    """Replaces test_score_delivers_past_fifty_without_relaxing_the_ladder.
+
+    RESULT_CAP is now the ONLY thing between a scored listing and the user, and it is a
+    bandwidth decision. 120 equally-good rows must all ship; nothing may be withheld for
+    being the 51st, for scoring below some fraction of the top, or for sharing an
+    employer with four other rows.
+    """
     _seed(
         [
             _job(
                 f"Data Engineer {i}",
                 text="data engineer pipeline etl",
-                company=f"Company {i}",  # unlike names, so MAX_PER_COMPANY cannot bite
+                company="MegaCorp",  # ALL one employer — the old cap kept 4
                 url=f"https://x/de{i}",
             )
             for i in range(120)
@@ -732,11 +766,8 @@ def test_score_delivers_past_fifty_without_relaxing_the_ladder(client):
     d = client.post(
         "/api/score", json={"titles": ["data engineer"], "location": "remote"}
     ).json()
-    assert len(d["jobs"]) > server.TARGET_RESULTS  # the tail is delivered, not dropped
+    assert len(d["jobs"]) == 120  # every one of them, from a single company
     assert len(d["jobs"]) <= server.RESULT_CAP
-    # every seeded row is fresh and strong, so the tightest tier must still win
-    assert d["tier"]["max_age_days"] == server.RESULT_LADDER[0][0]
-    assert d["tier"]["min_score"] == server.RESULT_LADDER[0][1]
 
 
 def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
@@ -859,67 +890,16 @@ def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
     assert [c["slug"] for c in seen["companies"]] == ["seedco"]
 
 
-# ── per-company diversity (the guard the 3x corpus needs) ────────────────────
-def _many(company, n, score_from=100):
-    return [
-        (
-            {"company": company, "title": f"{company} Role {i}"},
-            float(score_from - i),
-            "",
-        )
-        for i in range(n)
-    ]
+# ── employer concentration: visible, not corrected ───────────────────────────
+# Replaces the six _spread_companies tests. The cap DROPPED an employer's roles past
+# the fourth, which solved a real problem (Veterans Health has 915 rows in the corpus,
+# Anduril 1,063) with an instrument that deleted evidence invisibly — the user could
+# not tell the difference between "this employer has 4 openings" and "this employer has
+# 900 and we hid 896". The promise has changed shape: concentration is now something
+# the user SEES and can filter on the board, not something the server silently fixes.
 
 
-def test_one_employer_cannot_monopolise_the_front_of_the_board():
-    """At 3x corpus the pool carries employers with 900+ open roles (Veterans Health)
-    and 600+ (Accenture Federal). Ranking by score alone would hand a user fifty
-    near-identical rows from one company, which reads as a broken search."""
-    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
-    out = server._spread_companies(scored, cap=4)
-    from collections import Counter
-
-    counts = Counter(c["company"] for c, _, _ in out)
-    assert counts["BigCo"] == 4 and counts["SmallCo"] == 3
-    assert out[0][0]["company"] == "BigCo"  # its best 4 keep their natural rank
-
-
-def test_cap_holds_through_truncation():
-    """REGRESSION (panel blocker B3): the cap demoted overflow to the back, then the
-    caller's [:limit] sliced straight back into it. On live prod this made a "nurse"
-    search return 19 of 50 rows from Veterans Health Administration. The cap must hold
-    inside the returned window, not merely reorder before it."""
-    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
-    shown = server._spread_companies(scored, cap=4)[:50]  # exactly what _rank does
-    from collections import Counter
-
-    assert max(Counter(c["company"] for c, _, _ in shown).values()) == 4
-
-
-def test_spreading_drops_overflow_rather_than_padding():
-    """When one employer IS the whole pool, the cap yields a SHORT set — which is the
-    honest signal that makes the RESULT_LADDER relax, instead of the old behavior that
-    padded the window back to full with the dominant employer's demoted roles."""
-    scored = _many("OnlyCo", 30)
-    out = server._spread_companies(scored, cap=4)
-    assert len(out) == 4, "overflow beyond the cap is dropped, not demoted"
-    assert [c["title"] for c, _, _ in out] == [f"OnlyCo Role {i}" for i in range(4)]
-
-
-def test_spreading_preserves_the_top_result():
-    """`top` and the score floor are derived from scored[0]; reordering must not move
-    the single best match."""
-    scored = _many("BigCo", 10) + _many("Other", 2, score_from=95)
-    out = server._spread_companies(scored, cap=4)
-    assert out[0][1] == 100.0
-
-
-def test_cap_of_zero_disables_spreading():
-    scored = _many("BigCo", 10)
-    assert server._spread_companies(scored, cap=0) == scored
-
-
-def test_score_endpoint_spreads_across_companies(client):
+def test_one_employer_may_now_dominate_and_that_is_visible(client):
     _seed(
         [
             _job(
@@ -940,19 +920,29 @@ def test_score_endpoint_spreads_across_companies(client):
         ]
     )
     _mark_fresh(["python engineer"])
-    d = client.post(
-        "/api/score",
-        json={"titles": ["python engineer"], "min_score": "plenty"},
-    ).json()
-    companies = [j["company"] for j in d["jobs"]]
+    d = client.post("/api/score", json={"titles": ["python engineer"]}).json()
     from collections import Counter
 
-    counts = Counter(companies)
-    # no employer exceeds the cap in what the user actually receives
-    assert counts["MegaCorp"] == server.MAX_PER_COMPANY
+    counts = Counter(j["company"] for j in d["jobs"])
+    assert counts["MegaCorp"] == 20, "all 20 ship — nothing is dropped for the employer"
     assert counts["Tiny Inc"] == 1
-    # MegaCorp's roles beyond the cap are filtered out, not shown at the tail
-    assert len(d["jobs"]) == server.MAX_PER_COMPANY + 1
+    assert len(d["jobs"]) == 21
+
+
+def test_the_facet_counts_let_the_user_see_the_concentration(client):
+    """The replacement for the cap is INFORMATION. Whatever the board offers as a filter
+    has to be able to describe a dominated result set, or removing the cap just moves the
+    problem onto the user with no tool to fix it."""
+    _seed(
+        [
+            _job(f"Nurse {i}", text="nurse", company="MegaCorp", url=f"https://x/n{i}")
+            for i in range(12)
+        ]
+    )
+    _mark_fresh(["nurse"])
+    d = client.post("/api/score", json={"titles": ["nurse"]}).json()
+    assert len(d["jobs"]) == 12
+    assert d["facets"], "the board needs facets to filter a dominated set"
 
 
 def test_load_dotenv_survives_an_unreadable_directory(tmp_path, monkeypatch):
