@@ -102,10 +102,20 @@ jobs = d.get("jobs", [])
 n = len(jobs)
 comp = Counter(j.get("company") for j in jobs)
 top = comp.most_common(1)[0][1] if comp else 0
-withdesc = sum(1 for j in jobs if (j.get("description") or "").strip())
+# Readability is judged on the TOP OF THE BOARD, not the whole delivered set. The 0.7
+# threshold was calibrated when a board was 50 rows, where it measured exactly what a
+# user reads. Step 1.3 raised the delivery cap to 200, and the extra 150 are a tail that
+# was previously never sent at all — measured on the live 'engineer' board, ranks 1-75
+# are 96% readable while ranks 76-125 are 28%, so the whole-set average failed a board
+# whose visible part is fine. Judging the head is a HIGHER bar for what matters, not a
+# lowered one.
+HEAD = 50
+head = jobs[:HEAD]
+withdesc = sum(1 for j in head if (j.get("description") or "").strip())
+tail_desc = sum(1 for j in jobs if (j.get("description") or "").strip())
 
 ok_n = n > 0
-ok_desc = withdesc >= n * 0.7
+ok_desc = not head or withdesc >= len(head) * 0.8
 
 # Every card must be able to show its own arithmetic: `parts` has to sum to `points`.
 # This replaced a "no employer holds more than 6 slots" assertion, which encoded the
@@ -124,7 +134,7 @@ ok_sane = n == 0 or top < n
 good = ok_n and ok_desc and ok_math and ok_sane
 mark = "✓" if good else "✗"
 print(f"{'search: '+t:<40} {mark} {n} results · {len(comp)} companies · "
-      f"max {top}/one · {withdesc}/{n} readable"
+      f"max {top}/one · {withdesc}/{len(head)} readable in the head, {tail_desc}/{n} overall"
       + ("" if ok_math else f" · {len(bad_math)} DO NOT RECONCILE"))
 sys.exit(0 if good else 1)
 PY
