@@ -134,7 +134,28 @@ def term_pattern(term: str) -> re.Pattern[str] | None:
     if cached is not None:
         return cached
     words = key.split()
-    body = r"\s+".join(re.escape(w) for w in words[:-1] + [words[-1]])
+    # Words are joined by whitespace OR a hyphen, because English writes the same
+    # compound both ways and a job description picks whichever its author preferred.
+    #
+    # This was `\s+`, and the 1.5 audit caught it twice, independently, in unrelated
+    # domains: one reader saw a listing spelling it both "forward deployed" and
+    # "forward-deployed" and counted two occurrences where the code counted one; another
+    # saw "month-end close" — the standard accounting spelling — twice in a body the
+    # matcher scored as zero. Measured across the 39,597-row corpus, the spaced-only
+    # pattern missed the MAJORITY of real occurrences for hyphen-conventional terms:
+    #
+    #     term               matched   missed
+    #     end to end             773    3,433
+    #     data driven             60    1,472
+    #     problem solving        242      718
+    #     full stack             375      537
+    #
+    # And it silently zeroed terms a user actually typed with a hyphen: norm_key strips
+    # the hyphen from the TERM, so "multi-agent orchestration" became the spaced pattern
+    # and then could not match the hyphenated text everyone writes — 0 matches in 39,597
+    # listings, alongside "customer-embedded". Two of one test user's fourteen boosts had
+    # never contributed a single point.
+    body = r"[\s-]+".join(re.escape(w) for w in words[:-1] + [words[-1]])
     if len(words[-1]) >= _MIN_PLURAL_LEN:
         body += r"(?:s|es)?"
     pattern = re.compile(rf"\b{body}\b", re.IGNORECASE)
