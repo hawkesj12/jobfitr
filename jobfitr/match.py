@@ -170,8 +170,21 @@ def term_pattern(term: str) -> re.Pattern[str] | None:
 # scoreboard's 8/6/4/2 decay reads: a listing that names RAG twenty
 # times is more about RAG than one that mentions it once, and that is
 # real signal rather than length noise.
-# Non-overlapping (re.finditer); only the first four occurrences carry
-# any points, so overlap semantics are not load-bearing.
+#
+# THE COUNT, SAID PRECISELY, because the decay depends on it and the
+# 1.5 audit showed readers arriving at different numbers:
+#
+#   - Matches are NON-OVERLAPPING (re.finditer), scanning left to right.
+#   - A term of 4+ characters also matches a trailing "s" or "es", so
+#     "warehouse" counts "warehouses". Shorter terms do not, so "icu"
+#     does not count "icus".
+#   - A multi-word term counts only as a PHRASE — the words adjacent
+#     and in order, separated by whitespace or a hyphen. "warehouse"
+#     and "automation" scattered across a paragraph is not a hit.
+#   - Only the first FOUR occurrences carry points (8/6/4/2, 20 total).
+#     The fifth and every later one add exactly nothing, so counting
+#     past four never changes a score — which is why overlap semantics
+#     are not load-bearing.
 # ═══════════════════════════════════════════════════════════════
 def term_hits(term: str, text: str) -> int:
     pattern = term_pattern(term)
@@ -211,6 +224,30 @@ def _strip_seniority(normalised: str) -> str:
 # The related tier is not here on purpose: it is not a property of a
 # title pair, it is a statement about WHOSE list the title came from.
 # title_score() below is what applies it.
+#
+# THE RULES, WRITTEN SO A STRANGER CAN FOLLOW THEM. This wording is
+# not decoration — it is the spec five independent readers scored 250
+# listings against in the 1.5 audit, and one of them flagged six cases
+# as ambiguous because the old phrasing did not say this out loud:
+#
+#   Every comparison is WHOLE WORD, after normalising (lowercase,
+#   punctuation to spaces, collapse runs of space). "engineering" does
+#   NOT satisfy a want for "engineer" — they are different words, and
+#   no stemming or prefix matching happens anywhere in this file. The
+#   reader who flagged it guessed strict whole-word and matched the
+#   code on all six, so the RULE was right; the sentence describing it
+#   was not.
+#
+#   100  exact      the two normalise to the same string
+#    80  all words  every word of the USER's title appears somewhere in
+#                   the JOB's title, any order. The job title may carry
+#                   extra words; the user's may not go unmatched. So
+#                   "Senior Data Engineer" satisfies a want for "Data
+#                   Engineer", but not the reverse.
+#    60  core       equal after removing ONE leading seniority word from
+#                   each side (see SENIORITY_PREFIXES). Only the leading
+#                   one, and only if it is followed by a space.
+#     0  none
 #
 # Mechanical by design: no similarity model, no embedding, no judgment
 # call. Deciding what counts as "close enough" is not the ranker's job
