@@ -708,6 +708,29 @@ def facet_counts(rows: list[dict]) -> dict:
     return facets
 
 
+def candidate_count(titles: list[str], path: str | None = None) -> int:
+    """How many listings this search will have to rank — WITHOUT fetching any of them.
+
+    A COUNT over the FTS index, so it costs milliseconds where materialising the rows
+    costs hundreds. It exists so the interview can tell the user what is about to happen:
+    a specific title like "Data Analyst" matches a few hundred listings and scores in
+    under a second, while a bare "engineer" matches 25,849 — half the corpus, all of them
+    real — and takes as long as that implies. Saying so is better than a spinner that
+    looks broken.
+    """
+    q = _fts_query(titles)
+    if not q:
+        return 0
+    with _conn(path) as c:
+        try:
+            row = c.execute(
+                "SELECT count(*) FROM jobs_fts WHERE jobs_fts MATCH ?", (q,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return 0  # a malformed MATCH never 500s the request
+    return int(row[0]) if row else 0
+
+
 def pool_size(path: str | None = None) -> int:
     with _conn(path) as c:
         row = c.execute("SELECT count(*) FROM jobs").fetchone()

@@ -135,9 +135,18 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ titles: config.titles, location: config.location || "" }),
-    }).catch(() => {
-      prefetched = false; // let a later turn retry
-    });
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        // Stash how many listings this search will have to rank. The interview asks a
+        // question or two after this point, so the number is ready long before the board
+        // is — and a search that will take eighteen seconds can say so instead of
+        // showing a spinner that looks like a hang.
+        if (d && typeof d.candidates === "number") window.__jfCandidates = d.candidates;
+      })
+      .catch(() => {
+        prefetched = false; // let a later turn retry
+      });
   }
 
   // ── contextual chips: tap to BUILD an answer, ↵ to send ──────────────────────────

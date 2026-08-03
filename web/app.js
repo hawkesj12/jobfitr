@@ -193,6 +193,18 @@ async function run(cfg) {
   show(el.error, false);
   show(el.notice, false);
   show(el.carousel, false);
+  // Say what is actually happening. A wide search legitimately takes many seconds — it
+  // is ranking every real match, not stalling — and a bare spinner reads as a hang. The
+  // count comes from /api/prefetch during the interview, so it costs nothing here.
+  const n = window.__jfCandidates;
+  const txt = document.getElementById("loading-text");
+  if (txt) {
+    txt.textContent = !n
+      ? "Scoring the latest jobs…"
+      : n > 5000
+        ? `Ranking all ${n.toLocaleString()} matches — a wide search takes a moment…`
+        : `Ranking ${n.toLocaleString()} matches…`;
+  }
   show(el.loading, true);
   try {
     const r = await fetch("/api/score", {

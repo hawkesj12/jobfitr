@@ -82,8 +82,9 @@ clone_or_pull() {
 clone_or_pull "$JOBFITR_REPO" "$APP_DIR"
 
 # ── 6. venv + install ────────────────────────────────────────────────────────
-# job-radar is an ordinary PyPI dependency (pinned >=0.2,<0.3 in pyproject.toml), not
-# a sibling checkout — an engine change reaches the box via a release + a version bump.
+# job-radar is an ordinary PyPI dependency (range in pyproject.toml, exact build in
+# uv.lock), not a sibling checkout — an engine change reaches the box via a release, a
+# version bump, and a re-`uv lock` committed here.
 # See deploy/README.md → "Where the job-radar engine comes from".
 log "Building the virtualenv"
 sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && '$UV' venv --clear && '$UV' pip install -e '.[web]'"

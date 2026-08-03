@@ -22,6 +22,13 @@ jobs.db
 *.db-shm
 shortlist.csv
 
+# Agent working notes. CLAUDE.md records the box's IP, the deploy topology, and where
+# the private lab lives — orientation for whoever maintains this, not repo content, and
+# none of it belongs in a PUBLIC checkout.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
 # Local session-workflow files (not part of the product)
 KICKOFF-PROMPT.md
 BUILD-PLAN.md

@@ -119,9 +119,9 @@ On restart, `store.init()` creates `jobs.db` and imports the current `jobs.json`
 
 ## Where the job-radar engine comes from (settled 2026-07-22)
 
-**The box tracks PyPI, like any other dependency.** `pyproject.toml` declares the accepted range (`job-radar>=0.5,<0.6`) and **`uv.lock` pins the exact build**; `deploy-slot.sh` installs with `uv sync --frozen`, so the box replays the locked graph instead of re-resolving it. An engine change reaches production through a **job-radar release + a version bump + a re-`uv lock` here**, not a `git pull` on the box.
+**The box tracks PyPI, like any other dependency.** `pyproject.toml` declares the accepted range (`job-radar>=0.6,<0.7`) and **`uv.lock` pins the exact build**; `deploy-slot.sh` installs with `uv sync --frozen`, so the box replays the locked graph instead of re-resolving it. An engine change reaches production through a **job-radar release + a version bump + a re-`uv lock` here**, not a `git pull` on the box.
 
-This settles what was left open when the old `[tool.uv.sources]` local-path override was removed. Locking came later (2026-07-31): resolving a version *range* at install time meant two deploys from identical source could land different dependency versions, so a rollback restored the old code against a possibly-different graph. The range is a wish; the lockfile is the contract. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
+This settles what was left open when the old `[tool.uv.sources]` local-path override was removed. Locking came later (2026-07-31): resolving a version _range_ at install time meant two deploys from identical source could land different dependency versions, so a rollback restored the old code against a possibly-different graph. The range is a wish; the lockfile is the contract. What it does retire is the `/opt/jobfitr/job-radar` editable clone: nothing reads it any more once the legacy `/opt/jobfitr/jobfitr` checkout is gone (see below).
 
 > **To hack on the engine against the live box anyway** (rare, and it makes that slot stop matching how everyone else installs jobfitr): `uv pip install -e /opt/jobfitr/job-radar` inside that slot's venv, and remember the next `uv pip install` for the app will resolve job-radar back to PyPI.
 

@@ -680,7 +680,19 @@ def prefetch(request: Request, payload: dict = Body(...)) -> dict:
     Reuses _warm_cache — coalesced + mark_fetched dedup it against the later score."""
     titles, location = search_inputs(payload)
     degraded = _warm_cache(titles, location)
-    return {"ok": degraded is None, "warmed": bool(titles), "degraded": degraded}
+    # The candidate count rides along because this is the one moment it is both KNOWN
+    # and USEFUL: titles are settled, the rows have not been fetched yet, and the client
+    # still has a question or two to ask before it needs the board. A COUNT over the FTS
+    # index is milliseconds. It lets the loading state say "ranking 25,849 matches"
+    # instead of showing a spinner for eighteen seconds and looking broken.
+    related = _clean_list(payload.get("related_titles"))
+    search_titles = titles + related if RELATED_IN_RETRIEVAL else titles
+    return {
+        "ok": degraded is None,
+        "warmed": bool(titles),
+        "degraded": degraded,
+        "candidates": store.candidate_count(search_titles) if search_titles else 0,
+    }
 
 
 @app.post("/api/score")
