@@ -185,7 +185,7 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     titles = [j["title"] for j in d["jobs"]]
     assert "Engineering Intern" not in titles  # hard-excluded
     assert titles[0] == "Senior Python Engineer"  # both boosts + title
-    scores = [j["fit_score"] for j in d["jobs"]]
+    scores = [j["points"] for j in d["jobs"]]
     assert scores == sorted(scores, reverse=True)
 
     top = d["jobs"][0]
@@ -193,7 +193,8 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     assert "text" not in top and "snippet" in top  # body not leaked
     assert top["category"] == "IT Jobs" and top["employment_type"] == "full_time"
     assert "senior" in top["tags"] and "onsite" in top["tags"]  # derived tags
-    assert 0 < top["fit_pct"] <= 100
+    assert isinstance(top["points"], int)
+    assert sum(delta for _, delta in top["parts"]) == top["points"]
     # facets counted over the returned set
     assert d["facets"]["category"]["IT Jobs"] >= 1
     assert d["pool"] == store.pool_size()
@@ -424,27 +425,31 @@ def test_dedup_keeps_genuinely_different_roles_at_the_same_company(client, monke
     assert len({j["title"] for j in d["jobs"]}) == 2
 
 
-def test_fit_gauge_stays_readable_when_relevance_alone_cannot_separate(
-    client, monkeypatch
-):
-    """The board rendered fifty identical "3 · Fair" rows for a plain one-word search.
+def test_a_flat_search_no_longer_needs_a_gauge_to_look_sane(client, monkeypatch):
+    """Replaces test_fit_gauge_stays_readable_when_relevance_alone_cannot_separate.
 
-    BM25 rates fifty jobs all titled "...Engineer" as equally relevant — which is
-    CORRECT — but the old gauge divided by the top score, so a top of <= 0 floored every
-    card at the minimum and the ranking looked broken. The gauge is relative to the best
-    match, so it is normalized across the returned set instead.
+    The old failure: BM25 rates fifty jobs all titled "...Engineer" as equally relevant —
+    which is CORRECT — and the relative gauge then had nothing to spread, so every card
+    rendered an identical "3 · Fair" and the board looked broken. The gauge existed to
+    paper over that.
+
+    With an ABSOLUTE score there is nothing to paper over. Fifty equally-good matches
+    honestly score the same number, and that number means something on its own: 100 is an
+    exact title match whether it is alone on the board or one of fifty.
     """
-    assert server._fit_pcts([]) == []
-    # a real spread renders as a real gradient, best pinned to 100
-    spread = server._fit_pcts([5.0, 3.0, 1.0])
-    assert spread[0] == 100 and spread[-1] == server._FIT_FLOOR
-    assert spread[0] > spread[1] > spread[2]
-    # no spread at all: honest and uniform, never a fabricated gradient and never a 3
-    flat = server._fit_pcts([2.0, 2.0, 2.0])
-    assert flat == [server._FIT_FLAT] * 3
-    # negative scores (the case that broke it) still produce a usable gauge
-    neg = server._fit_pcts([-0.4, -0.9, -1.6])
-    assert neg[0] == 100 and min(neg) >= server._FIT_FLOOR
+    _seed(
+        [
+            _job(f"Engineer {i}", text="python", company=f"C{i}", url=f"https://x/e{i}")
+            for i in range(12)
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["engineer"]}).json()
+    pts = [j["points"] for j in d["jobs"]]
+    assert pts, "the search should return something"
+    assert len(set(pts)) == 1, "equally-good matches score equally — that is honest"
+    assert "fit_pct" not in d["jobs"][0], "the relative gauge is gone"
 
 
 def test_a_plain_one_word_search_still_produces_a_usable_board(client, monkeypatch):
@@ -464,10 +469,12 @@ def test_a_plain_one_word_search_still_produces_a_usable_board(client, monkeypat
     _mark_fresh(["engineer"])
     _no_fetch(monkeypatch)
     d = client.post("/api/score", json={"titles": ["engineer"]}).json()
-    pcts = [j["fit_pct"] for j in d["jobs"]]
-    assert pcts, "the search should return something"
-    assert max(pcts) == 100  # the best match always anchors the gauge
-    assert min(pcts) >= server._FIT_FLOOR  # nothing shown collapses to a 3
+    pts = [j["points"] for j in d["jobs"]]
+    assert pts, "the search should return something"
+    # No normalisation, so the numbers are comparable to any other board: the two
+    # "Engineer"-titled rows earn the exact-title 100, the rest earn what they earn.
+    assert max(pts) == 100
+    assert all(isinstance(p, int) for p in pts)
 
 
 # ── Phase B: data hygiene at the source ───────────────────────────────────────

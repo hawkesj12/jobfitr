@@ -795,3 +795,12 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .crit.suggested:focus-within {
   opacity: 1;
 }
+
+/* A penalty has to READ as a penalty. The chips add up to the number beside them, so a
+   subtraction rendered like an addition would make the arithmetic look wrong to anyone
+   who checks it — and the whole reason the receipt is on the collapsed row is to be
+   checked. */
+.why .part.neg {
+  color: var(--warn, #b4462e);
+  border-color: color-mix(in srgb, var(--warn, #b4462e) 40%, transparent);
+}

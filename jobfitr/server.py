@@ -325,30 +325,7 @@ def _norm_category(value) -> str:
 # The gauge is explicitly "relative to your best match", so it is normalized ACROSS the
 # returned set rather than divided by the top score. The old ratio (score / top) died
 # whenever the top score was <= 0, which is the normal case for a common one-word query:
-# BM25 rates fifty jobs all titled "...Engineer" as equally relevant — correctly — so
-# every card floored at the minimum and the board rendered fifty identical "3 · Fair"
-# rows. Spreading the real spread over a readable band keeps the ranking legible without
-# inventing one: when there is genuinely no spread, every card shows the same value,
-# because they genuinely are the same match.
-_FIT_FLOOR = 45  # the weakest SHOWN match still cleared the ladder, so it is not a 3
-_FIT_FLAT = 60  # no spread at all — honest neutral, not a fake gradient
-
-
-def _fit_pcts(scores: list) -> list:
-    """Map the kept set's scores onto the 0-100 gauge, preserving relative spacing."""
-    if not scores:
-        return []
-    hi, lo = max(scores), min(scores)
-    span = hi - lo
-    if span <= 0:
-        return [_FIT_FLAT] * len(scores)
-    return [
-        max(3, min(100, round(_FIT_FLOOR + (100 - _FIT_FLOOR) * (s - lo) / span)))
-        for s in scores
-    ]
-
-
-def _shape(c: dict, points: int, why: str, fit_pct: int, parts: list) -> dict:
+def _shape(c: dict, points: int, why: str, parts: list) -> dict:
     """The lean per-card payload the front end renders (store row → card)."""
     body = c.get("body") or c.get("text") or ""
     # the derived facet tags (real facets category/employment_type sit in their own keys)
@@ -366,11 +343,13 @@ def _shape(c: dict, points: int, why: str, fit_pct: int, parts: list) -> dict:
         "tags": tags,
         "points": points,  # THE score — an absolute integer, the same meaning every day
         "parts": parts,  # what earned it: [(label, delta)] — the receipt under the number
-        # fit_score/fit_pct are the outgoing relative gauge, kept only so the current
-        # card keeps rendering until 1.5 rewires it. Both leave in 1.4.
+        # COMPATIBILITY, and they leave next release. A browser holding the previous
+        # app.js reads fit_score and why; dropping them the same day the new payload
+        # ships would blank that user's board on a cache they did not ask for. `points`
+        # is the truth — fit_score is the identical integer under its old name, and the
+        # card no longer reads either.
         "fit_score": points,
-        "fit_pct": fit_pct,
-        "why": why,  # the title/boost signals that matched
+        "why": why,
         "snippet": _snippet(body),
         "description": _description(body),
     }
@@ -645,11 +624,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         RESULT_CAP,
         related,
     )
-    pcts = _fit_pcts([points for _, points, _, _ in kept])
-    results = [
-        _shape(c, points, why, pct, parts)
-        for (c, points, why, parts), pct in zip(kept, pcts, strict=True)
-    ]
+    results = [_shape(c, points, why, parts) for c, points, why, parts in kept]
     # Count facets over NORMALIZED rows so the counts match the chips the cards produce.
     # Normalizing on a copy (not the shaped result) keeps remote/seniority/salary_band,
     # which live as top-level columns here but are folded into `tags` by _shape.
