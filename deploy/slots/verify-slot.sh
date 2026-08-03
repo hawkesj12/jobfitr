@@ -84,24 +84,53 @@ for title in engineer nurse driver; do
 		bad "search: ${title}" "/api/score returned nothing"
 		continue
 	fi
-	TITLE="$title" python3 - "$res" <<'PY'
+	# The response goes via a FILE, not argv. It used to be passed as a command-line
+	# argument, which worked while a board was ~50 rows and broke the moment the delivery
+	# cap went to 200 with descriptions attached: execve() has a hard ARG_MAX, so the gate
+	# started dying with "Argument list too long" and reporting DO NOT FLIP for a slot that
+	# was fine. A gate that fails for its own reasons is worse than no gate — it trains you
+	# to override it.
+	tmp=$(mktemp /tmp/verify-slot.XXXXXX.json)
+	printf '%s' "$res" > "$tmp"
+	TITLE="$title" JSON_FILE="$tmp" python3 - <<'PY'
 import json, os, sys
 from collections import Counter
-d = json.loads(sys.argv[1]); t = os.environ["TITLE"]
+t = os.environ["TITLE"]
+with open(os.environ["JSON_FILE"]) as fh:
+    d = json.load(fh)
 jobs = d.get("jobs", [])
 n = len(jobs)
 comp = Counter(j.get("company") for j in jobs)
 top = comp.most_common(1)[0][1] if comp else 0
 withdesc = sum(1 for j in jobs if (j.get("description") or "").strip())
+
 ok_n = n > 0
-ok_div = top <= 6
 ok_desc = withdesc >= n * 0.7
-mark = "✓" if (ok_n and ok_div and ok_desc) else "✗"
+
+# Every card must be able to show its own arithmetic: `parts` has to sum to `points`.
+# This replaced a "no employer holds more than 6 slots" assertion, which encoded the
+# employer cap that step 1.3 deliberately removed — concentration is now something a
+# user SEES and filters, not something the server silently corrects, so the old check
+# gated on a promise the system had stopped making.
+bad_math = [j for j in jobs
+            if not isinstance(j.get("points"), int)
+            or sum(delta for _, delta in (j.get("parts") or [])) != j["points"]]
+ok_math = not bad_math
+
+# Not a cap — a smoke alarm. One employer owning the ENTIRE board means retrieval or
+# dedup broke, which is a different thing from an employer legitimately dominating a niche.
+ok_sane = n == 0 or top < n
+
+good = ok_n and ok_desc and ok_math and ok_sane
+mark = "✓" if good else "✗"
 print(f"{'search: '+t:<40} {mark} {n} results · {len(comp)} companies · "
-      f"max {top}/one · {withdesc}/{n} readable")
-sys.exit(0 if (ok_n and ok_div and ok_desc) else 1)
+      f"max {top}/one · {withdesc}/{n} readable"
+      + ("" if ok_math else f" · {len(bad_math)} DO NOT RECONCILE"))
+sys.exit(0 if good else 1)
 PY
-	[[ $? -ne 0 ]] && fail=1
+	rc=$?
+	rm -f "$tmp"
+	[[ $rc -ne 0 ]] && fail=1
 done
 
 echo
