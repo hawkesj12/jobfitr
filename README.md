@@ -8,6 +8,22 @@ Each result carries its **fit as a plain integer** you can read off the card, wi
 
 It's the consumer front end on top of the open-source [**job-radar**](https://github.com/hawkesj12/job-radar) engine, which does the harvesting.
 
+## What this is, honestly
+
+I built jobfitr as a **personal tool** — I wanted a job search that ranked things the way I'd rank them,
+and told me why. It turned out to be useful enough to share, so it's open source and self-hostable.
+
+**It is deliberately economical.** The whole thing runs on one small VPS — two cores, a few dollars a
+month — against free API tiers. That constraint shaped every design decision worth talking about here:
+scoring is plain integer arithmetic instead of a model, retrieval is SQLite FTS5 instead of a vector
+service, breadth is fetched per search instead of warehoused, and there is a daily fetch ceiling so a
+busy day degrades to the cache rather than to a bill. There's no cluster behind this and it isn't
+pretending there is.
+
+So: not a job board trying to index the market, and not a startup. A cheap, honest tool that does one
+thing — take what you actually want, and sort real listings by it — with its reasoning printed on every
+card so you can disagree with it.
+
 ## How it works
 
 **Fetch live when it has to, serve the cache when it can.** A search either serves a fresh cache — that
