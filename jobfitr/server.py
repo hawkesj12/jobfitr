@@ -131,6 +131,66 @@ BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term →
 PENALTY_TITLE = 30  # the tell is in the title or the employer's own name
 PENALTY_BODY = 15  # the tell is buried in the description
 
+# ── the words that mean two things ───────────────────────────────────────────
+#
+# Some avoid-terms are a whole signal on their own — "our client", "staff augmentation",
+# "talent solutions", "c2c" — because nobody writes those unless they are placing you at
+# somebody else's company. Others are ordinary English that happens to collide with the
+# agency vocabulary, and penalising the bare word is almost always wrong.
+#
+# The 1.5 audit caught this: five independent readers scored 250 listings by hand, and
+# the single largest cluster of disagreements was the code subtracting points for a word
+# the reader could see meant something else. Measured afterwards on the 39,597-row
+# corpus, the bare words are overwhelmingly innocent:
+#
+#   "agency"      860 rows.  17 clearly a firm, 94 clearly prose ("we hire people with
+#                 HIGH AGENCY"), and in company names it is 420 listings of FEDERAL
+#                 GOVERNMENT — Defense Logistics Agency, Farm Service Agency, "Department
+#                 of State - Agency Wide". A user avoiding "agency" was docking the
+#                 entire federal government 30 points.
+#   "recruiting"  1,094 rows. 12 clearly a firm. The rest is boilerplate ("if you suspect
+#                 a RECRUITING scam"), a company's own internal team, a closing date, or
+#                 — for an HR role — the duties of the job being advertised.
+#
+# So a bare ambiguous word now only counts when something next to it makes it an
+# EMPLOYER TYPE. Multi-word terms are untouched: they were never ambiguous, and they are
+# what actually catches a staffing shop ("our client is seeking…").
+#
+# The qualifier applies to the BODY for every term below. It applies to the COMPANY NAME
+# for "agency" ONLY, and that asymmetry is measured, not taste:
+#
+#   companies whose name contains "staffing" — 38 listings, every one a real staffing
+#     shop (Kforce Technology Staffing, KE Staffing, Bravo Global Staffing). Naming
+#     yourself that IS the disclosure, so the bare word in a company name is good signal.
+#   companies whose name contains "recruiting" — 7 listings, all genuine.
+#   companies whose name contains "agency" — 420 listings, and they are the FEDERAL
+#     GOVERNMENT: Defense Logistics Agency, Farm Service Agency, Defense Commissary
+#     Agency. Nothing about that name discloses a staffing arrangement.
+#
+# So "Bravo Global Staffing" is still caught by its name, and the Defense Logistics
+# Agency is not — which is the whole point.
+#
+# "consulting" was in this list and came OUT, because the same measurement that put the
+# others in kept it out: 931 rows containing it, 308 in the firm sense ("global leader in
+# technology and management consulting") against 18 in the prose sense ("consulting with
+# stakeholders") — 17:1. It is simply not an ambiguous word, and qualifying it created a
+# false NEGATIVE that the goldens caught: a real consultancy stopped being penalised.
+# The mirror case is "recruiter", which stays: 280 rows, 4 firm against 137 prose, almost
+# all of them "our recruiter will reach out to you".
+#
+# Deliberately four entries. If this needs to grow much past that, the rule is wrong and
+# dropping body penalties outright is the better trade.
+QUALIFIED_PENALTY = {
+    "agency": r"\b(staffing|recruiting|recruitment|employment|temp|talent)[\s-]+agenc(y|ies)\b",
+    "recruiting": r"\brecruiting[\s-]+(agency|agencies|firm|company)\b|\b(third[\s-]party|external|agency)[\s-]+recruiting\b",
+    "recruiter": r"\b(agency|third[\s-]party|external|contract)[\s-]+recruiter\b",
+    "staffing": r"\bstaffing[\s-]+(agency|agencies|firm|company|solutions|services|partner)\b",
+}
+
+# The one term whose bare form is untrustworthy even in a company name — 420 federal
+# listings say so.
+QUALIFY_IN_COMPANY_TOO = frozenset({"agency"})
+
 # Whether the model's suggested titles join the FTS query as well as the scoring. ON in
 # production — it is what rescues a search whose exact phrasing matches nothing. The OFF
 # setting exists only so the before/after harness can capture an arm where related titles
@@ -447,9 +507,27 @@ def scoreboard(
     for term in penalties:
         if not term:
             continue
-        if has_term(term, f"{title} {company}"):
+        # An ambiguous bare word has to earn its penalty by appearing in a phrase that
+        # makes it an employer type. Everything else keeps the plain whole-word test.
+        key = norm_key(term)
+        qualifier = QUALIFIED_PENALTY.get(key)
+        if qualifier:
+            found = re.compile(qualifier, re.IGNORECASE).search
+            in_body = bool(found(body))
+            # A company that names itself "…Staffing" has disclosed what it is; a body
+            # that says "high agency" has not. Same word, different evidential weight,
+            # so the bare form is still trusted in a name unless measurement says no.
+            in_title = (
+                bool(found(f"{title} {company}"))
+                if key in QUALIFY_IN_COMPANY_TOO
+                else has_term(term, f"{title} {company}")
+            )
+        else:
+            in_title = has_term(term, f"{title} {company}")
+            in_body = has_term(term, body)
+        if in_title:
             hit = PENALTY_TITLE  # naming itself a staffing firm is the strongest tell
-        elif has_term(term, body):
+        elif in_body:
             hit = PENALTY_BODY  # "our client…" buried in the description
         else:
             continue
