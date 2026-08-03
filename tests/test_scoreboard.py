@@ -217,3 +217,55 @@ def test_the_full_corpus_decomposes_and_stays_in_bounds():
         assert b["title_points"] in (0, 30, 60, 80, 100)
         n += 1
     assert n > 100_000, f"expected the full corpus, got {n:,} pairs"
+
+
+# ── goldens: 183 cases five independent readers computed by hand ─────────────
+#
+# These came from an audit, not from a second implementation. Each case was handed to an
+# AI agent as the scoring rules in PROSE plus the raw listing, with no access to this
+# repo, and the agent computed the total by hand. 183 of 200 matched the scorer exactly.
+#
+# That independence is the whole point. A reference scorer written by the same author who
+# read the spec reproduces the author's misreadings and then agrees with itself — the
+# differential certifies the bug. A reader who has never seen the code cannot do that.
+#
+# The 17 disagreements are NOT here. They are adjudicated in audit/report.md, and every
+# one turned out to be a defect in the SPEC rather than in the arithmetic — penalties
+# firing on the wrong word sense, and multi-word boosts blind to hyphens. Freezing a
+# disputed number would pin the bug it revealed.
+#
+# The fixture lives under _private/ with the corpus it was drawn from, so the public repo
+# does not carry 366 KB of job bodies.
+
+_GOLDENS = os.path.join(_ROOT, "_private", "before-after", "audit", "goldens.json")
+
+
+def _golden_cases():
+    if not os.path.exists(_GOLDENS):
+        return []
+    import json
+
+    return json.load(open(_GOLDENS))["cases"]
+
+
+@pytest.mark.skipif(
+    not os.path.exists(_GOLDENS),
+    reason="the audit fixture is gitignored with the corpus",
+)
+@pytest.mark.parametrize(
+    "case", _golden_cases(), ids=[c["case_id"] for c in _golden_cases()]
+)
+def test_a_human_readable_of_the_spec_gets_the_same_number(case):
+    got = scoreboard(
+        case["job_title"],
+        case["job_company"],
+        case["job_body"],
+        case["user_wants"],
+        case["user_boosts"],
+        case["user_avoids"],
+        case["user_suggested"],
+    )
+    assert got["points"] == case["expected"], (
+        f"{case['case_id']} (reader {case['agent']}): expected {case['expected']}, "
+        f"got {got['points']} · {got['parts']}\n  reader's working: {case['working']}"
+    )
