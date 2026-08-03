@@ -170,6 +170,21 @@ PENALTY_BODY = 15  # the tell is buried in the description
 # So "Bravo Global Staffing" is still caught by its name, and the Defense Logistics
 # Agency is not — which is the whole point.
 #
+# "our client" was ADDED on 2026-08-03, and it is the largest correction of the set. It
+# was left out of the first pass on the reasoning that multi-word phrases are inherently
+# unambiguous — which was wrong, and the measurement is lopsided: of 1,619 bodies using
+# it, 753 have the client as the party being SERVED ("help our clients transform complex
+# data", "empower our clients' success", "the best products for our clients") against 39
+# where the client is the party HIRING ("our client is a leading govtech"). 19 to 1.
+#
+# That matters more than anything else here: "our client" was firing on 3,660 pairs, by
+# far the biggest penalty term in the corpus, and the 1.5 audit had already flagged it —
+# four readers independently docked nothing where the code took 15 points off an ordinary
+# B2B company for saying it serves customers.
+#
+# The qualifier keys on WHO IS HIRING. A staffing shop writes "our client is seeking" or
+# "on behalf of our client"; a consultancy writes "for our clients".
+#
 # "consulting" was in this list and came OUT, because the same measurement that put the
 # others in kept it out: 931 rows containing it, 308 in the firm sense ("global leader in
 # technology and management consulting") against 18 in the prose sense ("consulting with
@@ -185,11 +200,31 @@ QUALIFIED_PENALTY = {
     "recruiting": r"\brecruiting[\s-]+(agency|agencies|firm|company)\b|\b(third[\s-]party|external|agency)[\s-]+recruiting\b",
     "recruiter": r"\b(agency|third[\s-]party|external|contract)[\s-]+recruiter\b",
     "staffing": r"\bstaffing[\s-]+(agency|agencies|firm|company|solutions|services|partner)\b",
+    "our client": r"\bour clients?[,']?\s+(is|are|has|have|was|were)\b|\bon behalf of (our|a) clients?\b|\bour client,\s|\bfor one of our clients?\b",
 }
 
 # The one term whose bare form is untrustworthy even in a company name — 420 federal
 # listings say so.
 QUALIFY_IN_COMPANY_TOO = frozenset({"agency"})
+
+# ── the mirror case: a term that counts ONLY in the company name ─────────────
+#
+# Reading u11's board turned up a Forward Deployed Engineer role at a company called
+# "TechTree's client", scoring 122 with no penalty. The user's avoid-term is "our
+# client"; the employer field says "TechTree's client"; phrase matching does exactly what
+# it says and misses it. A company whose NAME is somebody else's client has disclosed the
+# arrangement in the one field that is supposed to say who you would work for.
+#
+# It is company-only, and that scoping is load-bearing rather than tidy: 244 job TITLES
+# in the corpus contain "client" — Client Success Director, Client Support Engineer,
+# Client Services Project Manager — all perfectly ordinary roles. The existing penalty
+# path tests title and company as one blob, so a term added the usual way would sink all
+# 244. Against 35 listings at the one company whose NAME contains the word.
+#
+# It is deliberately NOT a body term either. "helping our clients succeed" is the
+# ordinary-language case 1.7b just finished removing, and re-adding it here would undo
+# that through a side door.
+COMPANY_ONLY_PENALTY = frozenset({"client"})
 
 # Whether the model's suggested titles join the FTS query as well as the scoring. ON in
 # production — it is what rescues a search whose exact phrasing matches nothing. The OFF
@@ -510,8 +545,11 @@ def scoreboard(
         # An ambiguous bare word has to earn its penalty by appearing in a phrase that
         # makes it an employer type. Everything else keeps the plain whole-word test.
         key = norm_key(term)
-        qualifier = QUALIFIED_PENALTY.get(key)
-        if qualifier:
+        if key in COMPANY_ONLY_PENALTY:
+            # Company field alone — not the title, and never the body. See the constant.
+            in_title = has_term(term, company)
+            in_body = False
+        elif (qualifier := QUALIFIED_PENALTY.get(key)) is not None:
             found = re.compile(qualifier, re.IGNORECASE).search
             in_body = bool(found(body))
             # A company that names itself "…Staffing" has disclosed what it is; a body
@@ -657,9 +695,11 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     cfg = config_from_dict(payload)
     titles, location = search_inputs(payload)
     boosts = _clean_list(payload.get("boosts"))
-    penalties = list(
-        cfg.agency_penalty.keys()
-    )  # user rank_down or the generic staffing terms
+    # The user's own rank_down terms, or job-radar's twelve generic staffing defaults.
+    # COMPANY_ONLY_PENALTY is appended here rather than living with its siblings because
+    # that default list is job_radar.config.DEFAULT_AGENCY_PENALTY — inside the
+    # dependency, not this repo, so it cannot be edited from here.
+    penalties = list(cfg.agency_penalty.keys()) + sorted(COMPANY_ONLY_PENALTY)
     exclude = list(cfg.exclude_titles)
     # The model's own suggestions, added once the user's title list was final. They
     # score a flat 30 — below every tier a title the user NAMED can earn.

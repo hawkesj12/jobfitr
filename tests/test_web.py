@@ -1115,3 +1115,60 @@ def test_the_retrieval_flag_keeps_suggestions_out_of_the_query(monkeypatch, clie
         json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
     ).json()
     assert d["jobs"] == [], "retrieval must not see the suggestion when the flag is off"
+
+
+# ── penalties that read the meaning, not just the word ───────────────────────
+
+
+def test_a_company_named_somebody_elses_client_is_penalised(client):
+    """Found by READING a board, not by a test. u11's #2 result was a Forward Deployed
+    Engineer role at a company called "TechTree's client" — a placement shop declaring
+    the arrangement in the employer field — scoring 122 with no penalty, because the
+    avoid-term is "our client" and phrase matching does exactly what it says."""
+    _seed(
+        [
+            _job("Forward Deployed Engineer", text="build integrations",
+                 company="TechTree's client", url="https://x/tt"),
+            _job("Forward Deployed Engineer", text="build integrations",
+                 company="Twilio", url="https://x/tw"),
+        ]
+    )
+    _mark_fresh(["forward deployed engineer"])
+    d = client.post("/api/score", json={"titles": ["Forward Deployed Engineer"]}).json()
+    by_co = {j["company"]: j for j in d["jobs"]}
+    assert ["client", -30] in [list(p) for p in by_co["TechTree's client"]["parts"]]
+    assert by_co["Twilio"]["points"] > by_co["TechTree's client"]["points"]
+
+
+def test_the_client_rule_does_not_sink_client_facing_job_titles(client):
+    """The scoping is load-bearing, not tidy. 244 job TITLES in the corpus contain
+    "client" — Client Success Director, Client Support Engineer — all ordinary roles.
+    The penalty path tests title and company as one blob, so a term added the usual way
+    would have sunk every one of them."""
+    _seed([_job("Client Success Director", text="lead the account team",
+                company="Acme", url="https://x/csd")])
+    _mark_fresh(["client success director"])
+    d = client.post("/api/score", json={"titles": ["Client Success Director"]}).json()
+    assert d["jobs"][0]["points"] == 100
+    assert not [p for p in d["jobs"][0]["parts"] if p[1] < 0]
+
+
+def test_serving_clients_is_not_the_same_as_placing_you_at_one(client):
+    """The 19:1 case. Of 1,619 corpus bodies using "our client(s)", 753 have the client
+    as the party being SERVED and 39 as the party HIRING. The qualifier keys on which."""
+    _seed(
+        [
+            # distinct companies: _dedupe_listings collapses same-title-same-employer
+            # rows, which is correct behaviour and would hide half of this test
+            _job("Data Analyst", text="we help our clients transform complex data",
+                 company="Servesco", url="https://x/served"),
+            _job("Data Analyst", text="our client is seeking an analyst for a contract",
+                 company="Placeco", url="https://x/hiring"),
+        ]
+    )
+    _mark_fresh(["data analyst"])
+    d = client.post("/api/score",
+                    json={"titles": ["Data Analyst"], "rank_down": ["our client"]}).json()
+    by_url = {j["url"]: j for j in d["jobs"]}
+    assert not [p for p in by_url["https://x/served"]["parts"] if p[1] < 0], "serving clients is ordinary B2B"
+    assert ["our client", -15] in [list(p) for p in by_url["https://x/hiring"]["parts"]]
