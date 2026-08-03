@@ -19,6 +19,7 @@ monkeypatch it and run with zero real network.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -26,6 +27,8 @@ from zoneinfo import ZoneInfo
 import httpx
 
 _ET = ZoneInfo("America/New_York")
+
+log = logging.getLogger("jobfitr.chat")
 
 # ── config from env (key/model live only in the server environment) ───────────
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -44,6 +47,7 @@ REQUEST_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT", "30"))
 # that relaxes until ~50 results), so the chat never asks about them.
 CONFIG_FIELDS = (
     "titles",
+    "related_titles",
     "boosts",
     "exclude",
     "rank_down",
@@ -70,6 +74,14 @@ TURN_SYSTEM_PROMPT = (
     "they can give more than one — most roles are advertised under several different "
     "titles, and a user who names only one silently misses the rest of the market. "
     "Phrase it so listing a few reads as normal, not advanced.\n"
+    "- related_titles: FIVE job titles YOU suggest — never asked for, never a "
+    "substitute for asking. Fill this ONCE the user's own title list is final (the turn "
+    "you ask about location), and leave it [] before that: suggestions built against "
+    "half an answer are wasted. Write the CANONICAL, SHORT form a job board actually "
+    "uses — 'Teacher', not 'High School Teacher'; 'Lab Technician', not 'Clinical "
+    "Laboratory Technologist' — because a listing is found by its own wording, not the "
+    "user's. Do NOT restate the user's titles with different decoration. If they typed a "
+    "role wrong ('data analist'), the correctly-spelled canonical title belongs here.\n"
     "- location: a place, or 'remote', or 'anywhere'. A bare city is ambiguous "
     "(Madison, IN vs Madison, WI), so if they give a city with no state, ASK which "
     "state and store it as 'City, ST'. If they say remote, set remote_only=true.\n"
@@ -144,6 +156,15 @@ TURN_SCHEMA = {
                     "description": "True once titles AND location are known (or the user said to just go).",
                 },
                 "titles": {"type": "array", "items": {"type": "string"}},
+                # The model's OWN suggestions, not the user's answers. Kept in a
+                # separate field because the ranker scores them lower on purpose —
+                # merged into `titles` they would be indistinguishable from a role the
+                # user actually asked for, and would score a full exact-match tier.
+                "related_titles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Five canonical, SHORT adjacent job titles you suggest — only once the user's own title list is final ([] before that).",
+                },
                 "boosts": {"type": "array", "items": {"type": "string"}},
                 "exclude": {"type": "array", "items": {"type": "string"}},
                 "rank_down": {"type": "array", "items": {"type": "string"}},
@@ -181,6 +202,7 @@ TURN_SCHEMA = {
                 "reply",
                 "ready",
                 "titles",
+                "related_titles",
                 "boosts",
                 "exclude",
                 "rank_down",
@@ -343,7 +365,7 @@ def _already_chosen(cfg: dict) -> set[str]:
     suggestion, so this is the deterministic backstop rather than trusting the model.
     """
     chosen: set[str] = set()
-    for key in ("titles", "boosts", "exclude", "rank_down"):
+    for key in ("titles", "related_titles", "boosts", "exclude", "rank_down"):
         value = cfg.get(key)
         if isinstance(value, str):
             value = [value]
@@ -355,6 +377,25 @@ def _already_chosen(cfg: dict) -> set[str]:
     if isinstance(location, str) and location.strip():
         chosen.add(location.strip().lower())
     return chosen
+
+
+def _needs_related(cfg: dict) -> bool:
+    """True when this is the turn to fill `related_titles`.
+
+    The gate is `location answered`, not `titles present` — the interview asks about
+    titles across more than one turn ("what role?", then "any others you'd take?"), and
+    a user can leave that stage with four. Suggestions generated against the first
+    answer would be built on an incomplete picture. Location cannot be reached while
+    titles are outstanding, so answering it is the unambiguous end of the title stage.
+
+    Deterministic on purpose. The prompt asks for the behaviour; this decides whether it
+    happened — the same reason _already_chosen and AVOID_CHIPS exist.
+    """
+    return (
+        _has_titles(cfg)
+        and _has_location(cfg)
+        and not (cfg or {}).get("related_titles")
+    )
 
 
 def _has_titles(cfg: dict) -> bool:
@@ -497,6 +538,16 @@ async def turn(
     model_ready = bool(parsed.get("ready"))
     delta = {k: parsed[k] for k in CONFIG_FIELDS if k in parsed}
     merged = merge_config(current_config, delta)
+    # The gate is a DETECTOR, not a fixer. If the title stage closed and the model did
+    # not suggest anything, the search still runs — it just runs without the flexibility
+    # related titles buy, exactly as it did before this field existed. Logging it is what
+    # makes the miss countable; silently backfilling would hide how often the model
+    # ignores the instruction, which is the number worth having.
+    if _needs_related(merged):
+        log.info(
+            "chat: title stage closed with no related_titles (titles=%r)",
+            merged.get("titles"),
+        )
     ready = _has_titles(merged) and _has_location(merged) and model_ready
     raw_chips = parsed.get("chips") if isinstance(parsed.get("chips"), list) else []
     # The interview's forced avoid-chips and mechanic hints belong to the intake flow

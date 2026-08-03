@@ -782,3 +782,16 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   .gcard:hover { transform: none; }
   .gcard.flying { animation: none; opacity: 0; }
 }
+
+/* Suggested criteria — the model's related titles, not the user's answers. Muted on
+   purpose: the pill has to read as "we added this for you" at a glance, or the board
+   looks like it is searching for things the user never asked for. Still removable. */
+.crit.suggested {
+  opacity: 0.68;
+  border-style: dashed;
+  font-style: italic;
+}
+.crit.suggested:hover,
+.crit.suggested:focus-within {
+  opacity: 1;
+}

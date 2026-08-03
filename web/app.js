@@ -517,6 +517,10 @@ function revealCard(node) {
 // per answer, each removable, plus a Refine that reopens the conversation.
 const CRIT_FIELDS = [
   { key: "titles", neg: false },
+  // The model's own suggestions, not the user's answers, so they read differently —
+  // muted, and labelled. A user who cannot tell which titles they chose from which the
+  // machine added has no way to judge why a listing is on their board.
+  { key: "related_titles", neg: false, suggested: true },
   { key: "location", neg: false },
   { key: "boosts", neg: false },
   { key: "exclude", neg: true },
@@ -525,6 +529,7 @@ const CRIT_FIELDS = [
 
 function critText(key, value) {
   if (key === "location") return value;
+  if (key === "related_titles") return `also: ${Array.isArray(value) ? value.join(" · ") : value}`;
   return Array.isArray(value) ? value.join(" · ") : value;
 }
 
@@ -546,7 +551,7 @@ function renderCriteria() {
     any = true;
 
     const pill = document.createElement("span");
-    pill.className = f.neg ? "crit neg" : "crit";
+    pill.className = "crit" + (f.neg ? " neg" : "") + (f.suggested ? " suggested" : "");
     const txt = document.createElement("span");
     txt.className = "txt";
     txt.textContent = critText(f.key, value);

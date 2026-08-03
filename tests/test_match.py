@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from jobfitr.match import has_term, norm_key, term_hits, title_points
+from jobfitr.match import has_term, norm_key, term_hits, title_points, title_score
 
 # ── unit: the matching rule ──────────────────────────────────────────────────
 
@@ -85,7 +85,8 @@ TIERS = [
     ("AI Product Builder, Senior", 80, "all words, any order"),
     ("Staff AI Product Builder", 60, "core role, different seniority"),
     ("Principal AI Product Builder", 60, "core role, different seniority"),
-    ("AI Product Manager", 30, "related — 2 of 4 words"),
+    ("AI Product Manager", 0, "half the words is NOT a tier — the related tier holds "
+     "the model's suggestions, not a word count"),
     ("Registered Nurse", 0, "unrelated"),
     ("", 0, "empty job title"),
 ]
@@ -101,6 +102,48 @@ def test_title_tiers(job, pts, why):
 def test_tiers_do_not_stack():
     """An exact match scores 100, not 100+80+60 — the best single tier only."""
     assert title_points(WANT, WANT) == 100
+
+
+# ── the related tier: the model's suggestions, flat 30 ───────────────────────
+
+SUGGESTED = ["AI Engineer", "Applied Scientist"]
+
+
+def test_a_suggested_title_earns_the_related_tier():
+    pts, is_related = title_score([WANT], SUGGESTED, "AI Engineer")
+    assert (pts, is_related) == (30, True)
+
+
+def test_a_suggested_title_is_flat_30_however_well_it_matches():
+    """No weight, no fraction of a primary tier. An EXACT match on a suggestion scores
+    the same 30 as a seniority-shifted one, because the tier is a statement about whose
+    list the title came from — not about how close the strings are."""
+    for job in ("AI Engineer", "Senior AI Engineer", "AI Engineer, Staff"):
+        assert title_score([WANT], SUGGESTED, job) == (30, True)
+
+
+def test_the_users_own_title_always_wins():
+    """Precedence, not addition. Even the WEAKEST primary tier outranks the strongest
+    possible related match — the user's own words beat the machine's guess."""
+    pts, is_related = title_score([WANT], ["Staff AI Product Builder"], "Staff AI Product Builder")
+    assert (pts, is_related) == (60, False), "core+modifier on a named title, not related"
+
+
+def test_no_suggestions_means_no_related_tier():
+    """Every stored search predates this field. Absent must score exactly as before."""
+    assert title_score([WANT], None, "AI Engineer") == (0, False)
+    assert title_score([WANT], [], "AI Engineer") == (0, False)
+
+
+def test_the_word_overlap_rule_is_gone():
+    """REGRESSION. A job title sharing half its words used to earn 30 on that alone —
+    which caught 'Warehouse Lead' for 'Warehouse Supervisor' and also 'Senior Full-Stack
+    Developer' for 'Instructional Designer'. Right by accident; now it scores nothing
+    unless the model actually suggested it."""
+    assert title_score(["Instructional Designer"], [], "Senior Full-Stack Developer") == (0, False)
+    assert title_score(["Warehouse Supervisor"], [], "Warehouse Lead") == (0, False)
+    # ...and comes back the moment it IS suggested
+    assert title_score(["Warehouse Supervisor"], ["Warehouse Lead"], "Warehouse Lead") == (30, True)
 
 
 def test_title_outweighs_a_keyword_stuffed_body():

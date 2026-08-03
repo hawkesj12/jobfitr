@@ -35,7 +35,7 @@ from slowapi.util import get_remote_address
 from . import chat as chatmod
 from . import live, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
-from .match import has_term, norm_key, term_hits, title_points
+from .match import has_term, norm_key, term_hits, title_score
 from .snapshot import load_dotenv
 
 _ET = ZoneInfo("America/New_York")
@@ -130,6 +130,13 @@ BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term →
 # body penalty.
 PENALTY_TITLE = 30  # the tell is in the title or the employer's own name
 PENALTY_BODY = 15  # the tell is buried in the description
+
+# Whether the model's suggested titles join the FTS query as well as the scoring. ON in
+# production — it is what rescues a search whose exact phrasing matches nothing. The OFF
+# setting exists only so the before/after harness can capture an arm where related titles
+# score but do not retrieve, which is the difference between "the ranker helped" and
+# "the retrieval helped". Bundled, those two are indistinguishable in the numbers.
+RELATED_IN_RETRIEVAL = os.environ.get("JOBFITR_RELATED_IN_RETRIEVAL", "1") != "0"
 
 # ── the one cap left, and why the other four are gone ────────────────────────
 #
@@ -423,15 +430,25 @@ def _dedupe_listings(candidates: list) -> list:
 # better fit than a month-old perfect one; recency is a filter.
 # ═══════════════════════════════════════════════════════════════
 def scoreboard(
-    title: str, company: str, body: str, titles: list, boosts: list, penalties: list
+    title: str,
+    company: str,
+    body: str,
+    titles: list,
+    boosts: list,
+    penalties: list,
+    related_titles: list | None = None,
 ) -> dict:
     parts: list[tuple[str, int]] = []
 
-    # Title: the BEST single tier against the best-matching title the user gave.
-    # Tiers do not stack and titles do not add — one role, one score.
-    title_pts = max((title_points(t, title) for t in titles if t), default=0)
+    # Title: the BEST single tier across the titles the user named — and only if none
+    # of them land, a flat 30 for matching one the MODEL suggested. Tiers do not stack
+    # and titles do not add; one role, one score. `related_titles` defaults to None so
+    # every stored search from before the field existed scores exactly as it did.
+    title_pts, is_related = title_score(titles, related_titles, title)
     if title_pts:
-        parts.append(("title", title_pts))
+        # The label reaches the card's why-chips, so a user can tell a match on their
+        # own words from a match on the machine's guess.
+        parts.append(("related title" if is_related else "title", title_pts))
 
     boost_pts = 0
     for term in boosts:
@@ -478,6 +495,7 @@ def _rank(
     remote_only,
     max_age_days,
     limit,
+    related_titles=None,
 ):
     """Score every candidate on the scoreboard, hard-filtered by exclude/remote/age,
     sorted by points, sliced to `limit`.
@@ -512,7 +530,13 @@ def _rank(
                 continue
         body = (c.get("body") or "").lower()
         board = scoreboard(
-            title, (c.get("company") or "").lower(), body, titles, boosts, penalties
+            title,
+            (c.get("company") or "").lower(),
+            body,
+            titles,
+            boosts,
+            penalties,
+            related_titles,
         )
         # `why` is built FROM the parts, not computed separately. It used to test
         # `term in blob` — the same substring bug removed from scoring — so boosting
@@ -580,12 +604,27 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         cfg.agency_penalty.keys()
     )  # user rank_down or the generic staffing terms
     exclude = list(cfg.exclude_titles)
+    # The model's own suggestions, added once the user's title list was final. They
+    # score a flat 30 — below every tier a title the user NAMED can earn.
+    related = _clean_list(payload.get("related_titles"))
 
     degraded = _warm_cache(titles, location)
 
     # Every listing FTS5 matches, not a top-N slice of them. Retrieval decides what is
     # RELEVANT; it has no business deciding what the ranker is allowed to consider.
-    candidates = _dedupe_listings(store.bm25_candidates(titles)) if titles else []
+    #
+    # Related titles join the query, and that is what gives a search somewhere to go
+    # when the user's own phrasing finds nothing: _fts_query ORs quoted exact phrases,
+    # so "High School Teacher" matches 0 rows while the suggested "Teacher" matches 225.
+    #
+    # The env flag exists for MEASUREMENT, not for production. With it off the titles
+    # still score but stay out of retrieval, which separates what the ranker did from
+    # what the retrieval did — otherwise v1 bundles two changes and the before/after
+    # cannot say which one worked.
+    search_titles = titles + related if RELATED_IN_RETRIEVAL else titles
+    candidates = (
+        _dedupe_listings(store.bm25_candidates(search_titles)) if search_titles else []
+    )
 
     # Read recency off the payload rather than cfg, because cfg.max_age_days carries a
     # 60-day DEFAULT and a default is not a preference. Absent → no age filter at all.
@@ -604,6 +643,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         cfg.remote_only,
         max_age_days,
         RESULT_CAP,
+        related,
     )
     pcts = _fit_pcts([points for _, points, _, _ in kept])
     results = [

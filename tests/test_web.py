@@ -1031,3 +1031,80 @@ def test_discovered_write_failure_is_reported_not_silent(tmp_path, monkeypatch, 
     meta = snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
     assert meta["count"] == 0  # harvest still succeeded (didn't raise)
     assert "could not record" in capsys.readouterr().out  # but it said so
+
+
+# ── related titles: the model's suggestions ──────────────────────────────────
+
+
+def test_a_suggested_title_finds_jobs_the_users_own_wording_cannot(client):
+    """THE POINT OF THE FEATURE. _fts_query ORs quoted exact phrases, so a multi-word
+    title only matches verbatim. In the real corpus '"High School Teacher"' matches 0
+    rows while 'Teacher' matches 225 — the user is invisible to a board that holds
+    exactly the job they want."""
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+
+    alone = client.post("/api/score", json={"titles": ["High School Teacher"]}).json()
+    assert alone["jobs"] == [], "the exact phrase matches nothing — the bug being routed around"
+
+    with_related = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert len(with_related["jobs"]) == 1
+    assert with_related["jobs"][0]["title"] == "Teacher"
+
+
+def test_a_suggested_match_is_labelled_so_the_card_can_say_so(client):
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    job = d["jobs"][0]
+    assert ["related title", 30] in [list(p) for p in job["parts"]]
+    assert job["points"] == 30
+
+
+def test_the_users_own_title_outranks_a_suggested_one(client):
+    """Precedence is the whole design. A job matching what the user ASKED for must sit
+    above one matching only what the machine guessed, however good the guess looks."""
+    _seed(
+        [
+            _job("Teacher", text="classroom", url="https://x/sug"),
+            _job("High School Teacher", text="classroom", url="https://x/own"),
+        ]
+    )
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert [j["title"] for j in d["jobs"]] == ["High School Teacher", "Teacher"]
+    assert d["jobs"][0]["points"] == 100 and d["jobs"][1]["points"] == 30
+
+
+def test_a_config_without_related_titles_scores_exactly_as_before(client):
+    """Every stored search and the whole production config predate this field."""
+    _seed([_job("High School Teacher", text="classroom", url="https://x/own")])
+    _mark_fresh(["high school teacher"])
+    without = client.post("/api/score", json={"titles": ["High School Teacher"]}).json()
+    empty = client.post(
+        "/api/score", json={"titles": ["High School Teacher"], "related_titles": []}
+    ).json()
+    assert without["jobs"][0]["points"] == empty["jobs"][0]["points"] == 100
+
+
+def test_the_retrieval_flag_keeps_suggestions_out_of_the_query(monkeypatch, client):
+    """The measurement seam. With the flag off a suggested title still SCORES but never
+    RETRIEVES — which is what separates 'the ranker helped' from 'the retrieval helped'.
+    Bundled, the before/after cannot credit either one."""
+    monkeypatch.setattr(server, "RELATED_IN_RETRIEVAL", False)
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert d["jobs"] == [], "retrieval must not see the suggestion when the flag is off"

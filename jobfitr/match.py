@@ -44,6 +44,7 @@ __all__ = [
     "term_hits",
     "term_pattern",
     "title_points",
+    "title_score",
 ]
 
 # A term shorter than this gets no plural suffix. "icu" + "s" would match "icus", which is
@@ -83,9 +84,20 @@ _TIER_CORE = 60
 _TIER_RELATED = 30
 _TIER_NONE = 0
 
-# Fraction of the user's title words a job title must carry to count as a related role.
-# A defensible default, NOT a measured one — the calibration pass is what tunes it.
-_RELATED_FRACTION = 0.5
+# WHAT THE RELATED TIER IS FOR. It was always specified as "AI-generated titles" — the
+# roles the model suggests once the user's own list is final. Nothing generated any, so
+# the slot was occupied by a stand-in: a job title counted as related if it shared half
+# its words with something the user typed.
+#
+# That heuristic was right by accident. Measured across the 57 test users it carried 19
+# listings, and it caught "Warehouse Lead" for a wanted "Warehouse Supervisor" — and
+# also "Senior Full-Stack Developer" for a wanted "Instructional Designer", on the
+# strength of sharing "Design". A model asked for related roles suggests the first and
+# would never suggest the second.
+#
+# So the fraction rule is gone and the tier holds what it was named for. A related match
+# is a FLAT 30 — no weight, no fraction of a primary tier. It is worth less than any
+# match against a title the user actually named, and more than nothing.
 
 _PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
 
@@ -172,14 +184,17 @@ def _strip_seniority(normalised: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 # title_points()
 # ═══════════════════════════════════════════════════════════════
-# Score one job title against one title the user asked for, on a fixed
-# five-tier scale. Returns the BEST single tier — tiers do not add, so a
-# listing cannot collect 50 and 40 and 30 for the same title.
+# Score one job title against ONE title, on the three tiers that mean
+# "the user asked for this". Returns the BEST single tier — tiers do
+# not add, so a listing cannot collect 100 and 80 for the same title.
+# The related tier is not here on purpose: it is not a property of a
+# title pair, it is a statement about WHOSE list the title came from.
+# title_score() below is what applies it.
 #
 # Mechanical by design: no similarity model, no embedding, no judgment
-# call. Users supply their own related titles via the interview's
-# related-title chips, so the ranker never has to guess what counts as
-# "close enough".
+# call. Deciding what counts as "close enough" is not the ranker's job
+# — the interview asks the model for it explicitly, and the answer
+# arrives as `related_titles`.
 # ═══════════════════════════════════════════════════════════════
 def title_points(user_title: str, job_title: str) -> int:
     want = norm_key(user_title)
@@ -190,17 +205,33 @@ def title_points(user_title: str, job_title: str) -> int:
     if want == got:
         return _TIER_EXACT
 
-    want_words = want.split()
-    got_words = set(got.split())
-
-    if all(w in got_words for w in want_words):
+    if all(w in set(got.split()) for w in want.split()):
         return _TIER_ALL_WORDS
 
     if _strip_seniority(want) == _strip_seniority(got):
         return _TIER_CORE
 
-    overlap = sum(1 for w in want_words if w in got_words)
-    if overlap / len(want_words) >= _RELATED_FRACTION:
-        return _TIER_RELATED
-
     return _TIER_NONE
+
+
+# ═══════════════════════════════════════════════════════════════
+# title_score()
+# ═══════════════════════════════════════════════════════════════
+# The whole ladder, in one call: the best tier across every title
+# the user named, and only if NONE of them land, a flat 30 for
+# matching one of the model's suggestions.
+#
+# The precedence is the point. A related title can never outrank a
+# real one — not even an exact match on a suggestion beats a
+# seniority-shifted match on a role the user actually asked for.
+# The user's own words always win.
+# ═══════════════════════════════════════════════════════════════
+def title_score(titles, related_titles, job_title: str) -> tuple[int, bool]:
+    """(points, is_related). `is_related` labels the card's receipt."""
+    best = max((title_points(t, job_title) for t in titles or [] if t), default=0)
+    if best:
+        return best, False
+    for t in related_titles or []:
+        if t and title_points(t, job_title):
+            return _TIER_RELATED, True
+    return _TIER_NONE, False
