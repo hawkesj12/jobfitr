@@ -325,8 +325,17 @@ const FIT_STOPS = [
   { min: -Infinity, word: "Weak", cls: "fair" },
 ];
 
-function tierFor(points) {
-  return FIT_STOPS.find((t) => points >= t.min);
+// Keyed off the TITLE tier, not the total. The words are about the title — "Exact title",
+// "Your words" — so deriving them from the total makes a card contradict its own receipt:
+// a listing with `title +80` and two boosts reaches 100 and would announce "Exact title"
+// while the chip beside it says 80. Measured at 9 of 200 on a real board before the fix.
+//
+// The slider still filters on TOTAL points, and that is deliberate — there the question is
+// "how good is this listing", not "how did its title match".
+function tierFor(job) {
+  const part = (job.parts || []).find((p) => p[0] === "title" || p[0] === "related title");
+  const titlePoints = part ? part[1] : 0;
+  return FIT_STOPS.find((t) => titlePoints >= t.min);
 }
 
 // Some sources (e.g. HN) stuff the whole posting into `location`. Keep just the real
@@ -450,7 +459,7 @@ function buildCard(job, index, total) {
   // So the number answers "how good is this?" and the bar answers "compared to the rest
   // of this board?". Two different questions, which is why both are here.
   const points = job.points || 0;
-  const t = tierFor(points);
+  const t = tierFor(job);
   $(".fit-num", node).textContent = points;
   const bar = $(".fit-bar", node);
   bar.classList.add(t.cls);
