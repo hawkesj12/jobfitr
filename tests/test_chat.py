@@ -368,3 +368,48 @@ def test_chat_reaches_no_job_api(monkeypatch):
         "/api/chat", json={"messages": [{"role": "user", "content": "zookeeper"}]}
     )
     assert r.status_code == 200
+
+
+# ── related titles: the gate, not the generation ─────────────────────────────
+
+
+def test_related_titles_survive_the_config_merge():
+    """The field must cross the same boundary every other config field crosses."""
+    merged = chat.merge_config(
+        {"titles": ["Data Analyst"]}, {"related_titles": ["Business Analyst"]}
+    )
+    assert merged["related_titles"] == ["Business Analyst"]
+
+
+def test_an_empty_turn_never_wipes_generated_related_titles():
+    """The model re-derives the whole config each turn, so a momentary blank must not
+    erase suggestions already made — the same rule that protects titles and boosts."""
+    current = {"titles": ["Data Analyst"], "related_titles": ["Business Analyst"]}
+    assert chat.merge_config(current, {"related_titles": []})["related_titles"] == [
+        "Business Analyst"
+    ]
+
+
+def test_the_gate_stays_shut_while_the_title_stage_is_open():
+    """The trigger is the END of the title stage, not the first answer. The interview
+    asks about titles across more than one turn, and a user can leave with four —
+    suggestions built against answer one would be built on an incomplete picture."""
+    assert chat._needs_related({}) is False
+    assert chat._needs_related({"titles": ["Data Analyst"]}) is False
+
+
+def test_the_gate_opens_once_location_is_answered():
+    """Location cannot be reached with titles outstanding, so answering it is the
+    unambiguous end of the title stage."""
+    assert (
+        chat._needs_related({"titles": ["Data Analyst"], "location": "remote"}) is True
+    )
+
+
+def test_the_gate_closes_again_once_the_model_has_filled_it():
+    cfg = {
+        "titles": ["Data Analyst"],
+        "location": "remote",
+        "related_titles": ["Business Analyst"],
+    }
+    assert chat._needs_related(cfg) is False

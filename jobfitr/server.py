@@ -35,6 +35,7 @@ from slowapi.util import get_remote_address
 from . import chat as chatmod
 from . import live, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
+from .match import has_term, norm_key, term_hits, title_score
 from .snapshot import load_dotenv
 
 _ET = ZoneInfo("America/New_York")
@@ -96,56 +97,177 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
 SNIPPET_CHARS = 240
 DESC_CHARS = 1200
-CANDIDATE_LIMIT = 500  # top-N BM25 candidates fetched before the personalized rerank
 
-# Rerank weights (in BM25 units, ~0-5): a boost match nudges up, a rank_down sinks.
-# BOOST_MAX is the TOTAL boost swing available to any one listing, no matter how many
-# boosts the user entered. A flat per-match bonus made the swing scale with the boost
-# count (nine boosts = up to +18), which swamped BM25 relevance entirely and let a
-# keyword-stuffed off-title listing outrank an exact-title one. Capping the total keeps
-# boosts a nudge on top of relevance instead of a replacement for it.
-BOOST_MAX = 4.0
-# A boost in the TITLE is strong evidence; one buried in the body is weaker.
-TITLE_CREDIT = 1.0
-BODY_CREDIT = 0.5
-# A listing with NO body is missing evidence, not lacking it. Scoring an absent body as
-# zero matches punished whole sources (Greenhouse rows arrive body-less) for something
-# they never had a chance to carry, so the unobserved portion is imputed at a neutral
-# rate rather than counted against them.
-NO_BODY_PRIOR = 0.5
-PENALTY_W = 3.0
-# min_score keyword → keep candidates scoring >= frac × the top result's score.
-MIN_SCORE_FRAC = {"plenty": 0.0, "balanced": 0.35, "strong": 0.6}
+# ── the scoreboard ────────────────────────────────────────────────────────────
+# A listing's score is a plain integer a person can read off the card and check:
+#
+#     points = title tier  +  Σ boost points  −  penalties (30 title/company, 15 body)
+#
+# It replaced `bm25 + boost_bonus − penalties`, a float with two defects. First it was
+# unreadable — nobody could say why a job scored 4.31. Second, and worse, the boost half
+# was a FRACTION of the boosts the user gave, so a listing matching 3 of 14 boosts scored
+# LOWER than one matching 0 of 0. The interview tells people to name as many skills as
+# they can think of; the scorer then punished everyone who did.
+#
+# A scoreboard has neither problem. Nothing is earned except by evidence, and evidence
+# only ever adds — so naming another skill can never cost you.
+#
+# BM25 is deliberately absent. It is still what ORDERS the candidates coming out of FTS5;
+# it is no longer part of what a job is WORTH.
+BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term → 20 max
+# Penalties read the BODY as well as the title and company, weighted by where the tell
+# appears. An earlier version scored title+company only, on the measured grounds that
+# "senior" is 18.8% of bodies and "sales" 13.1% — but those are EXCLUDE terms, which hide
+# a listing, not rank_down terms, which sink it. Measured against the rank_down terms the
+# 57 test users actually use, the worst is "our client" at 4.1% of bodies and the most
+# popular ("staffing", 14 users) is 0.5%.
+#
+# And three of the clearest agency tells — "our client", "consultancy", "staff
+# augmentation" — appear in ZERO titles or company names. A title-only rule caught none
+# of them, which is precisely the listing type users are asking to sink.
+#
+# One hit per term, strongest wins: a term in the title/company does NOT also collect the
+# body penalty.
+PENALTY_TITLE = 30  # the tell is in the title or the employer's own name
+PENALTY_BODY = 15  # the tell is buried in the description
 
-# Deterministic freshness/pickiness ladder — replaces the "how picky?" + recency
-# questions. Start tight (fresh + strong), relax only as far as needed to reach TARGET
-# results. (max_age_days, min_score), tight → loose.
+# ── the words that mean two things ───────────────────────────────────────────
 #
-# TARGET_RESULTS and RESULT_CAP are two different jobs that used to be one number, and
-# conflating them capped the board at 50 rows:
+# Some avoid-terms are a whole signal on their own — "our client", "staff augmentation",
+# "talent solutions", "c2c" — because nobody writes those unless they are placing you at
+# somebody else's company. Others are ordinary English that happens to collide with the
+# agency vocabulary, and penalising the bare word is almost always wrong.
 #
-#   TARGET_RESULTS — the SUFFICIENCY bar. "Has this tier found enough?" Raising it does
-#   not give you more results, it makes the ladder relax further to hit a bigger number
-#   — trading fresh+strong for old+weak. It stays at 50 on purpose.
+# The 1.5 audit caught this: five independent readers scored 250 listings by hand, and
+# the single largest cluster of disagreements was the code subtracting points for a word
+# the reader could see meant something else. Measured afterwards on the 39,597-row
+# corpus, the bare words are overwhelmingly innocent:
 #
-#   RESULT_CAP — the DELIVERY slice. How many of the winning tier's rows we actually
-#   hand the client. Nothing about tier selection changes when this moves; the same
-#   tier wins, we just stop throwing away its tail.
+#   "agency"      860 rows.  17 clearly a firm, 94 clearly prose ("we hire people with
+#                 HIGH AGENCY"), and in company names it is 420 listings of FEDERAL
+#                 GOVERNMENT — Defense Logistics Agency, Farm Service Agency, "Department
+#                 of State - Agency Wide". A user avoiding "agency" was docking the
+#                 entire federal government 30 points.
+#   "recruiting"  1,094 rows. 12 clearly a firm. The rest is boilerplate ("if you suspect
+#                 a RECRUITING scam"), a company's own internal team, a closing date, or
+#                 — for an HR role — the duties of the job being advertised.
 #
-# The tail is what the client-side filters eat. A user who filters 50 rows by salary
-# and work style is left with a handful; the same filters over 200 still leave a board.
-TARGET_RESULTS = 50
+# So a bare ambiguous word now only counts when something next to it makes it an
+# EMPLOYER TYPE. Multi-word terms are untouched: they were never ambiguous, and they are
+# what actually catches a staffing shop ("our client is seeking…").
+#
+# The qualifier applies to the BODY for every term below. It applies to the COMPANY NAME
+# for "agency" ONLY, and that asymmetry is measured, not taste:
+#
+#   companies whose name contains "staffing" — 38 listings, every one a real staffing
+#     shop (Kforce Technology Staffing, KE Staffing, Bravo Global Staffing). Naming
+#     yourself that IS the disclosure, so the bare word in a company name is good signal.
+#   companies whose name contains "recruiting" — 7 listings, all genuine.
+#   companies whose name contains "agency" — 420 listings, and they are the FEDERAL
+#     GOVERNMENT: Defense Logistics Agency, Farm Service Agency, Defense Commissary
+#     Agency. Nothing about that name discloses a staffing arrangement.
+#
+# So "Bravo Global Staffing" is still caught by its name, and the Defense Logistics
+# Agency is not — which is the whole point.
+#
+# "our client" was ADDED on 2026-08-03, and it is the largest correction of the set. It
+# was left out of the first pass on the reasoning that multi-word phrases are inherently
+# unambiguous — which was wrong, and the measurement is lopsided: of 1,619 bodies using
+# it, 753 have the client as the party being SERVED ("help our clients transform complex
+# data", "empower our clients' success", "the best products for our clients") against 39
+# where the client is the party HIRING ("our client is a leading govtech"). 19 to 1.
+#
+# That matters more than anything else here: "our client" was firing on 3,660 pairs, by
+# far the biggest penalty term in the corpus, and the 1.5 audit had already flagged it —
+# four readers independently docked nothing where the code took 15 points off an ordinary
+# B2B company for saying it serves customers.
+#
+# The qualifier keys on WHO IS HIRING. A staffing shop writes "our client is seeking" or
+# "on behalf of our client"; a consultancy writes "for our clients".
+#
+# "consulting" was in this list and came OUT, because the same measurement that put the
+# others in kept it out: 931 rows containing it, 308 in the firm sense ("global leader in
+# technology and management consulting") against 18 in the prose sense ("consulting with
+# stakeholders") — 17:1. It is simply not an ambiguous word, and qualifying it created a
+# false NEGATIVE that the goldens caught: a real consultancy stopped being penalised.
+# The mirror case is "recruiter", which stays: 280 rows, 4 firm against 137 prose, almost
+# all of them "our recruiter will reach out to you".
+#
+# Deliberately four entries. If this needs to grow much past that, the rule is wrong and
+# dropping body penalties outright is the better trade.
+QUALIFIED_PENALTY = {
+    "agency": r"\b(staffing|recruiting|recruitment|employment|temp|talent)[\s-]+agenc(y|ies)\b",
+    "recruiting": r"\brecruiting[\s-]+(agency|agencies|firm|company)\b|\b(third[\s-]party|external|agency)[\s-]+recruiting\b",
+    "recruiter": r"\b(agency|third[\s-]party|external|contract)[\s-]+recruiter\b",
+    "staffing": r"\bstaffing[\s-]+(agency|agencies|firm|company|solutions|services|partner)\b",
+    "our client": r"\bour clients?[,']?\s+(is|are|has|have|was|were)\b|\bon behalf of (our|a) clients?\b|\bour client,\s|\bfor one of our clients?\b",
+}
+
+# The one term whose bare form is untrustworthy even in a company name — 420 federal
+# listings say so.
+QUALIFY_IN_COMPANY_TOO = frozenset({"agency"})
+
+# ── the mirror case: a term that counts ONLY in the company name ─────────────
+#
+# Reading u11's board turned up a Forward Deployed Engineer role at a company called
+# "TechTree's client", scoring 122 with no penalty. The user's avoid-term is "our
+# client"; the employer field says "TechTree's client"; phrase matching does exactly what
+# it says and misses it. A company whose NAME is somebody else's client has disclosed the
+# arrangement in the one field that is supposed to say who you would work for.
+#
+# It is company-only, and that scoping is load-bearing rather than tidy: 244 job TITLES
+# in the corpus contain "client" — Client Success Director, Client Support Engineer,
+# Client Services Project Manager — all perfectly ordinary roles. The existing penalty
+# path tests title and company as one blob, so a term added the usual way would sink all
+# 244. Against 35 listings at the one company whose NAME contains the word.
+#
+# It is deliberately NOT a body term either. "helping our clients succeed" is the
+# ordinary-language case 1.7b just finished removing, and re-adding it here would undo
+# that through a side door.
+COMPANY_ONLY_PENALTY = frozenset({"client"})
+
+# Whether the model's suggested titles join the FTS query as well as the scoring. ON in
+# production — it is what rescues a search whose exact phrasing matches nothing. The OFF
+# setting exists only so the before/after harness can capture an arm where related titles
+# score but do not retrieve, which is the difference between "the ranker helped" and
+# "the retrieval helped". Bundled, those two are indistinguishable in the numbers.
+RELATED_IN_RETRIEVAL = os.environ.get("JOBFITR_RELATED_IN_RETRIEVAL", "1") != "0"
+
+# ── the one cap left, and why the other four are gone ────────────────────────
+#
+# RESULT_CAP is the DELIVERY slice: how many scored rows we hand the client. It is about
+# BANDWIDTH, not taste — 200 rows cost 54.6 KB gzipped, and the tail is what the board's
+# own salary/work-style filters eat. It is the only limit the server still imposes.
+#
+# Four other mechanisms used to sit between the score and the user. Measured across the
+# 57 test users, together they withheld 4,766 of 7,995 already-scored listings — 60% of
+# the board, computed and then thrown away:
+#
+#   RESULT_LADDER    five re-ranking passes over the same pool, tightening freshness and
+#                    pickiness until ~50 results were found. 34 of 57 users fell all the
+#                    way to the loosest rung — whose floor is 0.0 — and still averaged 22
+#                    results. Five passes to arrive at "don't filter."
+#
+#   MIN_SCORE_FRAC   kept only candidates scoring above a fraction of the TOP score. Being
+#                    relative to the top made it read the score SCALE: when the scorer
+#                    moved from floats to integers, the rung distribution shifted from 8
+#                    to 14 users on the strictest tier with retrieval byte-identical. A
+#                    filter that moves when an unrelated number moves cannot be reasoned
+#                    about. Pickiness is the board's fit slider now.
+#
+#   MAX_PER_COMPANY  capped one employer's contribution — by DROPPING their listings past
+#                    the 4th, not demoting them. It was solving a real problem (Anduril
+#                    has 1,063 rows, VHA 915) with an instrument that deletes evidence
+#                    invisibly. If one employer dominates a board, the user should be able
+#                    to SEE that and filter it, not have it quietly corrected.
+#
+#   CANDIDATE_LIMIT  scored only the top 500 BM25 candidates. Retrieval was deciding what
+#                    the ranker was allowed to consider. Scoring is deterministic Python
+#                    and it is cheap: uncapped, the widest user in the fixture is 5,129
+#                    rows in 1.14s (fetch + score). Cost tracks boost count × body length
+#                    rather than row count — the 6,012-row user scores FASTER — so a row
+#                    limit was never protecting the expensive thing anyway.
 RESULT_CAP = int(os.environ.get("JOBFITR_RESULT_CAP", "200"))
-# Most results one employer may contribute to the front of the board. See
-# _spread_companies — this is a reordering, not a filter, so nothing is ever hidden.
-MAX_PER_COMPANY = int(os.environ.get("JOBFITR_MAX_PER_COMPANY", "4"))
-RESULT_LADDER = [
-    (15, "strong"),
-    (30, "strong"),
-    (30, "balanced"),
-    (60, "balanced"),
-    (90, "plenty"),
-]
 
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
@@ -298,30 +420,7 @@ def _norm_category(value) -> str:
 # The gauge is explicitly "relative to your best match", so it is normalized ACROSS the
 # returned set rather than divided by the top score. The old ratio (score / top) died
 # whenever the top score was <= 0, which is the normal case for a common one-word query:
-# BM25 rates fifty jobs all titled "...Engineer" as equally relevant — correctly — so
-# every card floored at the minimum and the board rendered fifty identical "3 · Fair"
-# rows. Spreading the real spread over a readable band keeps the ranking legible without
-# inventing one: when there is genuinely no spread, every card shows the same value,
-# because they genuinely are the same match.
-_FIT_FLOOR = 45  # the weakest SHOWN match still cleared the ladder, so it is not a 3
-_FIT_FLAT = 60  # no spread at all — honest neutral, not a fake gradient
-
-
-def _fit_pcts(scores: list) -> list:
-    """Map the kept set's scores onto the 0-100 gauge, preserving relative spacing."""
-    if not scores:
-        return []
-    hi, lo = max(scores), min(scores)
-    span = hi - lo
-    if span <= 0:
-        return [_FIT_FLAT] * len(scores)
-    return [
-        max(3, min(100, round(_FIT_FLOOR + (100 - _FIT_FLOOR) * (s - lo) / span)))
-        for s in scores
-    ]
-
-
-def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
+def _shape(c: dict, points: int, why: str, parts: list) -> dict:
     """The lean per-card payload the front end renders (store row → card)."""
     body = c.get("body") or c.get("text") or ""
     # the derived facet tags (real facets category/employment_type sit in their own keys)
@@ -337,51 +436,18 @@ def _shape(c: dict, fit_score: int, why: str, fit_pct: int) -> dict:
         "category": _norm_category(c.get("category")),
         "employment_type": _norm_employment_type(c.get("employment_type")),
         "tags": tags,
-        "fit_score": fit_score,  # the reranked score (canonical)
-        "fit_pct": fit_pct,  # derived gauge value (presentation only)
-        "why": why,  # the title/boost signals that matched
+        "points": points,  # THE score — an absolute integer, the same meaning every day
+        "parts": parts,  # what earned it: [(label, delta)] — the receipt under the number
+        # COMPATIBILITY, and they leave next release. A browser holding the previous
+        # app.js reads fit_score and why; dropping them the same day the new payload
+        # ships would blank that user's board on a cache they did not ask for. `points`
+        # is the truth — fit_score is the identical integer under its old name, and the
+        # card no longer reads either.
+        "fit_score": points,
+        "why": why,
         "snippet": _snippet(body),
         "description": _description(body),
     }
-
-
-def _spread_companies(scored: list, cap: int | None = None) -> list:
-    """Drop each employer's roles beyond `cap` so no one company monopolises the board.
-
-    Ranking by score alone is fine when the biggest employer has a handful of roles.
-    It stops being fine at scale: the pool carries employers with 900+ open jobs
-    (Veterans Health Administration) and 600+ (Accenture Federal Services), and a
-    title that matches them well would otherwise hand a user fifty near-identical rows
-    from one company. That reads as a broken search, not a thorough one.
-
-    This DROPS the overflow rather than demoting it. An earlier version pushed the
-    excess to the back of the list, but the caller then truncates to a fixed window
-    (`_rank` does `[:limit]`), and for a shallow query the truncation sliced straight
-    back into that demoted overflow — so "nurse" showed 19 of 50 rows from one
-    employer. Dropping is also what lets the RESULT_LADDER work: a capped set that
-    comes up short is the honest signal that makes the ladder relax and pull a more
-    diverse set, instead of being silently padded back to full by the dominant
-    employer. A user who wants only that employer searches more specifically.
-    """
-    cap = MAX_PER_COMPANY if cap is None else cap
-    if cap <= 0:
-        return scored
-    seen: dict[str, int] = {}
-    keep = []
-    for item in scored:
-        company = (item[0].get("company") or "").strip().lower()
-        n = seen.get(company, 0) + 1
-        seen[company] = n
-        if n <= cap:
-            keep.append(item)
-    return keep
-
-
-def _norm_key(value) -> str:
-    """Lowercase + collapse whitespace/punctuation, for identity comparison."""
-    return " ".join(
-        "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
-    ).lower()
 
 
 def _dedupe_listings(candidates: list) -> list:
@@ -401,7 +467,7 @@ def _dedupe_listings(candidates: list) -> list:
     best: dict[tuple[str, str], int] = {}
     out: list = []
     for c in candidates:
-        key = (_norm_key(c.get("company")), _norm_key(c.get("title")))
+        key = (norm_key(c.get("company")), norm_key(c.get("title")))
         if not any(key):  # no company AND no title — nothing to dedup on
             out.append(c)
             continue
@@ -414,26 +480,105 @@ def _dedupe_listings(candidates: list) -> list:
     return out
 
 
-def _boost_bonus(title: str, body: str, boosts: list) -> float:
-    """The capped, evidence-weighted boost bonus for one listing.
+# ═══════════════════════════════════════════════════════════════
+# scoreboard()
+# ═══════════════════════════════════════════════════════════════
+# Score one listing and SHOW THE WORKING. Returns the total plus the
+# parts that made it, because the parts are the deliverable: the card
+# renders them as the receipt under the number, and the arithmetic
+# tests read them to prove each component independently. A scorer
+# that returned one opaque integer would make both impossible.
+#
+# Where each signal is read from is measured, not assumed:
+#   BOOSTS  → title + body. "rag" appears in 42 titles and 4,274
+#             bodies; "fastapi" in 0 titles and 11. The signal lives
+#             in the body, and repetition is real evidence — a posting
+#             naming RAG twenty times is more about RAG than one that
+#             mentions it once.
+#   PENALTIES → title + company ONLY. Whole-word in bodies, "senior"
+#             is 18.8% of the corpus and "sales" 13.1% — ordinary
+#             prose, not signals. Penalising on the body would sink
+#             a fifth of every board for saying "senior engineer".
+#
+# Freshness is absent by design. A three-day-old wrong job is not a
+# better fit than a month-old perfect one; recency is a filter.
+# ═══════════════════════════════════════════════════════════════
+def scoreboard(
+    title: str,
+    company: str,
+    body: str,
+    titles: list,
+    boosts: list,
+    penalties: list,
+    related_titles: list | None = None,
+) -> dict:
+    parts: list[tuple[str, int]] = []
 
-    Returns a value in [0, BOOST_MAX] scaled by the FRACTION of the user's boosts the
-    listing matches — not a flat sum per match — so adding more boosts sharpens the
-    signal instead of inflating the ceiling.
-    """
-    terms = [x for x in boosts if x]
-    if not terms:
-        return 0.0
-    has_body = bool(body.strip())
-    credit = 0.0
-    for x in terms:
-        if x in title:
-            credit += TITLE_CREDIT
-        elif has_body and x in body:
-            credit += BODY_CREDIT
-        elif not has_body:
-            credit += BODY_CREDIT * NO_BODY_PRIOR  # unobserved, not absent
-    return BOOST_MAX * min(1.0, credit / len(terms))
+    # Title: the BEST single tier across the titles the user named — and only if none
+    # of them land, a flat 30 for matching one the MODEL suggested. Tiers do not stack
+    # and titles do not add; one role, one score. `related_titles` defaults to None so
+    # every stored search from before the field existed scores exactly as it did.
+    title_pts, is_related = title_score(titles, related_titles, title)
+    if title_pts:
+        # The label reaches the card's why-chips, so a user can tell a match on their
+        # own words from a match on the machine's guess.
+        parts.append(("related title" if is_related else "title", title_pts))
+
+    boost_pts = 0
+    for term in boosts:
+        if not term:
+            continue
+        hits = term_hits(term, f"{title} {body}")
+        if not hits:
+            continue
+        # Diminishing per occurrence: the 5th mention says little the 4th did not,
+        # and the decay is what stops a term like "data" — 46% of the corpus —
+        # from running away with the board on sheer repetition.
+        pts = sum(BOOST_DECAY[:hits])
+        boost_pts += pts
+        parts.append((f"{term} ×{hits}", pts))
+
+    penalty_pts = 0
+    for term in penalties:
+        if not term:
+            continue
+        # An ambiguous bare word has to earn its penalty by appearing in a phrase that
+        # makes it an employer type. Everything else keeps the plain whole-word test.
+        key = norm_key(term)
+        if key in COMPANY_ONLY_PENALTY:
+            # Company field alone — not the title, and never the body. See the constant.
+            in_title = has_term(term, company)
+            in_body = False
+        elif (qualifier := QUALIFIED_PENALTY.get(key)) is not None:
+            found = re.compile(qualifier, re.IGNORECASE).search
+            in_body = bool(found(body))
+            # A company that names itself "…Staffing" has disclosed what it is; a body
+            # that says "high agency" has not. Same word, different evidential weight,
+            # so the bare form is still trusted in a name unless measurement says no.
+            in_title = (
+                bool(found(f"{title} {company}"))
+                if key in QUALIFY_IN_COMPANY_TOO
+                else has_term(term, f"{title} {company}")
+            )
+        else:
+            in_title = has_term(term, f"{title} {company}")
+            in_body = has_term(term, body)
+        if in_title:
+            hit = PENALTY_TITLE  # naming itself a staffing firm is the strongest tell
+        elif in_body:
+            hit = PENALTY_BODY  # "our client…" buried in the description
+        else:
+            continue
+        penalty_pts += hit
+        parts.append((term, -hit))
+
+    return {
+        "points": title_pts + boost_pts - penalty_pts,
+        "title_points": title_pts,
+        "boost_points": boost_pts,
+        "penalty_points": penalty_pts,
+        "parts": parts,
+    }
 
 
 def _rank(
@@ -442,15 +587,26 @@ def _rank(
     boosts,
     penalties,
     exclude,
-    min_score_key,
     remote_only,
     max_age_days,
     limit,
+    related_titles=None,
 ):
-    """Personalized rerank over BM25 candidates: relevance + boosts − penalties,
-    hard-filtered by exclude/remote/age, cut relative to the top score by pickiness."""
+    """Score every candidate on the scoreboard, hard-filtered by exclude/remote/age,
+    sorted by points, sliced to `limit`.
+
+    ONE pass. It used to run five times over the same pool under a freshness/pickiness
+    ladder, then cut everything below a fraction of the top score, then drop each
+    employer's roles past the fourth. All three are gone — the only thing between a
+    listing's score and the user is now `limit`, which is a bandwidth decision.
+
+    The three filters that remain are the ones the USER asked for: terms they said to
+    hide, remote-only if they chose it, and their own recency preference.
+
+    The tuple is (candidate, points, why, parts) and stays POSITIONAL: the sort reads
+    t[1] and the caller unpacks all four.
+    """
     scored = []
-    why_terms = [t for t in (titles + boosts) if t]
     for c in candidates:
         title = (c.get("title") or "").lower()
         # Exclusions test the COMPANY as well as the title: "recruiting agency" is an
@@ -460,21 +616,32 @@ def _rank(
             continue
         if remote_only and c.get("remote") != "remote":
             continue
-        age = age_int(c.get("posted", ""))
-        if age is not None and age > max_age_days:
-            continue
+        # `None` means the user never expressed a recency preference, so we do not
+        # invent one. The old ladder always imposed an age — 90 days at its loosest —
+        # which meant nothing older was reachable no matter what anyone wanted.
+        if max_age_days is not None:
+            age = age_int(c.get("posted", ""))
+            if age is not None and age > max_age_days:
+                continue
         body = (c.get("body") or "").lower()
-        blob = f"{title} {body}"
-        bonus = _boost_bonus(title, body, boosts)
-        pen = sum(PENALTY_W for x in penalties if x and x in blob)
-        final = float(c.get("bm25", 0.0)) + bonus - pen
-        why = ", ".join([t for t in why_terms if t in blob][:4])
-        scored.append((c, final, why))
+        board = scoreboard(
+            title,
+            (c.get("company") or "").lower(),
+            body,
+            titles,
+            boosts,
+            penalties,
+            related_titles,
+        )
+        # `why` is built FROM the parts, not computed separately. It used to test
+        # `term in blob` — the same substring bug removed from scoring — so boosting
+        # "rag" listed "rag" as a matched signal because "leverage" contains it. One
+        # computation now feeds both the number and the chips that explain it.
+        why = ", ".join(label for label, _ in board["parts"][:4])
+        scored.append((c, board["points"], why, board["parts"]))
     scored.sort(key=lambda t: t[1], reverse=True)
-    scored = _spread_companies(scored)
-    top = scored[0][1] if scored else 0.0
-    floor = top * MIN_SCORE_FRAC.get(min_score_key, 0.35) if top > 0 else -1e18
-    return [x for x in scored if x[1] >= floor][:limit], top
+    top = scored[0][1] if scored else 0
+    return scored[:limit], top
 
 
 def _warm_cache(titles: list, location: str) -> str | None:
@@ -528,45 +695,54 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     cfg = config_from_dict(payload)
     titles, location = search_inputs(payload)
     boosts = _clean_list(payload.get("boosts"))
-    penalties = list(
-        cfg.agency_penalty.keys()
-    )  # user rank_down or the generic staffing terms
+    # The user's own rank_down terms, or job-radar's twelve generic staffing defaults.
+    # COMPANY_ONLY_PENALTY is appended here rather than living with its siblings because
+    # that default list is job_radar.config.DEFAULT_AGENCY_PENALTY — inside the
+    # dependency, not this repo, so it cannot be edited from here.
+    penalties = list(cfg.agency_penalty.keys()) + sorted(COMPANY_ONLY_PENALTY)
     exclude = list(cfg.exclude_titles)
+    # The model's own suggestions, added once the user's title list was final. They
+    # score a flat 30 — below every tier a title the user NAMED can earn.
+    related = _clean_list(payload.get("related_titles"))
 
     degraded = _warm_cache(titles, location)
 
-    # Dedup ONCE here rather than inside _rank — the ladder below re-ranks this same
-    # candidate set up to five times, so collapsing duplicates per pass would repeat
-    # identical work for an identical result.
+    # Every listing FTS5 matches, not a top-N slice of them. Retrieval decides what is
+    # RELEVANT; it has no business deciding what the ranker is allowed to consider.
+    #
+    # Related titles join the query, and that is what gives a search somewhere to go
+    # when the user's own phrasing finds nothing: _fts_query ORs quoted exact phrases,
+    # so "High School Teacher" matches 0 rows while the suggested "Teacher" matches 225.
+    #
+    # The env flag exists for MEASUREMENT, not for production. With it off the titles
+    # still score but stay out of retrieval, which separates what the ranker did from
+    # what the retrieval did — otherwise v1 bundles two changes and the before/after
+    # cannot say which one worked.
+    search_titles = titles + related if RELATED_IN_RETRIEVAL else titles
     candidates = (
-        _dedupe_listings(store.bm25_candidates(titles, limit=CANDIDATE_LIMIT))
-        if titles
-        else []
+        _dedupe_listings(store.bm25_candidates(search_titles)) if search_titles else []
     )
-    # The deterministic ladder: start fresh + strong, relax only as far as needed to
-    # reach TARGET_RESULTS. The first tier that clears the bar wins (freshest/strongest);
-    # if none does, the loosest tier's set is kept. Cheap — a re-rank over the same pool.
-    kept, top, tier = [], 0.0, RESULT_LADDER[-1]
-    for max_age, min_key in RESULT_LADDER:
-        kept, top = _rank(
-            candidates,
-            titles,
-            boosts,
-            penalties,
-            exclude,
-            min_key,
-            cfg.remote_only,
-            max_age,
-            RESULT_CAP,  # deliver the tier's whole tail…
-        )
-        tier = {"max_age_days": max_age, "min_score": min_key}
-        if len(kept) >= TARGET_RESULTS:  # …but judge sufficiency on the first 50
-            break
-    pcts = _fit_pcts([final for _, final, _ in kept])
-    results = [
-        _shape(c, round(final), why, pct)
-        for (c, final, why), pct in zip(kept, pcts, strict=True)
-    ]
+
+    # Read recency off the payload rather than cfg, because cfg.max_age_days carries a
+    # 60-day DEFAULT and a default is not a preference. Absent → no age filter at all.
+    raw_age = payload.get("max_age_days")
+    max_age_days = (
+        int(raw_age)
+        if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool)
+        else None
+    )
+    kept, top = _rank(
+        candidates,
+        titles,
+        boosts,
+        penalties,
+        exclude,
+        cfg.remote_only,
+        max_age_days,
+        RESULT_CAP,
+        related,
+    )
+    results = [_shape(c, points, why, parts) for c, points, why, parts in kept]
     # Count facets over NORMALIZED rows so the counts match the chips the cards produce.
     # Normalizing on a copy (not the shaped result) keeps remote/seniority/salary_band,
     # which live as top-level columns here but are folded into `tags` by _shape.
@@ -577,7 +753,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
                 "category": _norm_category(c.get("category")),
                 "employment_type": _norm_employment_type(c.get("employment_type")),
             }
-            for c, _, _ in kept
+            for c, _, _, _ in kept
         ]
     )
     return {
@@ -585,7 +761,6 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         "degraded": degraded,
         "facets": facets,
         "pool": store.pool_size(),
-        "tier": tier,
         "jobs": results,
     }
 
@@ -618,10 +793,48 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     return await chatmod.turn(messages, current, refining=refining)
 
 
+def _code_sha() -> str:
+    """The commit THIS process is running, resolved once at import.
+
+    The server is the only thing that knows which checkout it was started from. A
+    measurement harness reading git from its own directory records where the SCRIPT
+    lives, not where the CODE came from — which silently mislabels every run made
+    against a worktree, exactly the setup the three-version comparison depends on.
+    """
+    import subprocess
+
+    try:
+        return (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(Path(__file__).parent.parent),
+                    "rev-parse",
+                    "--short",
+                    "HEAD",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or "unknown"
+        )
+    except Exception:
+        return "unknown"
+
+
+CODE_SHA = _code_sha()
+
+
 @app.get("/api/meta")
 def meta() -> dict:
-    """Pool freshness for the UI (how many jobs, newest posting)."""
-    return {"count": store.pool_size(), "harvested_at": store.newest_posted()}
+    """Pool freshness for the UI (how many jobs, newest posting) + which build is live."""
+    return {
+        "count": store.pool_size(),
+        "harvested_at": store.newest_posted(),
+        "code_sha": CODE_SHA,
+    }
 
 
 @app.get("/api/health")

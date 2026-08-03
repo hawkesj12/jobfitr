@@ -30,7 +30,7 @@
       content="Tell jobfitr what you're after and get a ranked list of jobs that fit you — with a direct link to apply."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=72" />
+    <link rel="stylesheet" href="style.css?v=74" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -286,8 +286,12 @@
       <div class="drawer-body glass">
         <h2 class="drawer-head">Filters</h2>
         <div class="fgroup">
-          <label class="flab" for="f-fit">Minimum fit <span class="val" id="f-fit-val">any</span></label>
-          <input type="range" id="f-fit" min="0" max="100" value="0" />
+          <label class="flab" for="f-fit">Match quality <span class="val" id="f-fit-val">any</span></label>
+          <!-- Four stops, not a 0-100 range. The score is absolute and clusters on the
+               title tiers, so each stop is a real statement about the match rather than
+               a slice of a gradient. "Show me only exact title matches" is a thing a
+               person wants; "show me 55%+" never was. -->
+          <input type="range" id="f-fit" min="0" max="3" step="1" value="0" />
         </div>
         <div class="facets" id="f-facets"></div>
         <div class="fgroup">
@@ -331,7 +335,7 @@
     </template>
 
     <script src="atmosphere.js?v=51"></script>
-    <script src="app.js?v=50"></script>
+    <script src="app.js?v=52"></script>
     <script src="chat.js?v=64"></script>
   </body>
 </html>

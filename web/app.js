@@ -98,6 +98,10 @@ const store = {
 // ── in-memory result state ──────────────────────────────────────────────────
 const state = {
   all: [], // every scored job from the last /api/score
+  // The best score in the current set — the bar's denominator, and ONLY the bar's. The
+  // number on each card never touches it, which is the whole point of the score being
+  // absolute. Recomputed per search, so a weak board's best still fills its own bar.
+  topScore: 0,
   cfg: {},
   // facets: per-group Set of selected values (OR within a group, AND across groups)
   filters: { fit: 0, minSalary: 0, facets: {}, agency: false, seen: true },
@@ -199,6 +203,7 @@ async function run(cfg) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     state.all = data.jobs || [];
+    state.topScore = state.all.reduce((m, j) => Math.max(m, j.points || 0), 0);
     show(el.loading, false);
     show(el.carousel, true);
     renderNotice(data);
@@ -269,7 +274,7 @@ function filteredJobs() {
   let list = state.all.filter((j) => {
     if (!j.url) return false;
     if (f.seen && (applied[j.url] || dismissed.has(j.url))) return false;
-    if ((j.fit_pct || 0) < f.fit) return false;
+    if ((j.points || 0) < f.fit) return false;
     if (f.agency && AGENCY_RE.test(`${j.title} ${j.company}`)) return false;
     // salary slider: hide only postings whose STATED salary is below the floor;
     // keep the no-salary ones (coverage is sparse — don't silently drop them).
@@ -291,7 +296,7 @@ function sortJobs(list) {
   } else if (s === "salary") {
     copy.sort((a, b) => (salaryMin(b) || 0) - (salaryMin(a) || 0));
   } else {
-    copy.sort((a, b) => (b.fit_score || 0) - (a.fit_score || 0));
+    copy.sort((a, b) => (b.points || 0) - (a.points || 0));
   }
   return copy;
 }
@@ -308,10 +313,20 @@ function applyFilters(animateCount) {
   updateFold(); // after the show — a hidden list has no scrollHeight to compare
 }
 
-function tierFor(pct) {
-  if (pct >= 80) return { word: "Strong fit", cls: "strong" };
-  if (pct >= 55) return { word: "Good fit", cls: "good" };
-  return { word: "Fair fit", cls: "fair" };
+// The score is ABSOLUTE, so these thresholds mean the same thing on every board, every
+// day — and they are not arbitrary. Points cluster on the title tiers (measured across
+// 57 users: 280 of 566 top-10 listings land in 100-119, 101 in 80-99, 67 at the related
+// tier's 30) because a title is worth 100 and a boost is worth 8. So each stop below is
+// a real statement about the match, not a slice of a gradient.
+const FIT_STOPS = [
+  { min: 100, word: "Exact title", cls: "strong" },   // the role you named, by name
+  { min: 80, word: "Your words", cls: "good" },       // every word of a title you gave
+  { min: 30, word: "Adjacent", cls: "fair" },         // a title we suggested, not you
+  { min: -Infinity, word: "Weak", cls: "fair" },
+];
+
+function tierFor(points) {
+  return FIT_STOPS.find((t) => points >= t.min);
 }
 
 // Some sources (e.g. HN) stuff the whole posting into `location`. Keep just the real
@@ -425,16 +440,23 @@ function buildCard(job, index, total) {
   const node = el.cardTpl.content.firstElementChild.cloneNode(true);
   node.dataset.url = job.url;
 
-  // The fit gutter. `fit_pct` is normalized against the TOP match in the set (see
-  // server _fit_pct), so it is a relative rank signal, not an absolute score out of
-  // 100 — the toolbar says so once, and no row implies otherwise with a "/100".
-  const pct = Math.max(0, Math.min(100, job.fit_pct || 0));
-  const t = tierFor(pct);
-  $(".fit-num", node).textContent = pct;
+  // The fit gutter. The NUMBER is absolute: 100 is an exact title match whether it is
+  // alone on the board or one of fifty, and it means the same thing tomorrow. It
+  // replaced a gauge that min-max normalised each result set into a 45-100 band, so a
+  // 4-point real spread and a 14-point real spread rendered identically.
+  //
+  // The BAR is deliberately relative — its width is a fraction of the best score in this
+  // set, because a bar has to be a fraction of something and the score has no ceiling.
+  // So the number answers "how good is this?" and the bar answers "compared to the rest
+  // of this board?". Two different questions, which is why both are here.
+  const points = job.points || 0;
+  const t = tierFor(points);
+  $(".fit-num", node).textContent = points;
   const bar = $(".fit-bar", node);
   bar.classList.add(t.cls);
-  requestAnimationFrame(() => (bar.style.width = pct + "%"));
-  $(".fit-word", node).textContent = `${t.word.replace(/ fit$/, "")} · #${index + 1} of ${total}`;
+  const width = state.topScore > 0 ? Math.max(3, Math.min(100, (points / state.topScore) * 100)) : 0;
+  requestAnimationFrame(() => (bar.style.width = width + "%"));
+  $(".fit-word", node).textContent = `${t.word} · #${index + 1} of ${total}`;
 
   $(".role", node).textContent = job.title || "Untitled role";
   $(".company", node).textContent = job.company || "—";
@@ -445,13 +467,20 @@ function buildCard(job, index, total) {
   $(".posted", node).textContent = job.posted ? `Posted ${job.posted}` : "";
   $(".source", node).textContent = job.source ? `via ${job.source}` : "";
 
-  // The matched signals, on the COLLAPSED row — the ranking has to explain itself at
-  // the moment the user is judging it, not after a click. These are the real scorer
-  // signals; when nothing matched the list stays empty and CSS collapses it.
+  // The receipt, on the COLLAPSED row — the ranking has to explain itself at the moment
+  // the user is judging it, not after a click. `parts` carries [label, delta] straight
+  // from the scorer, so these chips ADD UP to the number beside them. That is a tested
+  // guarantee, not a hope: the suite asserts sum(parts) == points over every pair in the
+  // corpus, because a breakdown that does not reconcile is worse than none at all — it
+  // invites the user to trust a wrong explanation.
+  //
+  // This replaced splitting a comma-joined `why` string, which had already thrown away
+  // the numbers by the time the card saw it.
   const why = $(".why", node);
-  (job.why || "").split(",").map((w) => w.trim()).filter(Boolean).slice(0, 5).forEach((w) => {
+  (job.parts || []).slice(0, 5).forEach(([label, delta]) => {
     const li = document.createElement("li");
-    li.textContent = w;
+    li.className = delta < 0 ? "part neg" : "part";
+    li.textContent = `${label} ${delta > 0 ? "+" : "−"}${Math.abs(delta)}`;
     why.appendChild(li);
   });
   const db = $(".desc-bullets", node);
@@ -517,6 +546,10 @@ function revealCard(node) {
 // per answer, each removable, plus a Refine that reopens the conversation.
 const CRIT_FIELDS = [
   { key: "titles", neg: false },
+  // The model's own suggestions, not the user's answers, so they read differently —
+  // muted, and labelled. A user who cannot tell which titles they chose from which the
+  // machine added has no way to judge why a listing is on their board.
+  { key: "related_titles", neg: false, suggested: true },
   { key: "location", neg: false },
   { key: "boosts", neg: false },
   { key: "exclude", neg: true },
@@ -525,6 +558,7 @@ const CRIT_FIELDS = [
 
 function critText(key, value) {
   if (key === "location") return value;
+  if (key === "related_titles") return `also: ${Array.isArray(value) ? value.join(" · ") : value}`;
   return Array.isArray(value) ? value.join(" · ") : value;
 }
 
@@ -546,7 +580,7 @@ function renderCriteria() {
     any = true;
 
     const pill = document.createElement("span");
-    pill.className = f.neg ? "crit neg" : "crit";
+    pill.className = "crit" + (f.neg ? " neg" : "") + (f.suggested ? " suggested" : "");
     const txt = document.createElement("span");
     txt.className = "txt";
     txt.textContent = critText(f.key, value);
@@ -859,9 +893,18 @@ el.filtersToggle.addEventListener("click", () => {
     if (bar) el.filters.style.top = Math.round(bar.getBoundingClientRect().bottom + 6) + "px";
   }
 });
+// The slider's four positions map to point thresholds, not percentages. The labels are
+// what the user reads; the numbers are the tiers the score already clusters on.
+const FIT_FILTER = [
+  { min: 0, label: "any" },
+  { min: 30, label: "adjacent+" },
+  { min: 80, label: "your words" },
+  { min: 100, label: "exact title" },
+];
 el.fFit.addEventListener("input", () => {
-  state.filters.fit = +el.fFit.value;
-  el.fFitVal.textContent = state.filters.fit === 0 ? "any" : `${state.filters.fit}%+`;
+  const stop = FIT_FILTER[+el.fFit.value] || FIT_FILTER[0];
+  state.filters.fit = stop.min;
+  el.fFitVal.textContent = stop.label;
   applyFilters(false);
 });
 if (el.fSalary) {

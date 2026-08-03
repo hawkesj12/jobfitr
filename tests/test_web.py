@@ -185,7 +185,7 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     titles = [j["title"] for j in d["jobs"]]
     assert "Engineering Intern" not in titles  # hard-excluded
     assert titles[0] == "Senior Python Engineer"  # both boosts + title
-    scores = [j["fit_score"] for j in d["jobs"]]
+    scores = [j["points"] for j in d["jobs"]]
     assert scores == sorted(scores, reverse=True)
 
     top = d["jobs"][0]
@@ -193,7 +193,8 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     assert "text" not in top and "snippet" in top  # body not leaked
     assert top["category"] == "IT Jobs" and top["employment_type"] == "full_time"
     assert "senior" in top["tags"] and "onsite" in top["tags"]  # derived tags
-    assert 0 < top["fit_pct"] <= 100
+    assert isinstance(top["points"], int)
+    assert sum(delta for _, delta in top["parts"]) == top["points"]
     # facets counted over the returned set
     assert d["facets"]["category"]["IT Jobs"] >= 1
     assert d["pool"] == store.pool_size()
@@ -286,9 +287,18 @@ def test_exact_title_with_no_body_outranks_a_keyword_stuffed_off_title_listing(
     assert titles[0] == "Senior Principal Forward Deployed AI Engineer"
 
 
-def test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence(client, monkeypatch):
-    """Two identical titles, one with a body and one without, must score close — the
-    body-less row is missing evidence, not failing it."""
+def test_a_missing_body_simply_earns_no_boost_points(client, monkeypatch):
+    """Replaces test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence.
+
+    The old test asserted that a body-less listing was IMPUTED neutral boost credit, on
+    the stated premise that "Greenhouse rows arrive body-less". Measured against the
+    39,597-row corpus, Greenhouse has ZERO body-less rows (only 46 SmartRecruiters and 12
+    Lever do), so the premise was false and NO_BODY_PRIOR was compensating for a problem
+    that did not exist.
+
+    The scoreboard is honest instead: no body means no boost evidence, so no boost points.
+    The title still carries the listing, which is the whole reason the title is the anchor.
+    """
     _seed(
         [
             _job("Data Engineer", text="", company="NoBody Corp", url="https://x/nb"),
@@ -307,20 +317,39 @@ def test_a_missing_body_is_treated_as_unknown_not_as_zero_evidence(client, monke
         "/api/score",
         json={"titles": ["data engineer"], "boosts": ["python", "postgres"]},
     ).json()
-    by_company = {j["company"]: j["fit_score"] for j in d["jobs"]}
-    assert len(by_company) == 2
-    # the bodied row may still win, but not by the whole boost ceiling
-    assert by_company["HasBody Corp"] - by_company["NoBody Corp"] < server.BOOST_MAX
+    by_company = {j["company"]: j["points"] for j in d["jobs"]}
+    # Both are an exact title match; only the one with evidence earns boost points.
+    assert by_company["NoBody Corp"] == 100, "exact title alone"
+    assert by_company["HasBody Corp"] == 116, "exact title + two boosts at one hit each"
 
 
-def test_boost_swing_is_capped_regardless_of_how_many_boosts_are_given(client):
-    """Adding more boosts must sharpen the signal, not raise the ceiling — the cap is
-    what keeps BM25 relevance meaningful (and what makes 'more boosts is better' false)."""
-    body = " ".join(f"term{i}" for i in range(12))
-    title = "engineer"
-    assert server._boost_bonus(title, body, ["term0"]) <= server.BOOST_MAX
-    many = server._boost_bonus(title, body, [f"term{i}" for i in range(12)])
-    assert many <= server.BOOST_MAX
+def test_more_boosts_can_never_lower_a_score(client):
+    """Replaces test_boost_swing_is_capped_regardless_of_how_many_boosts_are_given.
+
+    The old cap existed to stop nine boosts swamping relevance. It also produced the
+    perverse result that made the cap worth removing: because the bonus was a FRACTION of
+    the boosts given, a listing matching 3 of 14 boosts scored LOWER than one matching
+    0 of 0 — so the interview's own advice ("name as many skills as you can think of")
+    punished everyone who followed it.
+
+    The scoreboard promises the opposite, and this is that promise as a test: evidence
+    only ever adds, so naming another skill can never cost you.
+    """
+    title, company, body = (
+        "data engineer",
+        "acme",
+        "python postgres airflow kafka spark",
+    )
+    prev = -1
+    for n in range(0, 6):
+        boosts = ["python", "postgres", "airflow", "kafka", "spark"][:n]
+        pts = server.scoreboard(title, company, body, ["data engineer"], boosts, [])[
+            "points"
+        ]
+        assert pts >= prev, f"adding a boost lowered the score at n={n}"
+        prev = pts
+    # And nothing is capped: five matching boosts are worth five boosts.
+    assert prev == 100 + 5 * 8
 
 
 def test_exclude_matches_the_company_not_just_the_title(client, monkeypatch):
@@ -396,27 +425,31 @@ def test_dedup_keeps_genuinely_different_roles_at_the_same_company(client, monke
     assert len({j["title"] for j in d["jobs"]}) == 2
 
 
-def test_fit_gauge_stays_readable_when_relevance_alone_cannot_separate(
-    client, monkeypatch
-):
-    """The board rendered fifty identical "3 · Fair" rows for a plain one-word search.
+def test_a_flat_search_no_longer_needs_a_gauge_to_look_sane(client, monkeypatch):
+    """Replaces test_fit_gauge_stays_readable_when_relevance_alone_cannot_separate.
 
-    BM25 rates fifty jobs all titled "...Engineer" as equally relevant — which is
-    CORRECT — but the old gauge divided by the top score, so a top of <= 0 floored every
-    card at the minimum and the ranking looked broken. The gauge is relative to the best
-    match, so it is normalized across the returned set instead.
+    The old failure: BM25 rates fifty jobs all titled "...Engineer" as equally relevant —
+    which is CORRECT — and the relative gauge then had nothing to spread, so every card
+    rendered an identical "3 · Fair" and the board looked broken. The gauge existed to
+    paper over that.
+
+    With an ABSOLUTE score there is nothing to paper over. Fifty equally-good matches
+    honestly score the same number, and that number means something on its own: 100 is an
+    exact title match whether it is alone on the board or one of fifty.
     """
-    assert server._fit_pcts([]) == []
-    # a real spread renders as a real gradient, best pinned to 100
-    spread = server._fit_pcts([5.0, 3.0, 1.0])
-    assert spread[0] == 100 and spread[-1] == server._FIT_FLOOR
-    assert spread[0] > spread[1] > spread[2]
-    # no spread at all: honest and uniform, never a fabricated gradient and never a 3
-    flat = server._fit_pcts([2.0, 2.0, 2.0])
-    assert flat == [server._FIT_FLAT] * 3
-    # negative scores (the case that broke it) still produce a usable gauge
-    neg = server._fit_pcts([-0.4, -0.9, -1.6])
-    assert neg[0] == 100 and min(neg) >= server._FIT_FLOOR
+    _seed(
+        [
+            _job(f"Engineer {i}", text="python", company=f"C{i}", url=f"https://x/e{i}")
+            for i in range(12)
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["engineer"]}).json()
+    pts = [j["points"] for j in d["jobs"]]
+    assert pts, "the search should return something"
+    assert len(set(pts)) == 1, "equally-good matches score equally — that is honest"
+    assert "fit_pct" not in d["jobs"][0], "the relative gauge is gone"
 
 
 def test_a_plain_one_word_search_still_produces_a_usable_board(client, monkeypatch):
@@ -436,10 +469,12 @@ def test_a_plain_one_word_search_still_produces_a_usable_board(client, monkeypat
     _mark_fresh(["engineer"])
     _no_fetch(monkeypatch)
     d = client.post("/api/score", json={"titles": ["engineer"]}).json()
-    pcts = [j["fit_pct"] for j in d["jobs"]]
-    assert pcts, "the search should return something"
-    assert max(pcts) == 100  # the best match always anchors the gauge
-    assert min(pcts) >= server._FIT_FLOOR  # nothing shown collapses to a 3
+    pts = [j["points"] for j in d["jobs"]]
+    assert pts, "the search should return something"
+    # No normalisation, so the numbers are comparable to any other board: the two
+    # "Engineer"-titled rows earn the exact-title 100, the rest earn what they earn.
+    assert max(pts) == 100
+    assert all(isinstance(p, int) for p in pts)
 
 
 # ── Phase B: data hygiene at the source ───────────────────────────────────────
@@ -552,7 +587,7 @@ def test_category_keeps_job_fields_and_drops_employers_and_levels(client, monkey
     put a USAJOBS agency there, one puts a seniority, one an internal ATS code."""
     _seed(
         [
-            # distinct companies: five rows at one employer would trip MAX_PER_COMPANY
+            # distinct companies, kept from when the employer cap could have bitten
             _job("Role A", company="Ay", department="IT Jobs", url="https://x/it"),
             _job(
                 "Role B",
@@ -668,10 +703,14 @@ def test_prefetch_without_titles_is_a_noop(client, monkeypatch):
     assert calls["n"] == 0  # nothing to fetch without a title
 
 
-def test_score_ladder_relaxes_freshness_to_find_matches(client):
-    # A 40-day-old job is excluded by the tight 15/30-day tiers but included once the
-    # deterministic ladder relaxes past 30 days — no "how picky?" or recency question.
-    old = (date.today() - timedelta(days=40)).isoformat()
+def test_an_old_job_is_reachable_when_the_user_set_no_recency_preference(client):
+    """Replaces test_score_ladder_relaxes_freshness_to_find_matches.
+
+    The ladder always imposed an age, 90 days at its loosest, so nothing older was
+    reachable by anyone. Now the only age filter is one the USER asked for — and a
+    120-day-old job, previously invisible, comes back.
+    """
+    old = (date.today() - timedelta(days=120)).isoformat()
     _seed(
         [
             _job(
@@ -687,20 +726,44 @@ def test_score_ladder_relaxes_freshness_to_find_matches(client):
         "/api/score", json={"titles": ["data scientist"], "location": "remote"}
     ).json()
     assert d["jobs"] and d["jobs"][0]["title"] == "Staff Data Scientist"
-    assert d["tier"]["max_age_days"] >= 60  # relaxed past the tight tiers to include it
+    assert "tier" not in d  # the ladder is gone, and so is its receipt
 
 
-def test_score_delivers_past_fifty_without_relaxing_the_ladder(client):
-    # The two numbers are NOT one number. RESULT_CAP is how many rows ship;
-    # TARGET_RESULTS is only the bar the ladder judges a tier by. Re-conflating them
-    # (the pre-2026-08-01 behaviour) fails this test in one of two ways: either the
-    # board is capped back to 50, or the ladder relaxes to old/weak rows to reach 200.
+def test_a_recency_preference_the_user_DID_set_is_still_honoured(client):
+    """The flip side: dropping the ladder must not drop the user's own age filter."""
+    old = (date.today() - timedelta(days=120)).isoformat()
+    _seed(
+        [
+            _job(
+                "Staff Data Scientist",
+                text="ml data scientist role",
+                posted=old,
+                url="https://x/sds",
+            )
+        ]
+    )
+    _mark_fresh(["data scientist"], "remote")
+    d = client.post(
+        "/api/score",
+        json={"titles": ["data scientist"], "location": "remote", "max_age_days": 30},
+    ).json()
+    assert d["jobs"] == []
+
+
+def test_the_whole_tail_ships_up_to_the_delivery_cap(client):
+    """Replaces test_score_delivers_past_fifty_without_relaxing_the_ladder.
+
+    RESULT_CAP is now the ONLY thing between a scored listing and the user, and it is a
+    bandwidth decision. 120 equally-good rows must all ship; nothing may be withheld for
+    being the 51st, for scoring below some fraction of the top, or for sharing an
+    employer with four other rows.
+    """
     _seed(
         [
             _job(
                 f"Data Engineer {i}",
                 text="data engineer pipeline etl",
-                company=f"Company {i}",  # unlike names, so MAX_PER_COMPANY cannot bite
+                company="MegaCorp",  # ALL one employer — the old cap kept 4
                 url=f"https://x/de{i}",
             )
             for i in range(120)
@@ -710,11 +773,8 @@ def test_score_delivers_past_fifty_without_relaxing_the_ladder(client):
     d = client.post(
         "/api/score", json={"titles": ["data engineer"], "location": "remote"}
     ).json()
-    assert len(d["jobs"]) > server.TARGET_RESULTS  # the tail is delivered, not dropped
+    assert len(d["jobs"]) == 120  # every one of them, from a single company
     assert len(d["jobs"]) <= server.RESULT_CAP
-    # every seeded row is fresh and strong, so the tightest tier must still win
-    assert d["tier"]["max_age_days"] == server.RESULT_LADDER[0][0]
-    assert d["tier"]["min_score"] == server.RESULT_LADDER[0][1]
 
 
 def test_score_degrades_to_cache_when_ceiling_reached(client, monkeypatch):
@@ -837,67 +897,16 @@ def test_harvest_falls_back_to_the_watchlist_when_the_ledger_is_empty(
     assert [c["slug"] for c in seen["companies"]] == ["seedco"]
 
 
-# ── per-company diversity (the guard the 3x corpus needs) ────────────────────
-def _many(company, n, score_from=100):
-    return [
-        (
-            {"company": company, "title": f"{company} Role {i}"},
-            float(score_from - i),
-            "",
-        )
-        for i in range(n)
-    ]
+# ── employer concentration: visible, not corrected ───────────────────────────
+# Replaces the six _spread_companies tests. The cap DROPPED an employer's roles past
+# the fourth, which solved a real problem (Veterans Health has 915 rows in the corpus,
+# Anduril 1,063) with an instrument that deleted evidence invisibly — the user could
+# not tell the difference between "this employer has 4 openings" and "this employer has
+# 900 and we hid 896". The promise has changed shape: concentration is now something
+# the user SEES and can filter on the board, not something the server silently fixes.
 
 
-def test_one_employer_cannot_monopolise_the_front_of_the_board():
-    """At 3x corpus the pool carries employers with 900+ open roles (Veterans Health)
-    and 600+ (Accenture Federal). Ranking by score alone would hand a user fifty
-    near-identical rows from one company, which reads as a broken search."""
-    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
-    out = server._spread_companies(scored, cap=4)
-    from collections import Counter
-
-    counts = Counter(c["company"] for c, _, _ in out)
-    assert counts["BigCo"] == 4 and counts["SmallCo"] == 3
-    assert out[0][0]["company"] == "BigCo"  # its best 4 keep their natural rank
-
-
-def test_cap_holds_through_truncation():
-    """REGRESSION (panel blocker B3): the cap demoted overflow to the back, then the
-    caller's [:limit] sliced straight back into it. On live prod this made a "nurse"
-    search return 19 of 50 rows from Veterans Health Administration. The cap must hold
-    inside the returned window, not merely reorder before it."""
-    scored = _many("BigCo", 40) + _many("SmallCo", 3, score_from=50)
-    shown = server._spread_companies(scored, cap=4)[:50]  # exactly what _rank does
-    from collections import Counter
-
-    assert max(Counter(c["company"] for c, _, _ in shown).values()) == 4
-
-
-def test_spreading_drops_overflow_rather_than_padding():
-    """When one employer IS the whole pool, the cap yields a SHORT set — which is the
-    honest signal that makes the RESULT_LADDER relax, instead of the old behavior that
-    padded the window back to full with the dominant employer's demoted roles."""
-    scored = _many("OnlyCo", 30)
-    out = server._spread_companies(scored, cap=4)
-    assert len(out) == 4, "overflow beyond the cap is dropped, not demoted"
-    assert [c["title"] for c, _, _ in out] == [f"OnlyCo Role {i}" for i in range(4)]
-
-
-def test_spreading_preserves_the_top_result():
-    """`top` and the score floor are derived from scored[0]; reordering must not move
-    the single best match."""
-    scored = _many("BigCo", 10) + _many("Other", 2, score_from=95)
-    out = server._spread_companies(scored, cap=4)
-    assert out[0][1] == 100.0
-
-
-def test_cap_of_zero_disables_spreading():
-    scored = _many("BigCo", 10)
-    assert server._spread_companies(scored, cap=0) == scored
-
-
-def test_score_endpoint_spreads_across_companies(client):
+def test_one_employer_may_now_dominate_and_that_is_visible(client):
     _seed(
         [
             _job(
@@ -918,19 +927,29 @@ def test_score_endpoint_spreads_across_companies(client):
         ]
     )
     _mark_fresh(["python engineer"])
-    d = client.post(
-        "/api/score",
-        json={"titles": ["python engineer"], "min_score": "plenty"},
-    ).json()
-    companies = [j["company"] for j in d["jobs"]]
+    d = client.post("/api/score", json={"titles": ["python engineer"]}).json()
     from collections import Counter
 
-    counts = Counter(companies)
-    # no employer exceeds the cap in what the user actually receives
-    assert counts["MegaCorp"] == server.MAX_PER_COMPANY
+    counts = Counter(j["company"] for j in d["jobs"])
+    assert counts["MegaCorp"] == 20, "all 20 ship — nothing is dropped for the employer"
     assert counts["Tiny Inc"] == 1
-    # MegaCorp's roles beyond the cap are filtered out, not shown at the tail
-    assert len(d["jobs"]) == server.MAX_PER_COMPANY + 1
+    assert len(d["jobs"]) == 21
+
+
+def test_the_facet_counts_let_the_user_see_the_concentration(client):
+    """The replacement for the cap is INFORMATION. Whatever the board offers as a filter
+    has to be able to describe a dominated result set, or removing the cap just moves the
+    problem onto the user with no tool to fix it."""
+    _seed(
+        [
+            _job(f"Nurse {i}", text="nurse", company="MegaCorp", url=f"https://x/n{i}")
+            for i in range(12)
+        ]
+    )
+    _mark_fresh(["nurse"])
+    d = client.post("/api/score", json={"titles": ["nurse"]}).json()
+    assert len(d["jobs"]) == 12
+    assert d["facets"], "the board needs facets to filter a dominated set"
 
 
 def test_load_dotenv_survives_an_unreadable_directory(tmp_path, monkeypatch):
@@ -1019,3 +1038,137 @@ def test_discovered_write_failure_is_reported_not_silent(tmp_path, monkeypatch, 
     meta = snapshot.build_snapshot(Config(), None, str(tmp_path / "out.json"))
     assert meta["count"] == 0  # harvest still succeeded (didn't raise)
     assert "could not record" in capsys.readouterr().out  # but it said so
+
+
+# ── related titles: the model's suggestions ──────────────────────────────────
+
+
+def test_a_suggested_title_finds_jobs_the_users_own_wording_cannot(client):
+    """THE POINT OF THE FEATURE. _fts_query ORs quoted exact phrases, so a multi-word
+    title only matches verbatim. In the real corpus '"High School Teacher"' matches 0
+    rows while 'Teacher' matches 225 — the user is invisible to a board that holds
+    exactly the job they want."""
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+
+    alone = client.post("/api/score", json={"titles": ["High School Teacher"]}).json()
+    assert alone["jobs"] == [], "the exact phrase matches nothing — the bug being routed around"
+
+    with_related = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert len(with_related["jobs"]) == 1
+    assert with_related["jobs"][0]["title"] == "Teacher"
+
+
+def test_a_suggested_match_is_labelled_so_the_card_can_say_so(client):
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    job = d["jobs"][0]
+    assert ["related title", 30] in [list(p) for p in job["parts"]]
+    assert job["points"] == 30
+
+
+def test_the_users_own_title_outranks_a_suggested_one(client):
+    """Precedence is the whole design. A job matching what the user ASKED for must sit
+    above one matching only what the machine guessed, however good the guess looks."""
+    _seed(
+        [
+            _job("Teacher", text="classroom", url="https://x/sug"),
+            _job("High School Teacher", text="classroom", url="https://x/own"),
+        ]
+    )
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert [j["title"] for j in d["jobs"]] == ["High School Teacher", "Teacher"]
+    assert d["jobs"][0]["points"] == 100 and d["jobs"][1]["points"] == 30
+
+
+def test_a_config_without_related_titles_scores_exactly_as_before(client):
+    """Every stored search and the whole production config predate this field."""
+    _seed([_job("High School Teacher", text="classroom", url="https://x/own")])
+    _mark_fresh(["high school teacher"])
+    without = client.post("/api/score", json={"titles": ["High School Teacher"]}).json()
+    empty = client.post(
+        "/api/score", json={"titles": ["High School Teacher"], "related_titles": []}
+    ).json()
+    assert without["jobs"][0]["points"] == empty["jobs"][0]["points"] == 100
+
+
+def test_the_retrieval_flag_keeps_suggestions_out_of_the_query(monkeypatch, client):
+    """The measurement seam. With the flag off a suggested title still SCORES but never
+    RETRIEVES — which is what separates 'the ranker helped' from 'the retrieval helped'.
+    Bundled, the before/after cannot credit either one."""
+    monkeypatch.setattr(server, "RELATED_IN_RETRIEVAL", False)
+    _seed([_job("Teacher", text="classroom teaching", url="https://x/t1")])
+    _mark_fresh(["high school teacher"])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["High School Teacher"], "related_titles": ["Teacher"]},
+    ).json()
+    assert d["jobs"] == [], "retrieval must not see the suggestion when the flag is off"
+
+
+# ── penalties that read the meaning, not just the word ───────────────────────
+
+
+def test_a_company_named_somebody_elses_client_is_penalised(client):
+    """Found by READING a board, not by a test. u11's #2 result was a Forward Deployed
+    Engineer role at a company called "TechTree's client" — a placement shop declaring
+    the arrangement in the employer field — scoring 122 with no penalty, because the
+    avoid-term is "our client" and phrase matching does exactly what it says."""
+    _seed(
+        [
+            _job("Forward Deployed Engineer", text="build integrations",
+                 company="TechTree's client", url="https://x/tt"),
+            _job("Forward Deployed Engineer", text="build integrations",
+                 company="Twilio", url="https://x/tw"),
+        ]
+    )
+    _mark_fresh(["forward deployed engineer"])
+    d = client.post("/api/score", json={"titles": ["Forward Deployed Engineer"]}).json()
+    by_co = {j["company"]: j for j in d["jobs"]}
+    assert ["client", -30] in [list(p) for p in by_co["TechTree's client"]["parts"]]
+    assert by_co["Twilio"]["points"] > by_co["TechTree's client"]["points"]
+
+
+def test_the_client_rule_does_not_sink_client_facing_job_titles(client):
+    """The scoping is load-bearing, not tidy. 244 job TITLES in the corpus contain
+    "client" — Client Success Director, Client Support Engineer — all ordinary roles.
+    The penalty path tests title and company as one blob, so a term added the usual way
+    would have sunk every one of them."""
+    _seed([_job("Client Success Director", text="lead the account team",
+                company="Acme", url="https://x/csd")])
+    _mark_fresh(["client success director"])
+    d = client.post("/api/score", json={"titles": ["Client Success Director"]}).json()
+    assert d["jobs"][0]["points"] == 100
+    assert not [p for p in d["jobs"][0]["parts"] if p[1] < 0]
+
+
+def test_serving_clients_is_not_the_same_as_placing_you_at_one(client):
+    """The 19:1 case. Of 1,619 corpus bodies using "our client(s)", 753 have the client
+    as the party being SERVED and 39 as the party HIRING. The qualifier keys on which."""
+    _seed(
+        [
+            # distinct companies: _dedupe_listings collapses same-title-same-employer
+            # rows, which is correct behaviour and would hide half of this test
+            _job("Data Analyst", text="we help our clients transform complex data",
+                 company="Servesco", url="https://x/served"),
+            _job("Data Analyst", text="our client is seeking an analyst for a contract",
+                 company="Placeco", url="https://x/hiring"),
+        ]
+    )
+    _mark_fresh(["data analyst"])
+    d = client.post("/api/score",
+                    json={"titles": ["Data Analyst"], "rank_down": ["our client"]}).json()
+    by_url = {j["url"]: j for j in d["jobs"]}
+    assert not [p for p in by_url["https://x/served"]["parts"] if p[1] < 0], "serving clients is ordinary B2B"
+    assert ["our client", -15] in [list(p) for p in by_url["https://x/hiring"]["parts"]]

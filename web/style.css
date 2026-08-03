@@ -782,3 +782,25 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   .gcard:hover { transform: none; }
   .gcard.flying { animation: none; opacity: 0; }
 }
+
+/* Suggested criteria — the model's related titles, not the user's answers. Muted on
+   purpose: the pill has to read as "we added this for you" at a glance, or the board
+   looks like it is searching for things the user never asked for. Still removable. */
+.crit.suggested {
+  opacity: 0.68;
+  border-style: dashed;
+  font-style: italic;
+}
+.crit.suggested:hover,
+.crit.suggested:focus-within {
+  opacity: 1;
+}
+
+/* A penalty has to READ as a penalty. The chips add up to the number beside them, so a
+   subtraction rendered like an addition would make the arithmetic look wrong to anyone
+   who checks it — and the whole reason the receipt is on the collapsed row is to be
+   checked. */
+.why .part.neg {
+  color: var(--warn, #b4462e);
+  border-color: color-mix(in srgb, var(--warn, #b4462e) 40%, transparent);
+}

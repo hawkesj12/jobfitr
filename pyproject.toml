@@ -59,3 +59,11 @@ Issues = "https://github.com/hawkesj12/jobfitr/issues"
 
 [tool.setuptools]
 packages = ["jobfitr"]
+
+[tool.pytest.ini_options]
+# `slow` is the full-corpus sweep — every one of the 123,015 (user x listing) pairs,
+# about 20s. It is excluded by default so the everyday run stays under 10s and actually
+# gets run; opt in with `-m slow` before a version capture, where the sampled layer is
+# not good enough to be the proof of record.
+markers = ["slow: full-corpus sweeps (opt in with -m slow)"]
+addopts = "-m 'not slow'"
