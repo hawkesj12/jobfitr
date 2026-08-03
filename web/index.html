@@ -182,11 +182,6 @@
             <input type="range" id="f-salary" min="0" max="200000" step="10000" value="0" aria-label="Minimum salary" />
           </label>
           <span class="spacer"></span>
-          <!-- The score is ABSOLUTE: 100 is an exact title match whether it is alone on
-               the board or one of fifty, and it means the same thing tomorrow. This line
-               used to read "fit is relative to your best match", which was true of the
-               gauge it described and became a lie the moment the gauge was deleted. -->
-          <span class="fit-note">100 = a title you asked for</span>
           <span class="result-summary" id="result-summary" aria-live="polite"></span>
 
         </div>
@@ -290,7 +285,7 @@
       <div class="drawer-body glass">
         <h2 class="drawer-head">Filters</h2>
         <div class="fgroup">
-          <label class="flab" for="f-fit">Match quality <span class="val" id="f-fit-val">any</span></label>
+          <label class="flab" for="f-fit">Minimum score <span class="val" id="f-fit-val">any</span></label>
           <!-- Four stops, not a 0-100 range. The score is absolute and clusters on the
                title tiers, so each stop is a real statement about the match rather than
                a slice of a gradient. "Show me only exact title matches" is a thing a
@@ -339,7 +334,7 @@
     </template>
 
     <script src="atmosphere.js?v=51"></script>
-    <script src="app.js?v=54"></script>
+    <script src="app.js?v=55"></script>
     <script src="chat.js?v=64"></script>
   </body>
 </html>

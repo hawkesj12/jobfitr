@@ -313,29 +313,23 @@ function applyFilters(animateCount) {
   updateFold(); // after the show — a hidden list has no scrollHeight to compare
 }
 
-// The score is ABSOLUTE, so these thresholds mean the same thing on every board, every
-// day — and they are not arbitrary. Points cluster on the title tiers (measured across
-// 57 users: 280 of 566 top-10 listings land in 100-119, 101 in 80-99, 67 at the related
-// tier's 30) because a title is worth 100 and a boost is worth 8. So each stop below is
-// a real statement about the match, not a slice of a gradient.
-const FIT_STOPS = [
-  { min: 100, word: "Exact title", cls: "strong" },   // the role you named, by name
-  { min: 80, word: "Your words", cls: "good" },       // every word of a title you gave
-  { min: 30, word: "Adjacent", cls: "fair" },         // a title we suggested, not you
-  { min: -Infinity, word: "Weak", cls: "fair" },
+// Colour only — no words. The bands still exist because a glance wants a signal, but
+// they are no longer LABELLED, and that is the point: the chips under the title already
+// say where the points came from ("title +100 · rag ×3 +18 · staffing −30"), and a second
+// interpretive layer in different vocabulary was worse than nothing. It described the
+// title while the number described the total, so a `title +80` listing with two boosts
+// reached 100 and announced "Exact title" beside a chip saying 80.
+//
+// The number is the score. The chips are the reasoning. Nothing else claims to explain it.
+const FIT_BANDS = [
+  { min: 100, cls: "strong" },
+  { min: 80, cls: "good" },
+  { min: 30, cls: "fair" },
+  { min: -Infinity, cls: "fair" },
 ];
 
-// Keyed off the TITLE tier, not the total. The words are about the title — "Exact title",
-// "Your words" — so deriving them from the total makes a card contradict its own receipt:
-// a listing with `title +80` and two boosts reaches 100 and would announce "Exact title"
-// while the chip beside it says 80. Measured at 9 of 200 on a real board before the fix.
-//
-// The slider still filters on TOTAL points, and that is deliberate — there the question is
-// "how good is this listing", not "how did its title match".
-function tierFor(job) {
-  const part = (job.parts || []).find((p) => p[0] === "title" || p[0] === "related title");
-  const titlePoints = part ? part[1] : 0;
-  return FIT_STOPS.find((t) => titlePoints >= t.min);
+function bandFor(points) {
+  return FIT_BANDS.find((b) => points >= b.min);
 }
 
 // Some sources (e.g. HN) stuff the whole posting into `location`. Keep just the real
@@ -459,13 +453,13 @@ function buildCard(job, index, total) {
   // So the number answers "how good is this?" and the bar answers "compared to the rest
   // of this board?". Two different questions, which is why both are here.
   const points = job.points || 0;
-  const t = tierFor(job);
+  const t = bandFor(points);
   $(".fit-num", node).textContent = points;
   const bar = $(".fit-bar", node);
   bar.classList.add(t.cls);
   const width = state.topScore > 0 ? Math.max(3, Math.min(100, (points / state.topScore) * 100)) : 0;
   requestAnimationFrame(() => (bar.style.width = width + "%"));
-  $(".fit-word", node).textContent = `${t.word} · #${index + 1} of ${total}`;
+  $(".fit-word", node).textContent = `#${index + 1} of ${total}`;
 
   $(".role", node).textContent = job.title || "Untitled role";
   $(".company", node).textContent = job.company || "—";
@@ -902,13 +896,13 @@ el.filtersToggle.addEventListener("click", () => {
     if (bar) el.filters.style.top = Math.round(bar.getBoundingClientRect().bottom + 6) + "px";
   }
 });
-// The slider's four positions map to point thresholds, not percentages. The labels are
-// what the user reads; the numbers are the tiers the score already clusters on.
+// Point thresholds, shown as points. The stops are still the values the score clusters
+// on, but they are named after the number rather than after a story about the number.
 const FIT_FILTER = [
   { min: 0, label: "any" },
-  { min: 30, label: "adjacent+" },
-  { min: 80, label: "your words" },
-  { min: 100, label: "exact title" },
+  { min: 30, label: "30+" },
+  { min: 80, label: "80+" },
+  { min: 100, label: "100+" },
 ];
 el.fFit.addEventListener("input", () => {
   const stop = FIT_FILTER[+el.fFit.value] || FIT_FILTER[0];
