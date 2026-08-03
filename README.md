@@ -13,14 +13,28 @@ It's the consumer front end on top of the open-source [**job-radar**](https://gi
 **Fetch live when it has to, serve the cache when it can.** A search either serves a fresh cache — that
 title-and-location combination was fetched under the TTL, so it costs zero API calls — or it makes **one**
 bounded live fetch of the fast keyed sources. Concurrent identical searches are coalesced into a single
-upstream call. Underneath, a nightly harvest keeps a broad baseline so even a search nobody has run before
-lands on something.
+upstream call.
+
+**Two lanes, on purpose.** The nightly harvest polls company ATS boards directly, which gives real
+_depth_ where those boards are — in practice that skews tech, and it is ~78% of the stored pool. It is
+not, and is not trying to be, the whole labour market. **Breadth arrives on demand:** the first time
+someone searches a role the harvest has never covered, the live fetch pulls it and it stays. A cold pool
+holding zero occupational therapists answers that search with 33 of them in about nine seconds, and the
+next person who asks gets them free from the cache. That is what keeps the whole thing runnable on a
+small box and free API tiers instead of trying to warehouse every job that exists.
 
 ```
 nightly:      resolve companies → harvest → jobs.json ──▶ the SQLite/FTS5 store
 per request:  your 4 answers ──▶ fresh cache OR one live fetch ──▶ rank the store ──▶ ranked links
 nightly:      evict what's gone stale
 ```
+
+**The assistant also suggests five adjacent titles**, once your own list is final, and those join the
+search as well as the scoring. It matters more than it sounds: a job board indexes the wording a posting
+actually uses, so `"High School Teacher"` matches **0** listings while the suggested `Teacher` matches
+**225**. They score a flat **30** — below anything you named yourself, because you did not ask for them —
+and they are what stops a precisely-worded search returning nothing. They also quietly fix typos: type
+`data analist` and the assistant writes `Data Analyst`.
 
 Three things bound the cost, which is what makes it safe to run on free API tiers:
 
@@ -86,7 +100,7 @@ Matching is **whole-word, plus a plural** — not substring. Boosting "rag" matc
 cp web-harvest.example.yaml web-harvest.yaml
 ```
 
-It's deliberately _wide_ (broad titles, remote and on-site, generous freshness) so the baseline holds the broad universe — each user's narrow lens is applied at request time, not here.
+It's deliberately _wide_ (broad titles, remote and on-site, generous freshness) — each user's narrow lens is applied at request time, not here. Wide is relative, though: this is the depth lane, bounded by which companies you poll. Coverage outside it comes from the keyed sources below, pulled per search rather than warehoused.
 
 > Run it from the repo root. The config is resolved relative to the working directory, and falling through to job-radar's built-in defaults is a cliff, not a soft default — those are narrow and tech-only, so a harvest launched from elsewhere quietly returns a fraction of the jobs with no error. It prints a loud warning if it can't find one.
 
@@ -121,7 +135,7 @@ Same-origin; the front end talks to these directly.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `POST /api/score`    | Score against a config body (`titles`, `related_titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`). Returns up to `JOBFITR_RESULT_CAP` (default 200) ranked jobs plus facet counts, gzipped.                                                |
 | `POST /api/chat`     | One conversational turn: `{messages, config, refining}` → `{reply, config, ready, chips, hint, restart}` (structured output). The only thing that reaches scoring is the config it fills. `refining` switches from the intake interview to editing a search already on screen. |
-| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer.                                                                                                                                                                                    |
+| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer. Also returns `candidates` — how many listings the search will have to rank — so the wait can say what it is doing instead of spinning.                                            |
 | `GET /api/meta`      | `count` (pool size), `harvested_at`, and the `code_sha` this process is running.                                                                                                                                                                                               |
 | `GET /api/health`    | Which feeds are live, the daily fetch budget used, pool size vs. the snapshot it should be serving, and when that snapshot was last ingested.                                                                                                                                  |
 
@@ -143,7 +157,8 @@ web/
   app.js              config → API → board rows, criteria bar, filters, localStorage state
   atmosphere.js       the time-of-day sky the whole UI floats on
   style.css           the theme (time-of-day atmosphere, responsive)
-tests/                the scoreboard's arithmetic, the store, the chat, the web API
+tests/                the store, the chat, the web API, and 234 golden cases whose expected
+                      score was computed by hand from the spec — not from the code
 bakeoff/              the model bake-off: which LLM should run the chat, and how we know
 deploy/               systemd units, Caddyfile, bootstrap.sh, and the blue-green slots
 web-harvest.example.yaml   the wide-harvest config
