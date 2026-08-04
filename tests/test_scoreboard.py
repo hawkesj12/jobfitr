@@ -47,6 +47,14 @@ SAMPLE_PER_USER = 40
 SEED = 20260802  # fixed — a failure has to be reproducible
 
 
+def _user_count() -> int:
+    """How many profiles the frozen fixture holds — read, never hardcoded, so the
+    full-sweep guard stays correct if a user is ever added."""
+    import json
+
+    return len(json.loads(open(_USERS).read())["users"])
+
+
 def _load_pairs(full: bool):
     import json
 
@@ -204,9 +212,18 @@ def test_every_part_is_a_legal_value(pairs):
 @pytest.mark.slow
 @needs_corpus
 def test_the_full_corpus_decomposes_and_stays_in_bounds():
-    """All 123,015 (user × listing) pairs in one pass, ~20s. Run before every version
-    capture: the sampled layer above is a dev-loop convenience, never the proof of
-    record."""
+    """Every (user × listing) pair retrieval returns, in one pass, ~20-30s. Run before
+    every version capture: the sampled layer above is a dev-loop convenience, never the
+    proof of record.
+
+    The pair count is RETRIEVAL-DEPENDENT — `_load_pairs` goes through
+    `store.bm25_candidates`, so tightening retrieval legitimately shrinks it. It was
+    123,015 under the old quoted-phrase query and is 93,139 under the title-scoped NEAR
+    query (-24.3%, the intended effect). So the floor below is deliberately structural
+    rather than a number copied from a past run: it only asserts this is the FULL sweep
+    and not the 40-per-user sample, which is the thing that would actually invalidate
+    the result. A magic threshold here would go red on every retrieval improvement and
+    teach whoever hits it to edit the number instead of reading the change."""
     n = 0
     for p in _load_pairs(full=True):
         b = _score(p)
@@ -216,7 +233,11 @@ def test_the_full_corpus_decomposes_and_stays_in_bounds():
         )
         assert b["title_points"] in (0, 30, 60, 80, 100)
         n += 1
-    assert n > 100_000, f"expected the full corpus, got {n:,} pairs"
+    sampled_ceiling = SAMPLE_PER_USER * _user_count()
+    assert n > sampled_ceiling, (
+        f"expected the full sweep, got {n:,} pairs — no more than the "
+        f"{sampled_ceiling:,} the sampled test already covers"
+    )
 
 
 # ── goldens: 183 cases five independent readers computed by hand ─────────────

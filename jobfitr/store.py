@@ -113,12 +113,13 @@ def normalize_job(job: dict) -> dict:
     """
     src = _s(job.get("source")) or _s(job.get("sources"))
     loc = _s(job.get("location"))
-    # job_radar appends " (Remote)" to EVERY Adzuna location unconditionally (their
-    # API has no reliable remote flag) — it's noise, not signal. Strip it so the
-    # derived remote tag and the displayed location aren't misleading. The free
-    # remote boards append it only when a job is genuinely remote, so keep theirs.
-    if src == "adzuna" and loc.endswith(" (Remote)"):
-        loc = loc[: -len(" (Remote)")].strip()
+    # A strip of " (Remote)" for adzuna lived here, on the belief that job_radar
+    # appended it to every Adzuna location. It doesn't, and measurably never did in
+    # this corpus: 0 of 7,308 adzuna rows end with it, so the branch never fired.
+    # job_radar appends " (Remote)" for ashby/smartrecruiters/workable only, where it
+    # means the job really is remote — 2,758 rows carry it and they are kept on
+    # purpose. Adzuna's remote signal is `location.area == ["US"]`, which the adapter
+    # discards upstream; that is a job-radar fix, not something to paper over here.
     salary = _s(job.get("salary"))
     text = _s(job.get("text"))
     if len(text) > BODY_CAP:
@@ -640,14 +641,42 @@ def mark_fetched(key: str, path: str | None = None) -> None:
 
 
 # ── retrieval: FTS5 BM25 candidates ──────────────────────────────────────────
+# How far apart NEAR lets the title words sit. Measured on the frozen corpus: 2 is
+# meaningfully tighter ("senior ai engineer" 221 vs 273) and 3 through 10 return the
+# same rows, so 3 is the smallest value that costs nothing.
+_FTS_SLOP = 3
+
+
 def _fts_query(titles: list[str]) -> str:
-    """Build an FTS5 MATCH query: OR of quoted title phrases (quotes = phrase match)."""
-    phrases = []
+    """Build an FTS5 MATCH query: OR of title-scoped NEAR clauses, one per title.
+
+    This was an OR of quoted phrases, and a quoted phrase in FTS5 means ADJACENT AND
+    IN ORDER. So `"supply chain analyst"` matched 2 rows while missing every real
+    variant of itself — `Supply Chain Master Data Analyst` (a word inserted mid-title),
+    `Analyst, Transportation & Supply Chain Strategy` (reordered), `Senior FP&A Analyst
+    - Supply Chain`. Those rows never entered the candidate pool at all, so the
+    scoreboard never scored them: an invisible RECALL bug, not a ranking one.
+
+    `NEAR(..., 3)` asks for the same words within 3 tokens in any order, and the
+    `title:` prefix scopes the match to the title column instead of title+body.
+
+    Measured over the 57-profile fixture: candidates **-20.9%** AND score regret
+    **3.04% -> 0.30%**, perfect boards 29/57 -> 53/57 — more recall and less work in
+    the same change. Both halves are load-bearing: title-scoping alone measured as a
+    REGRESSION (3.45% regret) because it drops body matches without gaining NEAR's
+    flexibility, and NEAR alone gives no latency win.
+    """
+    clauses = []
     for t in titles:
-        t = re.sub(r'["^*():]', " ", (t or "")).strip()
-        if t:
-            phrases.append(f'"{t}"')
-    return " OR ".join(phrases)
+        t = re.sub(r'["^*():,]', " ", (t or "")).strip()
+        # Drop tokens with no alphanumerics ("&", "-"): FTS5 tokenizes them to nothing,
+        # so they only make the query string harder to read.
+        words = [w for w in t.split() if any(ch.isalnum() for ch in w)]
+        if not words:
+            continue
+        terms = " ".join(f'"{w}"' for w in words)
+        clauses.append(f"title: NEAR({terms}, {_FTS_SLOP})")
+    return " OR ".join(clauses)
 
 
 def bm25_candidates(

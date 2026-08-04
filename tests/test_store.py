@@ -59,48 +59,54 @@ def test_normalize_derives_tags():
     )
 
 
-def test_normalize_strips_adzuna_remote_artifact():
-    # job_radar appends " (Remote)" to EVERY Adzuna location — noise, not signal.
+def test_normalize_remote_from_real_adzuna_and_board_shapes():
+    # This replaced test_normalize_strips_adzuna_remote_artifact, which asserted that
+    # a " (Remote)" suffix was stripped off Adzuna locations. job_radar used to append
+    # that to EVERY Adzuna row; job-radar 5ab74df ("stop mislabeling every Adzuna job
+    # remote") fixed it upstream, so the strip became dead code guarding a shape that
+    # can no longer arrive — measured: 0 of 7,308 adzuna rows in the frozen corpus end
+    # with " (Remote)". The invariants below are the ones that actually mattered, now
+    # asserted against locations Adzuna really sends.
     r = store.normalize_job(
-        _job(
-            "u",
-            "Grocery Store Manager",
-            location="Wahpeton, ND (Remote)",
-            source="adzuna",
-        )
+        _job("u", "Grocery Store Manager", location="Wahpeton, ND", source="adzuna")
     )
-    assert r["location"] == "Wahpeton, ND"  # artifact stripped
-    assert r["remote"] == "onsite"  # so an on-site grocery job isn't mislabeled remote
+    assert r["location"] == "Wahpeton, ND"  # passed through verbatim, nothing stripped
+    assert r["remote"] == "onsite"  # an on-site grocery job is not mislabeled remote
     # a genuinely remote-titled Adzuna job still reads remote (title signal)
     assert (
         store.normalize_job(
-            _job(
-                "u2",
-                "Remote Customer Advocate",
-                location="Austin (Remote)",
-                source="adzuna",
-            )
+            _job("u2", "Remote Customer Advocate", location="Austin", source="adzuna")
         )["remote"]
         == "remote"
     )
-    # the free remote boards' conditional "(Remote)" is real signal — keep it
+    # ashby/smartrecruiters/workable and the free remote boards DO still append
+    # " (Remote)", and there it is real signal — 2,758 rows carry it. Keep it.
     assert (
         store.normalize_job(
             _job("u3", "Designer", location="Anywhere (Remote)", source="remotive")
         )["remote"]
         == "remote"
     )
+    assert (
+        store.normalize_job(
+            _job("u4", "Platform Engineer", location="Berlin (Remote)", source="ashby")
+        )["remote"]
+        == "remote"
+    )
 
 
 def test_normalize_remote_from_body():
-    # The keyed sources (Adzuna/USAJOBS) carry no remote flag and lose their
-    # "(Remote)" artifact, so a genuinely-remote role reads onsite from title+loc
-    # alone. The body scan recovers it — this is the fix for empty remote searches.
+    # The keyed sources (Adzuna/USAJOBS) carry no remote flag at all, so a genuinely
+    # remote role reads onsite from title+location alone — "Austin, TX" says nothing.
+    # The body scan recovers it; this is the fix for empty remote searches.
+    # Locations here deliberately carry NO " (Remote)" suffix: that is what Adzuna
+    # really sends, and a suffix would short-circuit remote_posting() on the head and
+    # never exercise the body path this test exists to cover.
     r = store.normalize_job(
         _job(
             "b1",
             "Front End Developer",
-            location="Austin, TX (Remote)",
+            location="Austin, TX",
             text="We are hiring a front end developer. This is a fully remote position open to any US state.",
         )
     )
@@ -111,19 +117,21 @@ def test_normalize_remote_from_body():
             _job(
                 "b2",
                 "Front End Developer",
-                location="Austin, TX (Remote)",
+                location="Austin, TX",
                 text="On-site only. This is not a remote position; you must work from our Austin office.",
             )
         )["remote"]
         == "onsite"
     )
-    # incidental "remote" in prose must NOT flip an on-site job (no false positive)
+    # incidental "remote" in prose must NOT flip an on-site job (no false positive).
+    # Plain "Dayton, OH" on purpose — this asserts the BODY guard, and a " (Remote)"
+    # suffix would satisfy remote_posting() on the head and never reach it.
     assert (
         store.normalize_job(
             _job(
                 "b3",
                 "Systems Engineer",
-                location="Dayton, OH (Remote)",
+                location="Dayton, OH",
                 text="You will administer remote servers and support remote teams across our data centers.",
             )
         )["remote"]

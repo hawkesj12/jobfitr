@@ -276,7 +276,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'web'", specifier = ">=0.27" },
-    { name = "job-radar", specifier = ">=0.6,<0.7" },
+    { name = "job-radar", specifier = ">=0.6,<0.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "slowapi", marker = "extra == 'web'", specifier = ">=0.1.9" },
