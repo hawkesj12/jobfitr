@@ -309,18 +309,45 @@ def _tier(want: tuple[str, frozenset[str], str], got: str, got_words: set) -> in
 # seniority-shifted match on a role the user actually asked for.
 # The user's own words always win.
 # ═══════════════════════════════════════════════════════════════
-def title_score(titles, related_titles, job_title: str) -> tuple[int, bool]:
-    """(points, is_related). `is_related` labels the card's receipt."""
+def title_score(
+    titles, related_titles, job_title: str, job_title_root: str = ""
+) -> tuple[int, bool]:
+    """(points, is_related). `is_related` labels the card's receipt.
+
+    A listing is compared on TWO surfaces: the title the employer wrote, and the same
+    title with its seniority and decoration stripped (job_radar's `title_root`). The
+    best tier across both wins — never a swap.
+
+    THE MAX FORM IS THE WHOLE POINT, and it is measured. Swapping the root in regresses
+    3,254 pairs, 3,202 of them 80 -> 0: `Software Engineer, Applied AI` scores 80 for
+    someone wanting "AI Engineer" on the full title and 0 on the root, because the root
+    is where the qualifier went. Taking the max can only ever RAISE a tier, so it needs
+    no relevance judgment to be safe — over all 93,139 retrieved pairs it changes 10,452
+    with ZERO regressions.
+
+    Both surfaces are folded in HERE rather than by max()-ing two calls, so the
+    precedence rule survives untouched: a related title can never outrank a real one,
+    because every title the user actually named — on either surface — is tried before
+    any suggestion is considered. Two separate calls would each apply that rule to half
+    the evidence and then have to reconcile the flags.
+
+    `job_title_root` defaults to "" so every caller that predates the column, and the
+    234 goldens, score exactly as they did.
+    """
     got = norm_key(job_title)  # once per candidate, not once per user title
-    if not got:
+    root = norm_key(job_title_root)
+    if root == got:
+        root = ""  # the common case: nothing was stripped, so do not compare twice
+    if not got and not root:
         return _TIER_NONE, False
-    got_words = set(got.split())
+    surfaces = [(g, set(g.split())) for g in (got, root) if g]
     best = max(
-        (_tier(_prepared(t), got, got_words) for t in titles or [] if t), default=0
+        (_tier(_prepared(t), g, gw) for t in titles or [] if t for g, gw in surfaces),
+        default=0,
     )
     if best:
         return best, False
     for t in related_titles or []:
-        if t and _tier(_prepared(t), got, got_words):
+        if t and any(_tier(_prepared(t), g, gw) for g, gw in surfaces):
             return _TIER_RELATED, True
     return _TIER_NONE, False

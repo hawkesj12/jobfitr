@@ -522,6 +522,7 @@ def scoreboard(
     boosts: list,
     penalties: list,
     related_titles: list | None = None,
+    title_root: str = "",
 ) -> dict:
     parts: list[tuple[str, int]] = []
 
@@ -529,7 +530,7 @@ def scoreboard(
     # of them land, a flat 30 for matching one the MODEL suggested. Tiers do not stack
     # and titles do not add; one role, one score. `related_titles` defaults to None so
     # every stored search from before the field existed scores exactly as it did.
-    title_pts, is_related = title_score(titles, related_titles, title)
+    title_pts, is_related = title_score(titles, related_titles, title, title_root)
     if title_pts:
         # The label reaches the card's why-chips, so a user can tell a match on their
         # own words from a match on the machine's guess.
@@ -643,6 +644,7 @@ def _rank(
             boosts,
             penalties,
             related_titles,
+            (c.get("title_root") or "").lower(),
         )
         # `why` is built FROM the parts, not computed separately. It used to test
         # `term in blob` — the same substring bug removed from scoring — so boosting

@@ -82,6 +82,7 @@ def _load_pairs(full: bool):
                 {
                     "id": u["id"],
                     "title": (r.get("title") or "").lower(),
+                    "root": (r.get("title_root") or "").lower(),
                     "company": (r.get("company") or "").lower(),
                     "body": (r.get("body") or "").lower(),
                     "titles": cfg["titles"],
@@ -108,6 +109,7 @@ def _score(p, **over):
         d["boosts"],
         d["penalties"],
         d["related"],
+        d.get("root", ""),
     )
 
 
@@ -290,3 +292,49 @@ def test_a_human_readable_of_the_spec_gets_the_same_number(case):
         f"{case['case_id']} (reader {case['agent']}): expected {case['expected']}, "
         f"got {got['points']} · {got['parts']}\n  reader's working: {case['working']}"
     )
+
+
+# ── the root title ────────────────────────────────────────────────────────────
+@needs_corpus
+@pytest.mark.slow
+def test_the_root_title_can_only_ever_raise_a_score():
+    """The property that makes this change safe WITHOUT relevance judgments.
+
+    The scorer now reads two surfaces — the employer's title and the same title with
+    seniority and decoration stripped — and takes the best tier across both. Because it
+    is a max, no listing can score lower than it did, so the harness (which measures
+    structure, never relevance) is a sufficient gate. A SWAP would not be safe: measured,
+    it regresses 3,254 pairs, 3,202 of them 80 -> 0.
+
+    One regression here means the max was not applied and the change must not ship.
+    """
+    pairs = _load_pairs(full=True)
+    lowered = []
+    raised = 0
+    for p in pairs:
+        with_root = _score(p)["points"]
+        without = _score(p, root="")["points"]
+        if with_root < without:
+            lowered.append((p["title"], without, with_root))
+        elif with_root > without:
+            raised += 1
+    assert not lowered, f"{len(lowered)} pairs scored LOWER with the root: {lowered[:5]}"
+    assert raised, "the root changed nothing at all — is the corpus enriched?"
+    print(f"\n  {len(pairs):,} pairs · {raised:,} raised · 0 lowered")
+
+
+@needs_corpus
+def test_the_root_never_lets_a_suggestion_outrank_a_named_title(pairs):
+    """The locked precedence rule, re-checked on the wider evidence. Folding both
+    surfaces into one call keeps it; max()-ing two separate calls would apply the rule
+    to half the evidence each and then have to reconcile the flags."""
+    for p in pairs:
+        if not p["related"]:
+            continue
+        board = _score(p)
+        labels = [lbl for lbl, _ in board["parts"]]
+        if "related title" in labels:
+            # a suggestion only ever scores when NO named title landed, on either surface
+            assert _score(p, related=[])["points"] <= 0 or all(
+                lbl != "title" for lbl in labels
+            )

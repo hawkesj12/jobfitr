@@ -13,7 +13,14 @@ import sqlite3
 
 import pytest
 
-from jobfitr.match import has_term, norm_key, term_hits, title_points, title_score
+from jobfitr.match import (
+    _TIER_RELATED,
+    has_term,
+    norm_key,
+    term_hits,
+    title_points,
+    title_score,
+)
 
 # ── unit: the matching rule ──────────────────────────────────────────────────
 
@@ -233,3 +240,61 @@ def test_substring_matching_would_have_been_catastrophic(corpus):
         f"{matched:,}. The gap IS the bug — 97% of substring hits were 'leverage', "
         "'storage' and 'coverage'."
     )
+
+
+# ── the root title ────────────────────────────────────────────────────────────
+# job_radar 0.7.0 parses every title into a root with seniority and decoration removed.
+# The scorer reads BOTH surfaces and takes the best tier — never a swap.
+ROOT_CASES = [
+    # want, job title, root, without root, with root, why
+    ("Application Security Engineer", "Senior Application Security Engineer (Remote)",
+     "Application Security Engineer", 80, 100,
+     "the founding example — these are the same role"),
+    ("Senior AI Engineer", "AI Engineer II", "AI Engineer", 0, 60,
+     "the case that started the rebuild: a level suffix used to score ZERO"),
+    ("AI Engineer", "Senior AI Engineer I", "AI Engineer", 80, 100,
+     "seniority and a level are decoration, not a different role"),
+    ("Senior AI Product Builder", "Staff AI Product Builder", "AI Product Builder",
+     60, 60, "a different seniority is still the core-role tier, unchanged"),
+    ("AI Engineer", "Software Engineer, Applied AI", "Software Engineer", 80, 80,
+     "THE REASON IT IS A MAX: swapping would score this 0, and 3,202 pairs like it"),
+]
+
+
+@pytest.mark.parametrize(
+    "want,job,root,before,after,why", ROOT_CASES,
+    ids=[f"{c[4]}<-{c[3]}" for c in ROOT_CASES],
+)
+def test_root_title_tiers(want, job, root, before, after, why):
+    assert title_score([want], [], job)[0] == before, f"baseline: {why}"
+    assert title_score([want], [], job, root)[0] == after, why
+
+
+def test_an_empty_root_scores_exactly_as_before():
+    """The default. Every caller predating the column — and the 234 goldens, which pass
+    no root — must be byte-identical."""
+    for want, job in [("ai engineer", "AI Engineer"), ("nurse", "Senior Nurse"),
+                      ("data analyst", "Chef")]:
+        assert title_score([want], [], job) == title_score([want], [], job, "")
+
+
+def test_a_root_match_cannot_promote_a_suggestion_over_a_named_title():
+    """The locked precedence rule. Both surfaces are tried for every NAMED title before
+    any suggestion is considered, so the root cannot smuggle a suggestion to the top."""
+    pts, is_related = title_score(
+        ["Data Analyst"], ["Software Engineer"], "Senior Software Engineer",
+        "Software Engineer",
+    )
+    assert (pts, is_related) == (_TIER_RELATED, True)
+    # and a named title still beats it outright even when only the ROOT matches
+    pts, is_related = title_score(
+        ["Software Engineer"], ["Data Analyst"], "Senior Software Engineer II",
+        "Software Engineer",
+    )
+    assert (pts, is_related) == (100, False)
+
+
+def test_a_root_identical_to_the_title_is_not_compared_twice():
+    """The common case — nothing was stripped. Cheap, and it must not change the answer."""
+    assert title_score(["ai engineer"], [], "AI Engineer", "AI Engineer")[0] == 100
+    assert title_score(["ai engineer"], [], "Chef", "Chef")[0] == 0
