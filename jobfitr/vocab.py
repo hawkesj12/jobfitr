@@ -169,7 +169,6 @@ _CATEGORY_MAP = {
     "writing & editing": "Advertising and Marketing",
     "art & design": "Design",
     "training": "Education",
-
     # ── explicit unknowns: the source said nothing useful ──
     "unknown": "Unknown",
     "other": "Unknown",
@@ -269,3 +268,111 @@ def seniority(raw) -> str | None:
         _SENIORITY_MAP[p.strip()] for p in s.split(",") if p.strip() in _SENIORITY_MAP
     ]
     return min(found, key=lambda x: _SENIORITY_RANK[x]) if found else None
+
+
+# ── US state ─────────────────────────────────────────────────────────────────
+# An ALLOWLIST, for the same reason `category` is one: the field is only useful if it
+# holds a small closed set. job_radar emits `state` for 34% of rows and it arrives in
+# three vocabularies at once. Measured on the live store, 6,382 rows carry a state
+# across **126 distinct values** — the US has 50 plus DC:
+#
+#     6,159 rows   53 real USPS codes                        CA, NY, TX, …
+#       ~120 rows  the same states SPELLED OUT               'Ohio', 'Mass', 'Washington, D.C.'
+#       ~100 rows  not the US at all                         'Ontario', 'Berlin', 'Dubai', 'SP'
+#
+# Two jobs, therefore. Fold the spelled-out ones onto their code so the drawer offers
+# "OH" once instead of "OH" and "Ohio" separately. And treat the third group as what it
+# is: **positive evidence the posting is not American.** That matters beyond display —
+# `servable_in_us` could previously only test `country`, and the leak it documents is
+# exactly a row whose country is blank while its state says Berlin.
+US_STATES = frozenset(
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT "
+    "NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY "
+    "DC PR VI GU AS MP".split()
+)
+
+# Full names -> code. Every entry below was READ OFF the live store, not copied from a
+# gazetteer, so the list covers the spellings sources actually send (including 'Mass'
+# and both punctuations of Washington DC) and nothing speculative.
+_STATE_NAMES = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "mass": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+    # DC arrives punctuated three ways. 'washington dc' must be checked BEFORE the bare
+    # 'washington' -> WA above, which _clean's comma-stripping makes possible.
+    "district of columbia": "DC",
+    "washington d c": "DC",
+    "washington dc": "DC",
+    "puerto rico": "PR",
+    "guam": "GU",
+}
+
+
+def us_state(raw) -> str | None:
+    """A source's subdivision string -> a USPS code, or None when it is not a US state.
+
+    None means "not a US state" — either the field was empty or it named somewhere
+    else ('Ontario', 'Berlin', 'SP'). Those two cases are NOT distinguished, because
+    the one caller that wanted the distinction turned out not to need it: a foreign
+    subdivision never appears without a foreign country, so US-only intake already
+    drops those rows on the country test alone (measured: 0 additional rows).
+    """
+    # Punctuation to spaces, not just commas: 'Washington, D.C.' and 'Washington, DC'
+    # are the same place and both arrive in the live store. Stripping only the comma
+    # left 'washington d.c.' unmatched and silently foreign — which then fed
+    # is_foreign_state and would have DROPPED real DC jobs.
+    s = " ".join("".join(ch if ch.isalnum() else " " for ch in _clean(raw)).split())
+    if not s:
+        return None
+    up = s.upper()
+    if up in US_STATES:
+        return up
+    return _STATE_NAMES.get(s)

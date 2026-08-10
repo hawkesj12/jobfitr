@@ -66,3 +66,38 @@ def test_seniority_spellings_collapse():
         assert vocab.seniority(raw) == "mid", raw
     for raw in ("Not Applicable", "Any", "", None):
         assert vocab.seniority(raw) is None, raw
+
+
+# ── us_state ─────────────────────────────────────────────────────────────────
+def test_us_state_folds_the_three_vocabularies_onto_one():
+    """The live store held 126 distinct values for a field whose real range is 53.
+    Codes, spelled-out names and foreign subdivisions all arrive in the same column."""
+    assert vocab.us_state("CA") == "CA"
+    assert vocab.us_state("ca") == "CA"
+    assert vocab.us_state("Ohio") == "OH"
+    assert vocab.us_state("Mass") == "MA"  # a real value from the store, not invented
+    assert vocab.us_state("New  Mexico") == "NM"
+
+
+def test_us_state_handles_both_punctuations_of_washington_dc():
+    """Both appear in the store. Stripping only the comma left 'washington d.c.'
+    unmatched, which would have read as foreign and dropped real DC jobs."""
+    assert vocab.us_state("Washington, DC") == "DC"
+    assert vocab.us_state("Washington, D.C.") == "DC"
+    assert vocab.us_state("district of columbia") == "DC"
+    assert vocab.us_state("Washington") == "WA"  # the state, not the district
+
+
+def test_us_state_rejects_foreign_subdivisions():
+    for v in ("Ontario", "Berlin", "SP", "Alberta", "Community of Madrid", "Greater London"):
+        assert vocab.us_state(v) is None, v
+
+
+def test_us_state_empty_is_none():
+    for v in ("", "   ", None):
+        assert vocab.us_state(v) is None
+
+
+def test_every_state_name_maps_into_the_code_set():
+    assert set(vocab._STATE_NAMES.values()) <= vocab.US_STATES
+    assert len(vocab.US_STATES) == 56  # 50 + DC + 5 territories

@@ -427,6 +427,25 @@ def _shape(c: dict, points: int, why: str, parts: list) -> dict:
         "salary": c.get("salary", ""),
         "category": c.get("category") or "",
         "employment_type": _norm_employment_type(c.get("employment_type")),
+        # ── the filter fields ────────────────────────────────────────────────
+        # `state` is a USPS code or "" (jobfitr.vocab.us_state), so it is a closed set
+        # the drawer can offer. `city` rides along for the card line only — 1,129
+        # distinct values in the live pool is a search box, not a facet.
+        "state": c.get("state") or "",
+        # 100% filled, and it IS the product's promise. A filter, never a score input:
+        # a direct link is a better EXPERIENCE, not a better MATCH, and folding it into
+        # the fit number would tell someone a job suits them because of its URL.
+        #
+        # Emitted as a STRING rather than the stored 0/1 so it behaves like every other
+        # facet. facet_counts skips falsy values — which is right for "the source said
+        # nothing" but wrong for an integer 0 that means "we checked, it's an
+        # aggregator". A word cannot be accidentally falsy.
+        "apply_via": "employer" if c.get("direct_apply") else "aggregator",
+        # An ANNUAL USD figure (see _annual_salary), not the raw column — the slider
+        # compares these against each other and the raw values are in five currencies
+        # and four periods. None means "we could not put this on the scale", and the
+        # front end falls back to reading the display string.
+        "salary_min": store.annual_salary(c),
         "tags": tags,
         "points": points,  # THE score — an absolute integer, the same meaning every day
         "parts": parts,  # what earned it: [(label, delta)] — the receipt under the number
@@ -756,6 +775,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
                 **c,
                 "category": c.get("category") or "",
                 "employment_type": _norm_employment_type(c.get("employment_type")),
+                "apply_via": "employer" if c.get("direct_apply") else "aggregator",
             }
             for c, _, _, _ in kept
         ]

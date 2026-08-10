@@ -17,6 +17,8 @@ const FACET_GROUPS = [
   { key: "remote", title: "Work style", own: false, label: (v) => REMOTE_LABELS[v] || v },
   { key: "employment_type", title: "Type", own: true, label: (v) => v.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) },
   { key: "seniority", title: "Level", own: false, label: (v) => v.charAt(0).toUpperCase() + v.slice(1) },
+  { key: "state", title: "Where", own: true, label: (v) => v },
+  { key: "apply_via", title: "Apply", own: true, label: (v) => (v === "employer" ? "Employer site" : "Job board") },
   { key: "salary_band", title: "Salary", own: false, label: labelBand },
 ];
 // Work style is FOUR states in the store — remote | hybrid | onsite | null. Only the
@@ -284,6 +286,12 @@ function passesFacets(job) {
 // salary field is empty. A tiny "$10" is a real (low/hourly) value — NOT "unlisted" —
 // so it must be caught by the slider, not slip through as a no-salary job.
 function salaryMin(job) {
+  // Prefer the ENGINE'S parsed number. The regex below reads the first number out of
+  // the display string, which is right for "$120,000-$150,000" and wrong for
+  // "401k match, $120,000 base" — it returns 401 and the job vanishes under any
+  // slider position. job-radar 0.7.0 parses the figure properly; the regex stays only
+  // as the fallback for rows whose source stated a salary it could not parse.
+  if (typeof job.salary_min === "number" && job.salary_min > 0) return job.salary_min;
   const m = String(job.salary || "").match(/\d[\d,]*/);
   if (!m) return null;
   const n = parseInt(m[0].replace(/,/g, ""), 10);

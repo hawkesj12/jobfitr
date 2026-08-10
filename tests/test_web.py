@@ -1216,3 +1216,45 @@ def test_serving_clients_is_not_the_same_as_placing_you_at_one(client):
         "serving clients is ordinary B2B"
     )
     assert ["our client", -15] in [list(p) for p in by_url["https://x/hiring"]["parts"]]
+
+
+def test_filter_fields_reach_the_card_and_the_drawer(client, monkeypatch):
+    """The filters are the product surface these columns exist for. `state` is a closed
+    set of USPS codes, `apply_via` is a word rather than the stored 0/1 (facet_counts
+    skips falsy values, so an integer 0 meaning "we checked, it's an aggregator" would
+    vanish), and `salary_min` is annualised USD."""
+    _seed(
+        [
+            _job("Role A", url="https://x/a", state="Ohio", direct_apply=True,
+                 salary="$140,000", salary_min=140000, salary_period="year",
+                 salary_currency="USD"),
+            _job("Role B", url="https://x/b", state="Ontario", direct_apply=False,
+                 salary="$170/hr", salary_min=170, salary_period="hour",
+                 salary_currency="USD"),
+        ]
+    )
+    _mark_fresh(["role"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["role"]}).json()
+    by = {j["title"]: j for j in d["jobs"]}
+
+    assert by["Role A"]["state"] == "OH"  # spelled-out name folded onto the code
+    assert by["Role B"]["state"] == ""  # foreign subdivision is not a US state
+    assert by["Role A"]["apply_via"] == "employer"
+    assert by["Role B"]["apply_via"] == "aggregator"
+    # $170/hr is a $353,600 job, not a $170 one — the whole reason for annualising.
+    assert by["Role B"]["salary_min"] == 170 * 2080
+    assert by["Role A"]["salary_min"] == 140000
+    assert d["facets"]["state"] == {"OH": 1}
+    assert d["facets"]["apply_via"] == {"employer": 1, "aggregator": 1}
+
+
+def test_foreign_currency_salary_is_not_put_on_the_dollar_scale(client, monkeypatch):
+    """A yen figure sorted as dollars is what put a JPY 15,500,000 job at the top of the
+    live pool. Dropped rather than converted — a live FX rate is not worth it here."""
+    _seed([_job("Yen Role", url="https://x/y", salary="¥15.5M", salary_min=15500000,
+                salary_period="year", salary_currency="JPY")])
+    _mark_fresh(["yen"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["yen"]}).json()
+    assert d["jobs"][0]["salary_min"] is None

@@ -1187,3 +1187,18 @@ def test_the_three_facets_only_speak_from_evidence(db):
     quiet = store.normalize_job(_job("o2", "Nurse", location="Wahpeton, ND"))
     for field in ("remote", "remote_basis", "seniority", "seniority_basis", "category"):
         assert quiet[field] is None, f"{field} invented a value from nothing"
+
+
+def test_state_is_normalised_to_a_usps_code(db):
+    """The one non-pass-through field. A drawer needs a closed set, and the raw column
+    holds 126 values for a field whose real range is 53."""
+    rows = [
+        _job("s-a", "Nurse", state="Ohio"),
+        _job("s-b", "Nurse", state="ca"),
+        _job("s-c", "Nurse", state="Ontario"),
+        _job("s-d", "Nurse", state=""),
+    ]
+    assert store.normalize_job(rows[0])["state"] == "OH"
+    assert store.normalize_job(rows[1])["state"] == "CA"
+    assert store.normalize_job(rows[2])["state"] is None  # foreign, not a US state
+    assert store.normalize_job(rows[3])["state"] is None

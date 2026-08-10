@@ -89,6 +89,11 @@ def servable_in_us(job: dict, row: dict) -> bool:
         return True
     if row.get("remote") == "remote":
         return True  # location-independent — a country test would delete 73% of these
+    # A SUBDIVISION test was tried here and removed. The idea was sound — a row whose
+    # country is blank but whose state says 'Ontario' has told us where it is — but
+    # measured on the 21,495-row capture it drops exactly **0** additional rows: every
+    # row carrying a foreign subdivision also carries a foreign country, so the test
+    # below already caught all of them. The leak documented above is elsewhere.
     country = _s(job.get("country")).upper()
     return country in ("", "US")  # unknown passes; only KNOWN-foreign is dropped
 
@@ -108,14 +113,49 @@ def servable_in_us(job: dict, row: dict) -> bool:
 # of pure fabrication. That trade is the entire point.
 
 
-def _salary_band(salary: str) -> str:
-    """Bucket a salary string into a coarse band tag (empty when none/unknown)."""
-    if not salary:
-        return ""
-    nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]{3,}", salary)]
-    if not nums:
-        return ""
-    top = max(nums)
+# Hours per work-year / weeks / months, for putting every stated salary on ONE scale.
+# Measured on the live pool: 2,064 yearly figures alongside 125 HOURLY (avg $47), 22
+# monthly and one weekly, across five currencies.
+_SALARY_PERIODS = {"year": 1, "month": 12, "week": 52, "hour": 2080, "day": 260}
+
+
+def annual_salary(job: dict) -> float | None:
+    """A stated salary as an annual USD number, or None when it cannot be trusted.
+
+    Two refusals, both measured. **Non-USD is dropped** rather than converted — the pool
+    carries CAD/EUR/GBP/INR/JPY, and their raw numbers are what put a ¥15,500,000 and a
+    ₹3,000,000 above every real dollar figure; converting needs a live FX rate that a
+    salary filter does not justify. **`fixed` is dropped** because a project fee is not
+    a salary. A blank period returns None, and callers fall back to the display string.
+    """
+    lo = job.get("salary_min")
+    if not isinstance(lo, (int, float)) or lo <= 0:
+        return None
+    cur = _s(job.get("salary_currency")).upper()
+    if cur and cur != "USD":
+        return None
+    mult = _SALARY_PERIODS.get(_s(job.get("salary_period")).lower())
+    return float(lo) * mult if mult else None
+
+
+def _salary_band(job: dict) -> str:
+    """Bucket a salary into a coarse band tag (empty when none/unknown).
+
+    Prefers the engine's parsed figure ANNUALISED, and only falls back to scraping the
+    display string when there is none. Reading the string alone is how `$200-400/hr` —
+    a $416,000 job — ended up tagged `under-50k` and sitting in that drawer: the regex
+    needs 3+ digits, so it saw no number at all in "$200-400/hr" and every hourly rate
+    banded as if the hourly figure were the annual one.
+    """
+    top = annual_salary(job)
+    if top is None:
+        salary = _s(job.get("salary"))
+        if not salary:
+            return ""
+        nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]{3,}", salary)]
+        if not nums:
+            return ""
+        top = max(nums)
     if top < 50_000:
         return "under-50k"
     if top < 80_000:
@@ -253,7 +293,7 @@ def normalize_job(job: dict) -> dict:
         # 895 rows of "Senior Software Engineer, Backend" under Science and
         # Engineering, because their department is called "Engineering".
         "category": vocab.category(job.get("category")),
-        "salary_band": _salary_band(salary),
+        "salary_band": _salary_band(job),
         "body": text,
         # ── pass-through: the engine's value, the engine's name ───────────────
         "url": _s(job.get("url")),
@@ -265,7 +305,10 @@ def normalize_job(job: dict) -> dict:
         "team": _s(job.get("team")),
         "location": loc,
         "city": _s(job.get("city")),
-        "state": _s(job.get("state")),
+        # Normalised to a USPS code, or NULL. The one field on this list that is not
+        # pure pass-through, because the raw value arrives in three vocabularies at
+        # once (CA / Ohio / Ontario) and a filter drawer needs a closed set.
+        "state": vocab.us_state(job.get("state")),
         "country": _s(job.get("country")),
         "locations": _json(job.get("locations")),
         "remote_region": _s(job.get("remote_region")),
@@ -1022,6 +1065,8 @@ def facet_counts(rows: list[dict]) -> dict:
         "remote": {},
         "seniority": {},
         "salary_band": {},
+        "state": {},  # a USPS code — vocab.us_state guarantees the closed set
+        "apply_via": {},  # 'employer' | 'aggregator'
     }
     for r in rows:
         for f in facets:
