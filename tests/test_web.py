@@ -12,7 +12,7 @@ from datetime import date, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from jobfitr import live, server, snapshot, store
+from jobfitr import live, server, snapshot, store, vocab
 from jobfitr.config_builder import config_from_dict
 
 RECENT = (date.today() - timedelta(days=3)).isoformat()
@@ -158,10 +158,13 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
                 text="python kubernetes docker accountant-free",
                 location="Austin, TX",
                 salary="$140,000",
-                department="IT Jobs",
+                category="IT Jobs",
+                seniority="Senior Level",
+                remote_type="onsite",
+                remote_basis="stated",
                 employment_type="full_time",
             ),
-            _job("Data Engineer", text="python etl pipelines", department="IT Jobs"),
+            _job("Data Engineer", text="python etl pipelines", category="IT Jobs"),
             _job("Marketing Engineer", text="seo content calendar growth"),
             _job("Engineering Intern", text="python kubernetes internship"),
         ]
@@ -191,12 +194,14 @@ def test_score_ranks_boosts_excludes_and_tags(client, monkeypatch):
     top = d["jobs"][0]
     assert top["why"]  # matched signals
     assert "text" not in top and "snippet" in top  # body not leaked
-    assert top["category"] == "IT Jobs" and top["employment_type"] == "full_time"
-    assert "senior" in top["tags"] and "onsite" in top["tags"]  # derived tags
+    # The raw "IT Jobs" is mapped to the canonical field, not passed through.
+    assert top["category"] == "Software Engineering"
+    assert top["employment_type"] == "full_time"
+    assert "senior" in top["tags"] and "onsite" in top["tags"]  # both source-STATED
     assert isinstance(top["points"], int)
     assert sum(delta for _, delta in top["parts"]) == top["points"]
     # facets counted over the returned set
-    assert d["facets"]["category"]["IT Jobs"] >= 1
+    assert d["facets"]["category"]["Software Engineering"] >= 1
     assert d["pool"] == store.pool_size()
     assert d["degraded"] is None
 
@@ -582,37 +587,45 @@ def test_free_text_schedules_never_become_filter_chips(client, monkeypatch):
     assert types == {"", "contract"}  # prose dropped, Contractor canonicalized
 
 
-def test_category_keeps_job_fields_and_drops_employers_and_levels(client, monkeypatch):
-    """`category` drives the "Field" facet, so it must be a job FUNCTION. ~550 live rows
-    put a USAJOBS agency there, one puts a seniority, one an internal ATS code."""
+def test_category_emits_only_canonical_fields(client, monkeypatch):
+    """`category` drives the "Field" facet, so it must be a job FUNCTION — and it is now
+    an ALLOWLIST of 22, not a denylist of regexes. Sources put four other kinds of value
+    in the field: a USAJOBS agency (~550 rows of "Department of the Navy" — an EMPLOYER),
+    a seniority, an employer's internal ATS code, and an org-unit name. The denylist had
+    to name each pattern and passed anything it forgot — 2,239 distinct strings survived
+    it. The vocabulary can only ever emit one of 22 values, so all four die by default.
+    """
     _seed(
         [
             # distinct companies, kept from when the employer cap could have bitten
-            _job("Role A", company="Ay", department="IT Jobs", url="https://x/it"),
+            _job("Role A", company="Ay", category="IT Jobs", url="https://x/it"),
             _job(
                 "Role B",
                 company="Bee",
-                department="Department of the Navy",
+                category="Department of the Navy",
                 url="https://x/navy",
             ),
             _job(
                 "Role C",
                 company="Cee",
-                department="Mid-Senior Level",
-                url="https://x/level",
+                category="Mid-Senior Level",
+                url="https://x/lvl",
             ),
             _job(
                 "Role D",
                 company="Dee",
-                department="220 - Solutions PS",
+                category="220 - Solutions PS",
                 url="https://x/code",
             ),
             _job(
                 "Role E",
                 company="Ee",
-                department="Legal &amp; Compliance",
+                category="Legal &amp; Compliance",
                 url="https://x/legal",
             ),
+            # the one the denylist could never have caught: an org-unit name that reads
+            # like a field. 2,239 of these leaked through it.
+            _job("Role F", company="Eff", category="Go To Market", url="https://x/gtm"),
         ]
     )
     _mark_fresh(["role"])
@@ -620,11 +633,13 @@ def test_category_keeps_job_fields_and_drops_employers_and_levels(client, monkey
 
     d = client.post("/api/score", json={"titles": ["role"]}).json()
     cats = {j["title"]: j["category"] for j in d["jobs"]}
-    assert cats["Role A"] == "IT Jobs"  # a real field, kept
+    assert cats["Role A"] == "Software Engineering"  # mapped to the canonical field
     assert cats["Role B"] == ""  # an employer, not a field
     assert cats["Role C"] == ""  # a seniority, not a field
-    assert cats["Role D"] == "Solutions PS"  # internal code stripped
-    assert cats["Role E"] == "Legal & Compliance"  # entity decoded
+    assert cats["Role D"] == ""  # an internal code — no longer half-salvaged
+    assert cats["Role E"] == "Legal Services"  # entity decoded, THEN mapped
+    assert cats["Role F"] == ""  # an org unit that reads like a field
+    assert set(cats.values()) <= set(vocab.CATEGORIES) | {""}
 
 
 def test_score_miss_triggers_live_fetch(client, monkeypatch):
@@ -1052,7 +1067,9 @@ def test_a_suggested_title_finds_jobs_the_users_own_wording_cannot(client):
     _mark_fresh(["high school teacher"])
 
     alone = client.post("/api/score", json={"titles": ["High School Teacher"]}).json()
-    assert alone["jobs"] == [], "the exact phrase matches nothing — the bug being routed around"
+    assert alone["jobs"] == [], (
+        "the exact phrase matches nothing — the bug being routed around"
+    )
 
     with_related = client.post(
         "/api/score",
@@ -1127,10 +1144,18 @@ def test_a_company_named_somebody_elses_client_is_penalised(client):
     avoid-term is "our client" and phrase matching does exactly what it says."""
     _seed(
         [
-            _job("Forward Deployed Engineer", text="build integrations",
-                 company="TechTree's client", url="https://x/tt"),
-            _job("Forward Deployed Engineer", text="build integrations",
-                 company="Twilio", url="https://x/tw"),
+            _job(
+                "Forward Deployed Engineer",
+                text="build integrations",
+                company="TechTree's client",
+                url="https://x/tt",
+            ),
+            _job(
+                "Forward Deployed Engineer",
+                text="build integrations",
+                company="Twilio",
+                url="https://x/tw",
+            ),
         ]
     )
     _mark_fresh(["forward deployed engineer"])
@@ -1145,8 +1170,16 @@ def test_the_client_rule_does_not_sink_client_facing_job_titles(client):
     "client" — Client Success Director, Client Support Engineer — all ordinary roles.
     The penalty path tests title and company as one blob, so a term added the usual way
     would have sunk every one of them."""
-    _seed([_job("Client Success Director", text="lead the account team",
-                company="Acme", url="https://x/csd")])
+    _seed(
+        [
+            _job(
+                "Client Success Director",
+                text="lead the account team",
+                company="Acme",
+                url="https://x/csd",
+            )
+        ]
+    )
     _mark_fresh(["client success director"])
     d = client.post("/api/score", json={"titles": ["Client Success Director"]}).json()
     assert d["jobs"][0]["points"] == 100
@@ -1160,15 +1193,26 @@ def test_serving_clients_is_not_the_same_as_placing_you_at_one(client):
         [
             # distinct companies: _dedupe_listings collapses same-title-same-employer
             # rows, which is correct behaviour and would hide half of this test
-            _job("Data Analyst", text="we help our clients transform complex data",
-                 company="Servesco", url="https://x/served"),
-            _job("Data Analyst", text="our client is seeking an analyst for a contract",
-                 company="Placeco", url="https://x/hiring"),
+            _job(
+                "Data Analyst",
+                text="we help our clients transform complex data",
+                company="Servesco",
+                url="https://x/served",
+            ),
+            _job(
+                "Data Analyst",
+                text="our client is seeking an analyst for a contract",
+                company="Placeco",
+                url="https://x/hiring",
+            ),
         ]
     )
     _mark_fresh(["data analyst"])
-    d = client.post("/api/score",
-                    json={"titles": ["Data Analyst"], "rank_down": ["our client"]}).json()
+    d = client.post(
+        "/api/score", json={"titles": ["Data Analyst"], "rank_down": ["our client"]}
+    ).json()
     by_url = {j["url"]: j for j in d["jobs"]}
-    assert not [p for p in by_url["https://x/served"]["parts"] if p[1] < 0], "serving clients is ordinary B2B"
+    assert not [p for p in by_url["https://x/served"]["parts"] if p[1] < 0], (
+        "serving clients is ordinary B2B"
+    )
     assert ["our client", -15] in [list(p) for p in by_url["https://x/hiring"]["parts"]]

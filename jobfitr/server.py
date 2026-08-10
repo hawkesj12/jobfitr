@@ -387,17 +387,18 @@ _EMPLOYMENT_ALIASES = {
     "flexitime": "flexible",
 }
 
-# `category` drives the "Field" facet, so it must be a job FUNCTION. Three other kinds
-# of value leak in: USAJOBS agency names (~550 rows of "Department of the Navy" — an
-# EMPLOYER, not a field), a seniority ("Mid-Senior Level"), and one employer's internal
-# ATS codes ("220 - Solutions PS"). Agencies are dropped rather than renamed because
-# there is no employer facet to move them to; adding one is a separate feature.
-_CATEGORY_CODE_RE = re.compile(r"^\d+\s*[-–—]\s*")
-_CATEGORY_DENY_RE = re.compile(
-    r"(?i)^(department of|office of|.*\bagencies\b|legislative branch|judicial branch|"
-    r"mid[- ]senior level|entry level|executive|associate|director|not applicable)"
-)
-_CATEGORY_MAX_LEN = 40
+# `category` used to be cleaned here by a DENYLIST — regexes for USAJOBS agency names
+# ("Department of the Navy" — an EMPLOYER, not a field), a seniority ("Mid-Senior
+# Level"), an ATS code ("220 - Solutions PS"), plus a 40-character length cap. It is
+# gone because jobfitr.vocab replaced it with an ALLOWLIST at the store boundary: 22
+# canonical fields, and NULL for everything else.
+#
+# That is strictly better and the reason is structural, not stylistic. A denylist has
+# to enumerate every bad value and passes anything it forgot — it let through "Solutions
+# PS", "Engineering - Pipeline", "Go To Market", 2,239 distinct strings in all. An
+# allowlist can only ever emit one of 22 known-good values, so the failure mode flips
+# from "a garbage chip appears in the Field drawer" to "a real field is missing", which
+# is visible, countable, and fixed by adding one line to vocab._CATEGORY_MAP.
 
 
 def _norm_employment_type(value) -> str:
@@ -406,15 +407,6 @@ def _norm_employment_type(value) -> str:
         "".join(ch if ch.isalnum() else " " for ch in str(value or "")).split()
     ).lower()
     return _EMPLOYMENT_ALIASES.get(key, "")
-
-
-def _norm_category(value) -> str:
-    """A job-function category, or '' when the value is an employer/level/free text."""
-    s = _plain_text(value)  # decodes 'Legal &amp; Compliance' → 'Legal & Compliance'
-    s = _CATEGORY_CODE_RE.sub("", s).strip()  # '220 - Solutions PS' → 'Solutions PS'
-    if not s or len(s) > _CATEGORY_MAX_LEN or _CATEGORY_DENY_RE.match(s):
-        return ""
-    return s
 
 
 # The gauge is explicitly "relative to your best match", so it is normalized ACROSS the
@@ -433,7 +425,7 @@ def _shape(c: dict, points: int, why: str, parts: list) -> dict:
         "posted": c.get("posted", ""),
         "source": c.get("source", ""),
         "salary": c.get("salary", ""),
-        "category": _norm_category(c.get("category")),
+        "category": c.get("category") or "",
         "employment_type": _norm_employment_type(c.get("employment_type")),
         "tags": tags,
         "points": points,  # THE score — an absolute integer, the same meaning every day
@@ -762,7 +754,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         [
             {
                 **c,
-                "category": _norm_category(c.get("category")),
+                "category": c.get("category") or "",
                 "employment_type": _norm_employment_type(c.get("employment_type")),
             }
             for c, _, _, _ in kept

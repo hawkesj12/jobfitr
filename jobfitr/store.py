@@ -33,6 +33,8 @@ from job_radar.dedup import ats_from_url
 from job_radar.discover import _norm_name as _jr_norm_name
 from job_radar.scoring import remote_posting
 
+from jobfitr import vocab
+
 _ET = ZoneInfo("America/New_York")
 
 # ── config (env-overridable) ──────────────────────────────────────────────────
@@ -55,16 +57,20 @@ BODY_CAP = 2000
 # job nobody here can take. job_radar stays international on purpose — it is a
 # general-purpose engine on PyPI and the filter is OUR opinion, so it lives here.
 #
-# THE RULE IS NOT `country == "US"`. Measured on a 21,495-row harvest
-# (_private/raw/harvest-2026-08-08T0926): that test drops 11,090 rows, and 1,524 of
-# the 2,092 REMOTE jobs go with them — because a remote posting has no country by
-# nature ("Remote", "Anywhere", "Worldwide" are not places). A US-only board with no
-# remote work on it is the opposite of the product.
+# THE RULE IS NOT `country == "US"`. A remote posting has no country by nature
+# ("Remote", "Anywhere", "Worldwide" are not places), so a bare country test deletes
+# most of them. A US-only board with no remote work on it is the opposite of the
+# product. Measured on the 21,495-row capture, under the four-state tagging:
 #
-#   keep  remote            2,092 rows — location-independent, wanted regardless
-#   keep  country == "US"  10,405
-#   drop  country foreign   3,744
-#   keep  country unknown   7,346 — overwhelmingly US ATS boards; see the caveat
+#   keep  remote            5,509 rows — location-independent, wanted regardless
+#   keep  country == "US"   9,080
+#   keep  country unknown   3,617 — overwhelmingly US ATS boards; see the caveat
+#   drop  country foreign   3,289 — IN 457 · GB 404 · DE 323 · CA 290 · JP 222
+#
+# 84.7% kept, and 100% of remote jobs retained. The drop grew from 2,990 when remote
+# stopped being a binary: 572 of those 3,289 are stated-HYBRID roles abroad, which the
+# old tagging called "remote" and therefore exempted from the country test. A hybrid
+# job in London is not servable to a US audience — it requires being in London.
 #
 # KNOWN LEAK, measured, not guessed: unknown-country rows pass. ~1,850 of the 7,346
 # name a foreign place in their location text, so some foreign postings survive. The
@@ -88,20 +94,18 @@ def servable_in_us(job: dict, row: dict) -> bool:
 
 
 # ── tag derivation (rule-based only — no LLM, no fabrication) ──────────────────
-# Remote is detected by job_radar's shared `remote_posting` predicate (reads
-# title/location + the body, with a negation guard) — one source of truth, since
-# job_radar is where the "(Remote)" noise originates and the gate already lives.
-# seniority/salary_band are derived below.
-_SENIORITY = [
-    ("lead", re.compile(r"\b(lead|principal|staff|head of|vp|director|chief)\b", re.I)),
-    ("senior", re.compile(r"\bsenior\b|\bsr\.?\b", re.I)),
-    (
-        "junior",
-        re.compile(
-            r"\b(junior|jr\.?|entry[- ]level|intern|apprentice|associate)\b", re.I
-        ),
-    ),
-]
+# Remote is reconciled from the engine's stated `remote_type` first, falling back to
+# job_radar's shared `remote_posting` predicate — see `_remote()`. salary_band is
+# derived below. Seniority is no longer derived here at all: job_radar 0.7.0 parses
+# titles properly (root/level/qualifiers) and reports what it finds, so a second,
+# cruder regex in this file was a competing answer, not a safety net.
+#
+# The regex that used to live here bucketed lead|principal|staff|head of|vp|director|
+# chief into ONE value ("lead") and returned "mid" for everything it did not match.
+# Measured on the 21,495-row capture: that default fired on 23,781 of 39,597 live rows
+# — a "Level: Mid" chip on jobs whose posting never said any such thing. Dropping it
+# costs 1,940 rows where the regex found something the engine did not, and 9,956 rows
+# of pure fabrication. That trade is the entire point.
 
 
 def _salary_band(salary: str) -> str:
@@ -123,11 +127,35 @@ def _salary_band(salary: str) -> str:
     return "180k-plus"
 
 
-def _seniority(title: str) -> str:
-    for label, rx in _SENIORITY:
-        if rx.search(title or ""):
-            return label
-    return "mid"
+REMOTE_STATES = ("remote", "hybrid", "onsite")
+
+
+def _remote(
+    job: dict, title: str, loc: str, text: str
+) -> tuple[str | None, str | None]:
+    """Reconcile the work arrangement into (state, basis). FOUR states, not two.
+
+    The rule that matters: `remote_posting()` may only ever assert **remote**. It is a
+    phrase detector, so a False from it means "no evidence of remote" — it has never
+    looked for evidence of onsite and cannot supply any. Reading that False as "onsite"
+    is what put an On-site chip on 12,623 rows (58.7% of the corpus) that never said so;
+    only 1,550 rows are actually stated-onsite.
+
+    So NULL is a real answer here and the honest one for the majority. It renders as
+    "unspecified" and stays on the board — a job that didn't state its arrangement is
+    not a job you want hidden from someone who might take it either way.
+
+    Reconciled over the capture: 54.6% NULL · 29.8% remote · 8.4% hybrid · 7.2% onsite,
+    replacing a flat 64.1% onsite / 35.9% remote that was 3/4 guess.
+    """
+    stated = _s(job.get("remote_type")).lower()
+    if stated in REMOTE_STATES:
+        # The engine looked at a real field; its basis says how far to trust it
+        # ('stated' > 'board' > 'location' > 'text').
+        return stated, _s(job.get("remote_basis")) or "stated"
+    if remote_posting(title, loc, text):
+        return "remote", "derived"
+    return None, None
 
 
 def _s(v) -> str:
@@ -202,17 +230,29 @@ def normalize_job(job: dict) -> dict:
     if len(text) > BODY_CAP:
         text = text[:BODY_CAP]
     title = _s(job.get("title"))
-    is_remote = remote_posting(title, loc, text)
+    remote, remote_basis = _remote(job, title, loc, text)
+    # A basis without a value is a claim with nothing behind it. It happens: 60 rows
+    # arrive with seniority "Not Applicable" or "Any" under basis 'stated', which the
+    # vocabulary correctly refuses to map — leaving a column asserting that a source
+    # stated a level we do not have. The two travel together or not at all.
+    seniority = vocab.seniority(job.get("seniority"))
+    seniority_basis = (_s(job.get("seniority_basis")) or None) if seniority else None
     return {
         # ── derived: jobfitr's opinion (see the docstring) ────────────────────
-        "remote": "remote" if is_remote else "onsite",
-        # 'derived' only on the positive. A False from remote_posting() is "no
-        # evidence of remote", NOT evidence of onsite, and a basis of 'derived' on
-        # that half would assert we concluded something we did not.
-        "remote_basis": "derived" if is_remote else None,
-        "seniority": _seniority(title),
-        "seniority_basis": "title",  # always — _seniority reads nothing else
-        "category": _s(job.get("department")) or _s(job.get("category")),
+        "remote": remote,
+        "remote_basis": remote_basis,
+        # The engine's value, put through jobfitr's ladder. NULL when the source did
+        # not say — 55.3% of rows, and the honest answer for every one of them.
+        "seniority": seniority,
+        "seniority_basis": seniority_basis,
+        # `category` ONLY. The deprecated `department` alias used to be preferred
+        # here, and on ATS boards it is not a category at all — measured, it is
+        # byte-identical to `team` on all 16,235 greenhouse/ashby/lever rows, i.e. the
+        # employer's own org-unit name. Mapping those onto a job taxonomy looked like
+        # +17.7% coverage and was mostly wrong: its single largest effect was filing
+        # 895 rows of "Senior Software Engineer, Backend" under Science and
+        # Engineering, because their department is called "Engineering".
+        "category": vocab.category(job.get("category")),
         "salary_band": _salary_band(salary),
         "body": text,
         # ── pass-through: the engine's value, the engine's name ───────────────

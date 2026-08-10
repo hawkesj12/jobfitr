@@ -14,13 +14,22 @@ const AGENCY_RE = /staffing|agency|recruit|talent solutions/i;
 // remote / seniority / salary_band tags). `label` humanizes a raw facet value.
 const FACET_GROUPS = [
   { key: "category", title: "Field", own: true, label: (v) => v.replace(/ Jobs$/, "") },
-  { key: "remote", title: "Work style", own: false, label: (v) => (v === "onsite" ? "On-site" : "Remote") },
+  { key: "remote", title: "Work style", own: false, label: (v) => REMOTE_LABELS[v] || v },
   { key: "employment_type", title: "Type", own: true, label: (v) => v.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) },
   { key: "seniority", title: "Level", own: false, label: (v) => v.charAt(0).toUpperCase() + v.slice(1) },
   { key: "salary_band", title: "Salary", own: false, label: labelBand },
 ];
-const REMOTE_TAGS = new Set(["remote", "onsite"]);
-const SENIORITY_TAGS = new Set(["junior", "mid", "senior", "lead"]);
+// Work style is FOUR states in the store — remote | hybrid | onsite | null. Only the
+// first three ever reach here: a job whose posting never stated an arrangement carries
+// null, server.py drops falsy values from job.tags, and so it simply has no Work-style
+// chip and stays on the board unless the user narrows. That is deliberate — 54.6% of
+// the corpus is in that bucket, and the previous binary labelled every one of them
+// "On-site" on no evidence.
+const REMOTE_LABELS = { remote: "Remote", hybrid: "Hybrid", onsite: "On-site" };
+const REMOTE_TAGS = new Set(Object.keys(REMOTE_LABELS));
+// Must stay in step with vocab.SENIORITY_LEVELS — this set is how tagGroup() routes a
+// value to its drawer, so a level missing here silently lands under Salary.
+const SENIORITY_TAGS = new Set(["intern", "entry", "mid", "senior", "staff", "lead", "director", "executive"]);
 
 function labelBand(v) {
   return (
@@ -360,7 +369,8 @@ function cleanLoc(loc, job) {
   // back to the work-style tag we already derive — honest, and never a fabricated city.
   if (place.split(/\s+/).length > 8) {
     const tags = (job && job.tags) || [];
-    return tags.includes("remote") ? "Remote" : tags.includes("onsite") ? "On-site" : "—";
+    const style = tags.find((t) => REMOTE_TAGS.has(t));
+    return style ? REMOTE_LABELS[style] : "—";
   }
   return place.length > 60 ? place.slice(0, 57) + "…" : place;
 }

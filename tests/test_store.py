@@ -42,21 +42,65 @@ def test_normalize_derives_tags():
         _job(
             "u",
             "Senior Data Engineer",
-            department="IT Jobs",
+            category="IT Jobs",
+            seniority="Senior Level",
             employment_type="full_time",
             salary="$120,000–$140,000",
             location="Austin, TX",
         )
     )
-    assert r["category"] == "IT Jobs"
+    assert r["category"] == "Software Engineering"  # mapped, not the raw string
     assert r["employment_type"] == "full_time"
-    assert r["seniority"] == "senior"
-    assert r["remote"] == "onsite"
+    assert r["seniority"] == "senior"  # the SOURCE said so
+    assert r["remote"] is None  # "Austin, TX" states no arrangement
     assert r["salary_band"] == "120-180k"
     assert (
         store.normalize_job(_job("u2", "Nurse", location="Remote"))["remote"]
         == "remote"
     )
+
+
+def test_normalize_ignores_the_deprecated_department_alias():
+    """`department` is not a category. On greenhouse/ashby/lever it is byte-identical
+    to `team` — the employer's own org-unit name — for all 16,235 such rows in the
+    capture. Consuming it looked like +17.7% facet coverage and mostly misfiled: 895
+    rows of "Senior Software Engineer, Backend" under Science and Engineering, because
+    their department is called "Engineering"."""
+    r = store.normalize_job(
+        _job("d", "Senior Software Engineer", department="Engineering")
+    )
+    assert r["category"] is None
+
+
+def test_normalize_never_invents_a_seniority():
+    """23,781 of 39,597 live rows used to read "mid" — a Level chip on jobs whose
+    posting never said any such thing. Unknown is NULL now, and NULL is a real answer."""
+    r = store.normalize_job(_job("s", "Data Engineer"))
+    assert r["seniority"] is None
+    assert r["seniority_basis"] is None
+    # A title that the OLD regex would have called "lead" is still None — title parsing
+    # belongs to the engine now, which reports what it found under seniority_basis.
+    assert store.normalize_job(_job("s2", "Principal Architect"))["seniority"] is None
+    stated = store.normalize_job(
+        _job("s3", "Analyst", seniority="Entry Level", seniority_basis="stated")
+    )
+    assert (stated["seniority"], stated["seniority_basis"]) == ("entry", "stated")
+
+
+def test_a_basis_never_outlives_its_value():
+    """60 rows arrive as seniority "Not Applicable"/"Any" under basis 'stated'. The
+    vocabulary refuses to map those — correctly — which used to leave the basis column
+    asserting that a source stated a level we do not have. A basis with nothing behind
+    it is worse than no basis: it is the field whose entire job is to say how far to
+    trust the value."""
+    for junk in ("Not Applicable", "Any", "n/a"):
+        r = store.normalize_job(
+            _job("j", "Analyst", seniority=junk, seniority_basis="stated")
+        )
+        assert r["seniority"] is None and r["seniority_basis"] is None, junk
+    # the same invariant on the other pair, which gets it structurally from _remote()
+    r = store.normalize_job(_job("j2", "Analyst", location="Dayton, OH"))
+    assert r["remote"] is None and r["remote_basis"] is None
 
 
 def test_normalize_remote_from_real_adzuna_and_board_shapes():
@@ -71,7 +115,9 @@ def test_normalize_remote_from_real_adzuna_and_board_shapes():
         _job("u", "Grocery Store Manager", location="Wahpeton, ND", source="adzuna")
     )
     assert r["location"] == "Wahpeton, ND"  # passed through verbatim, nothing stripped
-    assert r["remote"] == "onsite"  # an on-site grocery job is not mislabeled remote
+    # NOT "onsite" — None. remote_posting() found no evidence of remote, and it has
+    # never looked for evidence of onsite. What matters is that it is not "remote".
+    assert r["remote"] is None
     # a genuinely remote-titled Adzuna job still reads remote (title signal)
     assert (
         store.normalize_job(
@@ -121,7 +167,7 @@ def test_normalize_remote_from_body():
                 text="On-site only. This is not a remote position; you must work from our Austin office.",
             )
         )["remote"]
-        == "onsite"
+        is None
     )
     # incidental "remote" in prose must NOT flip an on-site job (no false positive).
     # Plain "Dayton, OH" on purpose — this asserts the BODY guard, and a " (Remote)"
@@ -135,8 +181,35 @@ def test_normalize_remote_from_body():
                 text="You will administer remote servers and support remote teams across our data centers.",
             )
         )["remote"]
-        == "onsite"
+        is None
     )
+
+
+def test_normalize_remote_prefers_the_engines_stated_type():
+    """The engine looked at a real field; the prose scan is the fallback, not the peer.
+    This is what makes hybrid visible at all — remote_posting() would call these two
+    the same thing, and 1,813 stated-hybrid rows used to render as Remote."""
+    for state in ("remote", "hybrid", "onsite"):
+        r = store.normalize_job(
+            _job("h", "Engineer", remote_type=state, remote_basis="stated")
+        )
+        assert (r["remote"], r["remote_basis"]) == (state, "stated")
+    # A stated ONSITE wins even when the prose is full of remote-sounding phrases —
+    # that is the whole reason to prefer a real field over a phrase detector.
+    r = store.normalize_job(
+        _job(
+            "h2",
+            "Engineer",
+            location="Remote",
+            text="fully remote position, work from anywhere",
+            remote_type="onsite",
+            remote_basis="stated",
+        )
+    )
+    assert r["remote"] == "onsite"
+    # The derived fallback records how weak it is.
+    r = store.normalize_job(_job("h3", "Engineer", location="Remote"))
+    assert (r["remote"], r["remote_basis"]) == ("remote", "derived")
 
 
 # ── upsert dedup + refresh ────────────────────────────────────────────────────
@@ -1097,22 +1170,20 @@ def test_init_refuses_a_future_schema_version(db):
         store.init(db)
 
 
-def test_opinion_columns_are_unchanged_by_v2(db):
-    """v2 is a container change. `remote`, `seniority` and `category` keep their v1
-    derivations verbatim — reconciling them against the engine's stated values moves
-    rows on and off the board, so it is its own measured commit (step 2).
-    Verified over the full 21,495-row capture: 0 differences on all 13 v1 columns."""
+def test_the_three_facets_only_speak_from_evidence(db):
+    """The load-bearing property of step 2, in one place: none of the three facets may
+    assert something the source did not say.
+
+    (This replaces test_opinion_columns_are_unchanged_by_v2, which was step 1's guard
+    that the container change moved no opinion. Step 2 IS the opinion change, so the
+    guard it enforced is now exactly what must no longer hold.)"""
     r = store.normalize_job(
         _job("o1", "Senior Nurse", location="Remote", department="Healthcare Jobs")
     )
-    assert r["remote"] == "remote"
-    assert r["remote_basis"] == "derived"
-    assert r["seniority"] == "senior"
-    assert r["seniority_basis"] == "title"
-    assert r["category"] == "Healthcare Jobs"  # the `department` fallback still fires
+    assert (r["remote"], r["remote_basis"]) == ("remote", "derived")
+    assert r["seniority"] is None  # "Senior" in the TITLE is not the source saying so
+    assert r["category"] is None  # `department` is an org-unit name, not a category
 
-    onsite = store.normalize_job(_job("o2", "Nurse", location="Wahpeton, ND"))
-    assert onsite["remote"] == "onsite"
-    # NOT 'derived': a False from remote_posting() is "no evidence of remote", never
-    # evidence of onsite. 12,623 rows (58.7%) sit in that bucket on no evidence.
-    assert onsite["remote_basis"] is None
+    quiet = store.normalize_job(_job("o2", "Nurse", location="Wahpeton, ND"))
+    for field in ("remote", "remote_basis", "seniority", "seniority_basis", "category"):
+        assert quiet[field] is None, f"{field} invented a value from nothing"
