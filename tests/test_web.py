@@ -1249,12 +1249,17 @@ def test_filter_fields_reach_the_card_and_the_drawer(client, monkeypatch):
     assert d["facets"]["apply_via"] == {"employer": 1, "aggregator": 1}
 
 
-def test_foreign_currency_salary_is_not_put_on_the_dollar_scale(client, monkeypatch):
-    """A yen figure sorted as dollars is what put a JPY 15,500,000 job at the top of the
-    live pool. Dropped rather than converted — a live FX rate is not worth it here."""
+def test_a_foreign_currency_posting_never_reaches_the_board(client, monkeypatch):
+    """jobfitr is US and USD only. A yen figure sorted as dollars is what put a
+    JPY 15,500,000 job at the top of the live pool; the row is now dropped at intake
+    rather than shown with an unusable salary."""
     _seed([_job("Yen Role", url="https://x/y", salary="¥15.5M", salary_min=15500000,
                 salary_period="year", salary_currency="JPY")])
-    _mark_fresh(["yen"])
+    _seed([_job("Dollar Role", url="https://x/d", salary="$150,000", salary_min=150000,
+                salary_period="year", salary_currency="USD")])
+    _mark_fresh(["role"])
     _no_fetch(monkeypatch)
-    d = client.post("/api/score", json={"titles": ["yen"]}).json()
-    assert d["jobs"][0]["salary_min"] is None
+    d = client.post("/api/score", json={"titles": ["role"]}).json()
+    titles = [j["title"] for j in d["jobs"]]
+    assert "Yen Role" not in titles
+    assert "Dollar Role" in titles

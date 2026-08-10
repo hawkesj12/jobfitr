@@ -57,43 +57,61 @@ BODY_CAP = 2000
 # job nobody here can take. job_radar stays international on purpose — it is a
 # general-purpose engine on PyPI and the filter is OUR opinion, so it lives here.
 #
-# THE RULE IS NOT `country == "US"`. A remote posting has no country by nature
-# ("Remote", "Anywhere", "Worldwide" are not places), so a bare country test deletes
-# most of them. A US-only board with no remote work on it is the opposite of the
-# product. Measured on the 21,495-row capture, under the four-state tagging:
+# THE POLICY IS US AND USD ONLY (decided 2026-08-10). It simplifies everything
+# downstream: one currency on the salary scale, one subdivision vocabulary, one legal
+# market. Measured on the 21,495-row capture:
 #
-#   keep  remote            5,509 rows — location-independent, wanted regardless
-#   keep  country == "US"   9,080
-#   keep  country unknown   3,617 — overwhelmingly US ATS boards; see the caveat
-#   drop  country foreign   3,289 — IN 457 · GB 404 · DE 323 · CA 290 · JP 222
+#   keep  country == "US"  10,404
+#   keep  country unknown   7,277 — overwhelmingly US ATS boards; see the caveat
+#   drop  non-USD salary      188 — tested FIRST, so this absorbs rows the country
+#                                   test would also have caught; 70 of them state no
+#                                   country at all and are caught by nothing else
+#   drop  country foreign   3,626 — IN · GB · DE · CA · JP
 #
-# 84.7% kept, and 100% of remote jobs retained. The drop grew from 2,990 when remote
-# stopped being a binary: 572 of those 3,289 are stated-HYBRID roles abroad, which the
-# old tagging called "remote" and therefore exempted from the country test. A hybrid
-# job in London is not servable to a US audience — it requires being in London.
+# 82.3% kept. The earlier rule EXEMPTED any row tagged remote from the country test, on
+# the reasoning that a remote posting has no country by nature. That reasoning holds for
+# a blank country — and a blank country passes the test anyway, so the exemption was
+# doing no work there. All it uniquely did was keep 455 rows that state a foreign
+# country outright ('Canada - Remote', 'Munich (Remote)', 'Paris (Remote)'). Remote
+# within another country is not location-independent; it is a job in that country.
 #
-# KNOWN LEAK, measured, not guessed: unknown-country rows pass. ~1,850 of the 7,346
-# name a foreign place in their location text, so some foreign postings survive. The
-# fix is better country derivation upstream, not a regex of country names here — a
-# name list produces false positives on real US cities (Dublin CA, Berlin CT, Toronto
-# OH) and rots. Separately ~20 rows arrive already mislabelled `country: "US"` because
-# job_radar read a foreign country code as a US state ("Toronto, ON, CA" -> CA
-# California; "Berlin, DE" -> DE Delaware); those leak too, and that is a job-radar fix.
+# KNOWN LEAK, measured, not guessed: unknown-country rows still pass, and some name a
+# foreign place in their location TEXT. The fix is better country derivation upstream,
+# not a regex of country names here — a name list produces false positives on real US
+# cities (Dublin CA, Berlin CT, Toronto OH) and rots. Two narrower signals were tried:
+# CURRENCY works and is above; SUBDIVISION was removed for firing zero times, since
+# every row with a foreign state already carried a foreign country. Separately ~20 rows
+# arrive already mislabelled `country: "US"` because job_radar read a foreign country
+# code as a US state ("Berlin, DE" -> DE Delaware); those leak too, and that is a
+# job-radar fix.
 US_ONLY = os.environ.get("JOBFITR_US_ONLY", "1") != "0"
 
 
-def servable_in_us(job: dict, row: dict) -> bool:
-    """True when a posting belongs on a US board. `job` is the engine row (carries
-    `country`); `row` is its normalized form (carries the derived remote tag)."""
+def servable_in_us(job: dict) -> bool:
+    """True when a posting belongs on a US board. Two signals, both from the engine row.
+
+    THE REMOTE EXEMPTION IS GONE, and deleting it is the whole fix. It used to return
+    True for any row tagged remote, before the country was ever read — on the reasoning
+    that a remote posting has no country by nature. That is true of the 3,729 rows whose
+    country is BLANK, and those still pass on the country test below without needing a
+    special case. What the exemption uniquely did was keep **455 rows that state a
+    foreign country outright**: 'Enterprise Sales Director — Canada - Remote (Remote)',
+    'Sales Director, DACH — Munich (Remote)', 'Strategist — Paris (Remote)'. CA 119 ·
+    GB 90 · DE 30 · IN 28 · JP 21 · SG 21. Those are not location-independent jobs; they
+    are remote WITHIN another country, and a US audience cannot take them.
+
+    CURRENCY is the second signal, and unlike the subdivision test that was tried and
+    removed for firing zero times, this one has teeth: 70 further rows state a salary in
+    CAD/EUR/GBP/PHP/INR/PLN while carrying a blank country. Spot-checked, every one is
+    'Canada (Remote)', 'Philippines (Remote)', 'Spain (Remote)' — including one labelled
+    country=US whose location reads 'North America (Remote)' and pays in CAD. Nobody
+    quotes a US salary in zloty.
+    """
     if not US_ONLY:
         return True
-    if row.get("remote") == "remote":
-        return True  # location-independent — a country test would delete 73% of these
-    # A SUBDIVISION test was tried here and removed. The idea was sound — a row whose
-    # country is blank but whose state says 'Ontario' has told us where it is — but
-    # measured on the 21,495-row capture it drops exactly **0** additional rows: every
-    # row carrying a foreign subdivision also carries a foreign country, so the test
-    # below already caught all of them. The leak documented above is elsewhere.
+    currency = _s(job.get("salary_currency")).upper()
+    if currency and currency != "USD":
+        return False
     country = _s(job.get("country")).upper()
     return country in ("", "US")  # unknown passes; only KNOWN-foreign is dropped
 
@@ -938,7 +956,7 @@ def upsert_jobs(jobs: list[dict], path: str | None = None) -> int:
             r = normalize_job(raw)
             if not r["url"]:
                 continue
-            if not servable_in_us(raw, r):
+            if not servable_in_us(raw):
                 skipped_non_us += 1
                 continue
             c.execute(_UPSERT_SQL, {**r, "now": now})

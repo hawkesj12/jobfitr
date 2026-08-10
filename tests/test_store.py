@@ -922,32 +922,52 @@ def test_live_fetch_count_persists_and_rolls_over(db, monkeypatch):
 
 
 # ── US-only intake ────────────────────────────────────────────────────────────
-def test_us_only_keeps_remote_regardless_of_country():
-    """The whole reason the rule is not `country == "US"`. Measured on a 21,495-row
-    harvest, a bare country test drops 1,524 of 2,092 remote jobs, because a remote
-    posting has no country by nature. A US board with no remote work is the opposite
-    of the product."""
-    job = {"country": "DE", "location": "Remote"}
-    row = {"remote": "remote"}
-    assert store.servable_in_us(job, row) is True
+def test_us_only_drops_remote_within_another_country():
+    """This test used to assert the OPPOSITE — that a remote tag exempted a row from the
+    country test entirely. That exemption kept 455 rows stating a foreign country
+    outright: 'Enterprise Sales Director - Canada - Remote', 'Sales Director, DACH -
+    Munich (Remote)'. Remote within another country is a job in that country."""
+    assert store.servable_in_us({"country": "DE", "location": "Munich (Remote)"}) is False
+    assert store.servable_in_us({"country": "CA", "location": "Canada - Remote"}) is False
 
 
-def test_us_only_drops_known_foreign_onsite():
-    assert store.servable_in_us({"country": "GB"}, {"remote": "onsite"}) is False
-    assert store.servable_in_us({"country": "IN"}, {"remote": "onsite"}) is False
+def test_us_only_still_keeps_a_placeless_remote_job():
+    """The reasoning the exemption was built on is still honoured — it just needs no
+    special case. A genuinely location-independent posting has no country, and a blank
+    country passes the country test on its own. 7,277 rows are in that bucket."""
+    assert store.servable_in_us({"country": "", "location": "Remote"}) is True
+    assert store.servable_in_us({"location": "Anywhere"}) is True
+
+
+def test_us_only_drops_a_foreign_currency_salary():
+    """The second signal, and the one that has teeth — 188 rows, 70 of which state no
+    country at all and are caught by nothing else. Spot-checked, every one is
+    'Canada (Remote)', 'Philippines (Remote)', 'Spain (Remote)'. Nobody quotes a US
+    salary in zloty."""
+    assert store.servable_in_us({"country": "", "salary_currency": "CAD"}) is False
+    assert store.servable_in_us({"country": "US", "salary_currency": "PLN"}) is False
+    assert store.servable_in_us({"country": "US", "salary_currency": "USD"}) is True
+    assert store.servable_in_us({"country": "US", "salary_currency": ""}) is True
+
+
+def test_us_only_drops_known_foreign():
+    assert store.servable_in_us({"country": "GB"}) is False
+    assert store.servable_in_us({"country": "IN"}) is False
 
 
 def test_us_only_keeps_us_and_unknown_country():
-    # Unknown passes on purpose: 7,346 of 21,495 rows carry no country and are
+    # Unknown passes on purpose: 7,277 of 21,495 rows carry no country and are
     # overwhelmingly US ATS boards. Dropping on suspicion costs far more than it saves.
-    assert store.servable_in_us({"country": "US"}, {"remote": "onsite"}) is True
-    assert store.servable_in_us({"country": ""}, {"remote": "onsite"}) is True
-    assert store.servable_in_us({}, {"remote": "onsite"}) is True
+    assert store.servable_in_us({"country": "US"}) is True
+    assert store.servable_in_us({"country": ""}) is True
+    assert store.servable_in_us({}) is True
 
 
 def test_us_only_is_case_insensitive():
-    assert store.servable_in_us({"country": "us"}, {"remote": "onsite"}) is True
-    assert store.servable_in_us({"country": "gb"}, {"remote": "onsite"}) is False
+    assert store.servable_in_us({"country": "us"}) is True
+    assert store.servable_in_us({"country": "gb"}) is False
+    assert store.servable_in_us({"salary_currency": "usd"}) is True
+    assert store.servable_in_us({"salary_currency": "cad"}) is False
 
 
 # ── schema v2: the columns, the triggers, the version guard ───────────────────
