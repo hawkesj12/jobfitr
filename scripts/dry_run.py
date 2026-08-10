@@ -84,7 +84,7 @@ def main(argv=None) -> int:
     seeded = store.seed_companies_from_watchlist(
         REPO / "deploy" / "tech-watchlist.json"
     )
-    print(f"\n── seed ───────────────────────────────────────────────")
+    print("\n── seed ───────────────────────────────────────────────")
     print(
         f"  {seeded} curated companies imported as resolved ({time.time() - t0:.1f}s)"
     )
@@ -121,7 +121,7 @@ def main(argv=None) -> int:
 
     after = store.resolution_stats()
     gained = after["resolved"] - before["resolved"] - seeded
-    print(f"\n── ledger ─────────────────────────────────────────────")
+    print("\n── ledger ─────────────────────────────────────────────")
     print(
         f"  resolved {_fmt(after['resolved'])} (+{_fmt(max(gained, 0))} newly discovered) "
         f"· dead {_fmt(after.get('dead', 0))} · unresolved {_fmt(after['unresolved'])}"

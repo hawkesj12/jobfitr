@@ -846,3 +846,273 @@ def test_live_fetch_count_persists_and_rolls_over(db, monkeypatch):
 
     monkeypatch.setattr(s, "datetime", _Tomorrow)
     assert store.live_fetch_count(path=db) == 0
+
+
+# ── US-only intake ────────────────────────────────────────────────────────────
+def test_us_only_keeps_remote_regardless_of_country():
+    """The whole reason the rule is not `country == "US"`. Measured on a 21,495-row
+    harvest, a bare country test drops 1,524 of 2,092 remote jobs, because a remote
+    posting has no country by nature. A US board with no remote work is the opposite
+    of the product."""
+    job = {"country": "DE", "location": "Remote"}
+    row = {"remote": "remote"}
+    assert store.servable_in_us(job, row) is True
+
+
+def test_us_only_drops_known_foreign_onsite():
+    assert store.servable_in_us({"country": "GB"}, {"remote": "onsite"}) is False
+    assert store.servable_in_us({"country": "IN"}, {"remote": "onsite"}) is False
+
+
+def test_us_only_keeps_us_and_unknown_country():
+    # Unknown passes on purpose: 7,346 of 21,495 rows carry no country and are
+    # overwhelmingly US ATS boards. Dropping on suspicion costs far more than it saves.
+    assert store.servable_in_us({"country": "US"}, {"remote": "onsite"}) is True
+    assert store.servable_in_us({"country": ""}, {"remote": "onsite"}) is True
+    assert store.servable_in_us({}, {"remote": "onsite"}) is True
+
+
+def test_us_only_is_case_insensitive():
+    assert store.servable_in_us({"country": "us"}, {"remote": "onsite"}) is True
+    assert store.servable_in_us({"country": "gb"}, {"remote": "onsite"}) is False
+
+
+# ── schema v2: the columns, the triggers, the version guard ───────────────────
+# job_radar 0.7.0 emits a 39-field record and v1 kept 13. These pin the container,
+# not the opinion: what the store PROMISES to hold, and the two ways that promise
+# can break silently.
+
+EXPECTED_COLUMNS = (
+    "url",
+    "title",
+    "title_root",
+    "title_level",
+    "title_qualifiers",
+    "company",
+    "team",
+    "location",
+    "city",
+    "state",
+    "country",
+    "locations",
+    "remote",
+    "remote_basis",
+    "remote_region",
+    "body",
+    "category",
+    "tags",
+    "seniority",
+    "seniority_basis",
+    "employment_type",
+    "employment_type_raw",
+    "salary",
+    "salary_min",
+    "salary_max",
+    "salary_currency",
+    "salary_period",
+    "salary_basis",
+    "salary_estimated_min",
+    "salary_estimated_max",
+    "salary_band",
+    "source",
+    "source_extra",
+    "direct_apply",
+    "posted",
+    "expires",
+    "fetched_at",
+    "last_seen",
+)
+
+
+def _cols(db):
+    with sqlite3.connect(db) as c:
+        return [r[1] for r in c.execute("PRAGMA table_info(jobs)")]
+
+
+def test_schema_has_exactly_the_expected_columns(db):
+    assert tuple(_cols(db)) == EXPECTED_COLUMNS
+
+
+def test_geo_index_exists(db):
+    with sqlite3.connect(db) as c:
+        idx = {r[1] for r in c.execute("PRAGMA index_list(jobs)")}
+    assert "idx_jobs_geo" in idx  # the location filter reads country/state/city
+
+
+def test_upsert_sql_matches_normalize_job(db):
+    """The INSERT binds by NAME. A column named in the SQL that normalize_job stopped
+    returning raises at request time, not import time — taking down the nightly
+    harvest and live search together, since both funnel through upsert_jobs."""
+    assert set(store._ROW_COLUMNS) == set(store.normalize_job({}))
+    assert set(store._ROW_COLUMNS) | {"fetched_at", "last_seen"} == set(_cols(db))
+
+
+def test_engine_fields_round_trip(db):
+    job = _job(
+        "e1",
+        "Senior Application Security Engineer (Remote)",
+        title_root="Application Security Engineer",
+        title_level="III",
+        title_qualifiers=["remote", "southeast"],
+        team="Platform Security",
+        city="Austin",
+        state="TX",
+        country="US",
+        locations=[{"raw": "Austin", "city": "Austin", "state": "TX"}],
+        tags=["kubernetes"],
+        employment_type="full_time",
+        employment_type_raw="Full-Time",
+        salary_min=180000.0,
+        salary_max=220000.0,
+        salary_currency="USD",
+        salary_period="year",
+        salary_basis="stated",
+        source_extra={"updated_at": "2026-07-27"},
+        direct_apply=True,
+        expires="2026-09-01",
+    )
+    store.upsert_jobs([job], path=db)
+    with sqlite3.connect(db) as c:
+        c.row_factory = sqlite3.Row
+        r = dict(c.execute("SELECT * FROM jobs WHERE url='e1'").fetchone())
+
+    assert r["title"] == "Senior Application Security Engineer (Remote)"  # verbatim
+    assert r["title_root"] == "Application Security Engineer"
+    assert (r["city"], r["state"], r["country"]) == ("Austin", "TX", "US")
+    assert r["direct_apply"] == 1  # INTEGER, not the string "True"
+    assert r["salary_min"] == 180000.0
+    assert json.loads(r["locations"])[0]["city"] == "Austin"
+    assert json.loads(r["title_qualifiers"]) == ["remote", "southeast"]
+    assert json.loads(r["source_extra"])["updated_at"] == "2026-07-27"
+    assert r["expires"] == "2026-09-01"
+
+
+def test_absent_containers_store_null_not_the_string_null(db):
+    """json.dumps(None) is the four-character string "null", which reads as PRESENT
+    to every fill-rate count and `IS NOT NULL` filter. 43-95% of rows have no
+    qualifiers/tags/source_extra, so getting this wrong makes them all look full."""
+    store.upsert_jobs([_job("n1", "Analyst")], path=db)
+    with sqlite3.connect(db) as c:
+        row = c.execute(
+            "SELECT title_qualifiers, tags, source_extra, locations FROM jobs "
+            "WHERE url='n1'"
+        ).fetchone()
+    assert row == (None, None, None, None)
+
+
+def test_direct_apply_false_is_zero_not_null(db):
+    """False and absent are different answers — 0 means the engine checked."""
+    store.upsert_jobs([_job("d1", "Analyst", direct_apply=False)], path=db)
+    store.upsert_jobs([_job("d2", "Analyst")], path=db)
+    with sqlite3.connect(db) as c:
+        vals = dict(c.execute("SELECT url, direct_apply FROM jobs").fetchall())
+    assert vals["d1"] == 0
+    assert vals["d2"] is None
+
+
+def test_reupsert_refreshes_new_columns_but_keeps_fetched_at(db):
+    store.upsert_jobs([_job("r1", "Engineer", title_root="Engineer")], path=db)
+    with sqlite3.connect(db) as c:
+        first = c.execute("SELECT fetched_at FROM jobs WHERE url='r1'").fetchone()[0]
+    time.sleep(0.01)
+    store.upsert_jobs(
+        [_job("r1", "Engineer", title_root="Engineer", city="Boise")], path=db
+    )
+    with sqlite3.connect(db) as c:
+        got = c.execute(
+            "SELECT fetched_at, last_seen, city FROM jobs WHERE url='r1'"
+        ).fetchone()
+    assert got[0] == first  # first-seen, never refreshed
+    assert got[1] > first  # the eviction clock does refresh
+    assert got[2] == "Boise"
+
+
+def test_fts_triggers_still_populate_and_delete(db):
+    """The failure this catches has no error message: a trigger whose column list
+    drifted from jobs_fts stops populating the index, every search returns nothing,
+    and every other check in the suite stays green."""
+    store.upsert_jobs(
+        [_job("f1", "Data Engineer"), _job("f2", "Nurse Practitioner")], path=db
+    )
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs_fts").fetchone()[0] == 2
+        assert (
+            c.execute(
+                "SELECT count(*) FROM jobs_fts WHERE jobs_fts MATCH 'title: nurse'"
+            ).fetchone()[0]
+            == 1
+        )
+        c.execute("DELETE FROM jobs WHERE url='f1'")
+        assert c.execute("SELECT count(*) FROM jobs_fts").fetchone()[0] == 1
+
+
+def test_init_refuses_a_v1_shaped_store(tmp_path, monkeypatch):
+    """`CREATE TABLE IF NOT EXISTS` makes a schema change a silent no-op on an
+    existing file. Without this guard the damage first appears as `no such column`
+    inside the nightly harvest, hours later and in a log nobody is reading.
+
+    Built as a real v1 table rather than by deleting the version marker, because the
+    marker is not what makes a store stale — its SHAPE is. Every store written before
+    SCHEMA_VERSION existed is unmarked, and the guard has to read those correctly."""
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    p = str(tmp_path / "v1.db")
+    with sqlite3.connect(p) as c:
+        c.execute(
+            "CREATE TABLE jobs(url TEXT PRIMARY KEY, title TEXT, company TEXT,"
+            " location TEXT, source TEXT, posted TEXT, salary TEXT, body TEXT,"
+            " category TEXT, employment_type TEXT, remote TEXT, seniority TEXT,"
+            " salary_band TEXT, fetched_at REAL, last_seen REAL)"
+        )
+        c.execute("INSERT INTO jobs(url,title) VALUES('u','Analyst')")
+    with pytest.raises(store.StaleSchemaError, match="rebuild_store"):
+        store.init(p)
+
+
+def test_init_adopts_an_unmarked_but_current_store(db):
+    """An unmarked store whose shape is already current is adopted, not rejected —
+    rejecting it would demand a pointless rebuild of a perfectly good file."""
+    with sqlite3.connect(db) as c:
+        c.execute("DELETE FROM meta WHERE key='schema_version'")
+    store.upsert_jobs([_job("s1", "Analyst")], path=db)
+    store.init(db)
+    with sqlite3.connect(db) as c:
+        v = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    assert int(v[0]) == store.SCHEMA_VERSION
+
+
+def test_init_marks_a_fresh_store_without_complaining(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "nope.json"))
+    p = str(tmp_path / "fresh.db")
+    store.init(p)
+    store.init(p)  # idempotent
+    with sqlite3.connect(p) as c:
+        v = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    assert int(v[0]) == store.SCHEMA_VERSION
+
+
+def test_init_refuses_a_future_schema_version(db):
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
+    with pytest.raises(store.StaleSchemaError, match="v99"):
+        store.init(db)
+
+
+def test_opinion_columns_are_unchanged_by_v2(db):
+    """v2 is a container change. `remote`, `seniority` and `category` keep their v1
+    derivations verbatim — reconciling them against the engine's stated values moves
+    rows on and off the board, so it is its own measured commit (step 2).
+    Verified over the full 21,495-row capture: 0 differences on all 13 v1 columns."""
+    r = store.normalize_job(
+        _job("o1", "Senior Nurse", location="Remote", department="Healthcare Jobs")
+    )
+    assert r["remote"] == "remote"
+    assert r["remote_basis"] == "derived"
+    assert r["seniority"] == "senior"
+    assert r["seniority_basis"] == "title"
+    assert r["category"] == "Healthcare Jobs"  # the `department` fallback still fires
+
+    onsite = store.normalize_job(_job("o2", "Nurse", location="Wahpeton, ND"))
+    assert onsite["remote"] == "onsite"
+    # NOT 'derived': a False from remote_posting() is "no evidence of remote", never
+    # evidence of onsite. 12,623 rows (58.7%) sit in that bucket on no evidence.
+    assert onsite["remote_basis"] is None

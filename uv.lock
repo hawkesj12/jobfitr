@@ -233,16 +233,16 @@ wheels = [
 
 [[package]]
 name = "job-radar"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rapidfuzz" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/39/7e/fa6e944bc1a94efb061a65f9e18d952719219cd8e5f734d693933dd8253e/job_radar-0.6.0.tar.gz", hash = "sha256:d813cb465b748e79619287e16bcd60b50b3e7f4064f5f26dd9300215c594eef0", size = 122809, upload-time = "2026-08-01T03:40:51.51Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d4/38/8cd05d5ca0140f80562f82b46af6ebb19e93888053802359a9e3fcf24889/job_radar-0.7.0.tar.gz", hash = "sha256:ef7f3002c697b8d5c1d1390a9cdca7b3b3e53e38a31336b57c023f895b252493", size = 231016, upload-time = "2026-08-09T23:46:25.341Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/f5/ed94c41902645ab8c650373cf16d340a27fa325c35eb5451f71b4f24ff06/job_radar-0.6.0-py3-none-any.whl", hash = "sha256:e9f07620201796abfd8ec742ddcbaf3a9c530fa4d64d51d96cfdc3292542fa4f", size = 85052, upload-time = "2026-08-01T03:40:50.206Z" },
+    { url = "https://files.pythonhosted.org/packages/46/45/199947336f73401dc63782d28fb811d92aed02722ee70116b10672efc6e9/job_radar-0.7.0-py3-none-any.whl", hash = "sha256:b006a05f291ff4d0767f6ba14911ce78560c1e74d3c237e76737a42d195fb114", size = 153932, upload-time = "2026-08-09T23:46:23.967Z" },
 ]
 
 [[package]]

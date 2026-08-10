@@ -49,6 +49,44 @@ MAX_ROWS = int(os.environ.get("JOBFITR_MAX_ROWS", "50000"))  # LRU cap (saturati
 
 BODY_CAP = 2000
 
+# ── US-only intake ────────────────────────────────────────────────────────────
+# jobfitr serves a US audience, so a posting in Berlin costs storage, scoring time
+# (0.7 ms/candidate, and every retrieved candidate is scored) and a board slot for a
+# job nobody here can take. job_radar stays international on purpose — it is a
+# general-purpose engine on PyPI and the filter is OUR opinion, so it lives here.
+#
+# THE RULE IS NOT `country == "US"`. Measured on a 21,495-row harvest
+# (_private/raw/harvest-2026-08-08T0926): that test drops 11,090 rows, and 1,524 of
+# the 2,092 REMOTE jobs go with them — because a remote posting has no country by
+# nature ("Remote", "Anywhere", "Worldwide" are not places). A US-only board with no
+# remote work on it is the opposite of the product.
+#
+#   keep  remote            2,092 rows — location-independent, wanted regardless
+#   keep  country == "US"  10,405
+#   drop  country foreign   3,744
+#   keep  country unknown   7,346 — overwhelmingly US ATS boards; see the caveat
+#
+# KNOWN LEAK, measured, not guessed: unknown-country rows pass. ~1,850 of the 7,346
+# name a foreign place in their location text, so some foreign postings survive. The
+# fix is better country derivation upstream, not a regex of country names here — a
+# name list produces false positives on real US cities (Dublin CA, Berlin CT, Toronto
+# OH) and rots. Separately ~20 rows arrive already mislabelled `country: "US"` because
+# job_radar read a foreign country code as a US state ("Toronto, ON, CA" -> CA
+# California; "Berlin, DE" -> DE Delaware); those leak too, and that is a job-radar fix.
+US_ONLY = os.environ.get("JOBFITR_US_ONLY", "1") != "0"
+
+
+def servable_in_us(job: dict, row: dict) -> bool:
+    """True when a posting belongs on a US board. `job` is the engine row (carries
+    `country`); `row` is its normalized form (carries the derived remote tag)."""
+    if not US_ONLY:
+        return True
+    if row.get("remote") == "remote":
+        return True  # location-independent — a country test would delete 73% of these
+    country = _s(job.get("country")).upper()
+    return country in ("", "US")  # unknown passes; only KNOWN-foreign is dropped
+
+
 # ── tag derivation (rule-based only — no LLM, no fabrication) ──────────────────
 # Remote is detected by job_radar's shared `remote_posting` predicate (reads
 # title/location + the body, with a negation guard) — one source of truth, since
@@ -104,12 +142,51 @@ def _s(v) -> str:
     return str(v)
 
 
+def _json(v) -> str | None:
+    """JSON-encode a container column, or NULL. Empty is NULL, never the string "null".
+
+    The four container fields (`title_qualifiers`, `locations`, `tags`, `source_extra`)
+    arrive as real lists/dicts and are absent on 43-95% of rows. `json.dumps(None)`
+    returns the four-character string "null", which reads as present to every SQL
+    test that matters (`IS NOT NULL`, a fill-rate COUNT) — so the empty case has to
+    short-circuit before the encoder, not after."""
+    if v is None or v == [] or v == {}:
+        return None
+    return json.dumps(v, separators=(",", ":"))
+
+
+def _int_bool(v) -> int | None:
+    """A bool column as 0/1, preserving the difference between False and absent."""
+    return None if v is None else int(bool(v))
+
+
 def normalize_job(job: dict) -> dict:
     """Map a raw harvest/live row onto the store's row shape, deriving facet tags.
 
-    `department` is Adzuna's category ('Healthcare & Nursing Jobs', …); we keep it
-    as `category`. remote/seniority/salary_band are derived by rule from fields we
-    already have — never invented.
+    Two kinds of column live in the returned dict, and the distinction is the whole
+    design:
+
+      PASS-THROUGH — the engine's value under the engine's own name, untransformed
+      except JSON-encoding a container. job_radar 0.7.0 is the fidelity layer; it
+      reports what the source said and it is not this function's business to argue.
+
+      DERIVED — jobfitr's opinion: `remote`, `seniority`, `salary_band`, and the
+      `category` fallback. Rule-based only, never invented.
+
+    THREE OF THOSE DERIVATIONS ARE KNOWN-WRONG AND DELIBERATELY UNCHANGED HERE.
+    0.7.0 can answer all three better, but reconciling them changes what rows the
+    board shows, so it is its own measured commit (step 2 of _private/PLAN-db-v2.md):
+
+      `remote`     — binary, from prose. 12,623 rows (58.7%) are labelled onsite on
+                     no evidence at all; only 1,550 are stated-onsite. The engine's
+                     `remote_type` carries a real four-state answer on 25% of rows.
+      `seniority`  — from the title, so it is never NULL: 23,781 rows say "mid"
+                     meaning "the title didn't say".
+      `category`   — still falls back to the deprecated `department` alias, which is
+                     what takes the value count to 2,403 instead of 487.
+
+    Their `_basis` columns are written honestly for what the value ACTUALLY is today,
+    so nothing in the store is a lie in the meantime.
     """
     src = _s(job.get("source")) or _s(job.get("sources"))
     loc = _s(job.get("location"))
@@ -125,21 +202,72 @@ def normalize_job(job: dict) -> dict:
     if len(text) > BODY_CAP:
         text = text[:BODY_CAP]
     title = _s(job.get("title"))
+    is_remote = remote_posting(title, loc, text)
     return {
+        # ── derived: jobfitr's opinion (see the docstring) ────────────────────
+        "remote": "remote" if is_remote else "onsite",
+        # 'derived' only on the positive. A False from remote_posting() is "no
+        # evidence of remote", NOT evidence of onsite, and a basis of 'derived' on
+        # that half would assert we concluded something we did not.
+        "remote_basis": "derived" if is_remote else None,
+        "seniority": _seniority(title),
+        "seniority_basis": "title",  # always — _seniority reads nothing else
+        "category": _s(job.get("department")) or _s(job.get("category")),
+        "salary_band": _salary_band(salary),
+        "body": text,
+        # ── pass-through: the engine's value, the engine's name ───────────────
         "url": _s(job.get("url")),
         "title": title,
+        "title_root": _s(job.get("title_root")),
+        "title_level": _s(job.get("title_level")),
+        "title_qualifiers": _json(job.get("title_qualifiers")),
         "company": _s(job.get("company")),
+        "team": _s(job.get("team")),
         "location": loc,
-        "source": src,
-        "posted": _s(job.get("posted")),
-        "salary": salary,
-        "body": text,
-        "category": _s(job.get("department")) or _s(job.get("category")),
+        "city": _s(job.get("city")),
+        "state": _s(job.get("state")),
+        "country": _s(job.get("country")),
+        "locations": _json(job.get("locations")),
+        "remote_region": _s(job.get("remote_region")),
+        "tags": _json(job.get("tags")),
         "employment_type": _s(job.get("employment_type")),
-        "remote": "remote" if remote_posting(title, loc, text) else "onsite",
-        "seniority": _seniority(title),
-        "salary_band": _salary_band(salary),
+        "employment_type_raw": _s(job.get("employment_type_raw")),
+        "salary": salary,
+        "salary_min": job.get("salary_min"),
+        "salary_max": job.get("salary_max"),
+        "salary_currency": _s(job.get("salary_currency")),
+        "salary_period": _s(job.get("salary_period")),
+        "salary_basis": _s(job.get("salary_basis")),
+        # Adzuna's MODEL guess. Kept in its own pair of columns on purpose: merged
+        # into salary_min it would render as a committed figure on the card.
+        "salary_estimated_min": job.get("salary_estimated_min"),
+        "salary_estimated_max": job.get("salary_estimated_max"),
+        "source": src,
+        "source_extra": _json(job.get("source_extra")),
+        "direct_apply": _int_bool(job.get("direct_apply")),
+        "posted": _s(job.get("posted")),
+        "expires": _s(job.get("expires")),
     }
+
+
+# Every column normalize_job returns — i.e. every column except the two clocks.
+# Built from the function's own output rather than typed out a second time: the
+# INSERT binds by NAME, so a column listed in SQL that normalize_job stopped
+# returning raises at request time, not import time, and it would take down the
+# nightly harvest and live search together. Deriving the list makes that class of
+# drift impossible instead of merely tested. `url` is the PRIMARY KEY, so it is
+# inserted but never in the update set.
+_ROW_COLUMNS: tuple[str, ...] = tuple(normalize_job({}))
+_UPDATE_COLUMNS: tuple[str, ...] = tuple(c for c in _ROW_COLUMNS if c != "url")
+
+# fetched_at is FIRST-SEEN and deliberately not refreshed; last_seen is what the
+# eviction clock reads, so an actively re-fetched job never ages out.
+_UPSERT_SQL = (
+    f"INSERT INTO jobs({','.join(_ROW_COLUMNS)},fetched_at,last_seen) "
+    f"VALUES({','.join(':' + c for c in _ROW_COLUMNS)},:now,:now) "
+    "ON CONFLICT(url) DO UPDATE SET last_seen=:now,"
+    + ",".join(f"{c}=excluded.{c}" for c in _UPDATE_COLUMNS)
+)
 
 
 # ── connection + schema ───────────────────────────────────────────────────────
@@ -157,19 +285,82 @@ def _conn(path: str | None = None):
 
 
 _SCHEMA = """
+-- v2 (SCHEMA_VERSION below). job_radar 0.7.0 emits a 39-field record; v1 kept 13 of
+-- them. Every column added here carries the engine's value under the engine's own
+-- name, untransformed — the store's job is fidelity. jobfitr's OPINIONS (which of
+-- four remote states a row really is, which of 487 category strings is a facet,
+-- whether an unstated seniority is "mid" or unknown) are applied in normalize_job,
+-- deliberately downstream of this table.
+--
+-- NOTE `CREATE TABLE IF NOT EXISTS`: shipping a changed DDL against an existing
+-- jobs.db is a SILENT NO-OP. The old table survives and the next upsert dies with
+-- `no such column: title_root`. That is why init() carries a version guard and why
+-- scripts/rebuild_store.py exists — the store is a cache with 60-day eviction, so a
+-- rebuild + re-harvest (~4 min) is the migration.
 CREATE TABLE IF NOT EXISTS jobs(
-  url TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, source TEXT,
-  posted TEXT, salary TEXT, body TEXT,
-  category TEXT, employment_type TEXT, remote TEXT, seniority TEXT, salary_band TEXT,
+  url TEXT PRIMARY KEY,
+
+  -- identity, and the title decomposed ─────────────────────────────
+  title TEXT,              -- VERBATIM, as the employer wrote it. Never parsed.
+  title_root TEXT,         -- "Application Security Engineer" — 100% fill. What matching should use.
+  title_level TEXT,        -- "II" / "III" when the title carries one
+  title_qualifiers TEXT,   -- JSON array: ["remote","southeast"] — the decoration
+  company TEXT,
+  team TEXT,               -- the company's own group. DISPLAY ONLY, never a facet (thousands of values).
+
+  -- where ──────────────────────────────────────────────────────────
+  location TEXT,           -- VERBATIM. The audit trail when a parse is wrong.
+  city TEXT, state TEXT, country TEXT,   -- indexed below; `state` is US-only by construction
+  locations TEXT,          -- JSON array. 9.4% of rows carry more than one location.
+  remote TEXT,             -- jobfitr's decided state. Still binary in v2; four states land in step 2.
+  remote_basis TEXT,       -- 'stated' | 'board' | 'location' | 'text' | 'derived' | NULL
+  remote_region TEXT,      -- where a remote worker may sit
+  body TEXT,
+
+  -- the job ────────────────────────────────────────────────────────
+  category TEXT,           -- the KIND of work
+  tags TEXT,               -- JSON array of source-extracted skills — boost evidence for free
+  seniority TEXT,
+  seniority_basis TEXT,    -- 'stated' | 'title' | NULL. NULL must mean unknown, never "mid".
+  employment_type TEXT,    -- the engine's 7-value enum
+  employment_type_raw TEXT,-- what the vendor actually said (32 spellings)
+
+  -- money ──────────────────────────────────────────────────────────
+  salary TEXT,             -- verbatim, for the card
+  salary_min REAL, salary_max REAL, salary_currency TEXT, salary_period TEXT,
+  salary_basis TEXT,
+  salary_estimated_min REAL, salary_estimated_max REAL,  -- a MODEL's guess (Adzuna). NEVER merged into salary_min.
+  salary_band TEXT,        -- jobfitr-derived, unchanged
+
+  -- provenance ─────────────────────────────────────────────────────
+  source TEXT,
+  source_extra TEXT,       -- JSON: whatever else the vendor sent. The debugging trail when a field turns out wrong.
+  direct_apply INTEGER,    -- 1 = the employer's own link, not an aggregator
+  posted TEXT,
+  expires TEXT,            -- kept because a CLOSED posting is not recoverable by re-harvesting
   fetched_at REAL, last_seen REAL);
 CREATE INDEX IF NOT EXISTS idx_jobs_last_seen ON jobs(last_seen);
+CREATE INDEX IF NOT EXISTS idx_jobs_geo ON jobs(country, state, city);
 
 -- external-content FTS5 over jobs.rowid: title/location/body are searchable, the
 -- rest live in `jobs`. Kept in sync by the triggers below.
+--
+-- `title_root` is deliberately NOT indexed here, despite being the field this whole
+-- schema exists for. Measured over 57 profiles: adding it buys 54 candidate rows
+-- (+0.04%), and matching on it ALONE loses 7.8% — the phrases people search live in
+-- the part the root strips ("application security" survives in 29 titles, 15 roots).
+-- NEAR(...,3) already finds the root inside the full title. It is a scoring input
+-- (see the max() rule), not a retrieval one.
 CREATE VIRTUAL TABLE IF NOT EXISTS jobs_fts USING fts5(
   title, location, body, content='jobs', content_rowid='rowid',
   tokenize='porter unicode61');
 
+-- All three triggers name (title, location, body) EXPLICITLY, so widening `jobs`
+-- cannot shift them — that is the whole reason they are written out rather than
+-- relying on column order. The list must stay identical to jobs_fts's; a mismatch
+-- does not error, it silently stops populating the index and every search returns
+-- nothing. test_store.py asserts the index is non-empty after an insert and shrinks
+-- on a delete, which is the only cheap way to catch that.
 CREATE TRIGGER IF NOT EXISTS jobs_ai AFTER INSERT ON jobs BEGIN
   INSERT INTO jobs_fts(rowid, title, location, body)
     VALUES (new.rowid, new.title, new.location, new.body);
@@ -228,11 +419,75 @@ CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status, checked_at)
 """
 
 
+SCHEMA_VERSION = 2
+_SCHEMA_VERSION_KEY = "schema_version"
+
+
+class StaleSchemaError(RuntimeError):
+    """A jobs.db built by an older schema. Not recoverable in place — see init()."""
+
+
 def init(path: str | None = None) -> None:
-    """Create the schema if missing, then pull in the current jobs.json snapshot."""
+    """Create the schema if missing, then pull in the current jobs.json snapshot.
+
+    Raises StaleSchemaError on a store built by an older schema. This check is the
+    only thing standing between a version bump and a silent failure: the DDL is
+    `CREATE TABLE IF NOT EXISTS`, so running new code against an old jobs.db does
+    nothing at all — the old table survives, init() reports success, and the damage
+    surfaces later as `no such column` inside the nightly harvest. Failing here,
+    loudly, with the command that fixes it, costs one restart instead of a night.
+    """
+    _check_schema_version(path)  # BEFORE executescript — see the function
     with _conn(path) as c:
         c.executescript(_SCHEMA)
+        c.execute(
+            "INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",
+            (_SCHEMA_VERSION_KEY, str(SCHEMA_VERSION)),
+        )
     sync_snapshot(path)
+
+
+def _check_schema_version(path: str | None) -> None:
+    """Raise StaleSchemaError if this store predates the current schema.
+
+    This runs BEFORE `executescript`, not after, and the ordering is the whole
+    point. `CREATE TABLE IF NOT EXISTS` no-ops against an old `jobs`, but the
+    `CREATE INDEX ... ON jobs(country, state, city)` that follows it does NOT — it
+    raises `no such column: country` from inside executescript, three statements
+    deep, with no mention of what is actually wrong or how to fix it. Checking
+    first turns that into a sentence naming the file and the command.
+    """
+    with _conn(path) as c:
+        tables = {
+            r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "jobs" not in tables:
+            return  # a fresh file; the schema script is about to create it
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+        seen = None
+        if "meta" in tables:
+            row = c.execute(
+                "SELECT value FROM meta WHERE key=?", (_SCHEMA_VERSION_KEY,)
+            ).fetchone()
+            seen = row[0] if row else None
+        rows = c.execute("SELECT count(*) FROM jobs").fetchone()[0]
+
+    fix = "    python scripts/rebuild_store.py" + (f" --db {path}" if path else "")
+    if seen is None:
+        # An unmarked store is only stale if it is actually shaped like v1. An
+        # unmarked EMPTY v2 file (a half-initialized tmp DB) is fine to adopt.
+        if cols and not set(_ROW_COLUMNS) <= cols:
+            missing = ", ".join(sorted(set(_ROW_COLUMNS) - cols))
+            raise StaleSchemaError(
+                f"{path or DB_PATH} predates schema v{SCHEMA_VERSION} "
+                f"({rows:,} rows; missing {missing}). The store is a cache with "
+                f"60-day eviction — rebuild it rather than migrating:\n{fix}"
+            )
+    elif int(seen) != SCHEMA_VERSION:
+        raise StaleSchemaError(
+            f"{path or DB_PATH} is schema v{seen}, this code expects "
+            f"v{SCHEMA_VERSION}. Rebuild:\n{fix}"
+        )
 
 
 def _meta_get(key: str, path: str | None = None) -> str | None:
@@ -585,29 +840,28 @@ def upsert_jobs(jobs: list[dict], path: str | None = None) -> int:
 
     An existing url has its last_seen/posted/salary (and derived tags) refreshed —
     so an actively-re-fetched job's last_seen keeps resetting and it never evicts.
+
+    Non-US postings are dropped here (see `servable_in_us`). This is the ONE funnel
+    both the nightly harvest and the per-search live fetch pass through, so filtering
+    here covers both without either caller knowing about it. The count is printed
+    rather than dropped silently — a filter that quietly eats rows is how you spend a
+    week wondering where the jobs went.
     """
     now = time.time()
     n = 0
+    skipped_non_us = 0
     with _conn(path) as c:
         for raw in jobs:
             r = normalize_job(raw)
             if not r["url"]:
                 continue
-            c.execute(
-                """INSERT INTO jobs(url,title,company,location,source,posted,salary,body,
-                     category,employment_type,remote,seniority,salary_band,fetched_at,last_seen)
-                   VALUES(:url,:title,:company,:location,:source,:posted,:salary,:body,
-                     :category,:employment_type,:remote,:seniority,:salary_band,:now,:now)
-                   ON CONFLICT(url) DO UPDATE SET
-                     last_seen=:now, title=excluded.title, company=excluded.company,
-                     location=excluded.location, posted=excluded.posted,
-                     salary=excluded.salary, body=excluded.body,
-                     category=excluded.category,
-                     employment_type=excluded.employment_type, remote=excluded.remote,
-                     seniority=excluded.seniority, salary_band=excluded.salary_band""",
-                {**r, "now": now},
-            )
+            if not servable_in_us(raw, r):
+                skipped_non_us += 1
+                continue
+            c.execute(_UPSERT_SQL, {**r, "now": now})
             n += 1
+    if skipped_non_us:
+        print(f"  store: dropped {skipped_non_us:,} non-US postings (JOBFITR_US_ONLY)")
     return n
 
 

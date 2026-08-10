@@ -61,6 +61,18 @@ jobfitr is a **live-fetch-on-search hybrid**: the web process doesn't just read 
 
 **Why (this is the whole point of blue-green).** If both slots shared one `jobs.db` and you staged a release that changes the store schema (a new column, a different FTS config), the staging slot would migrate/write the db while the production slot's older code is still reading it — and a flip-back (rollback) would read a db its code doesn't understand. That's the exact failure blue-green exists to prevent, so the data store must be isolated per slot, not just the code. Per-slot `jobs.db` makes a flip and a rollback both schema-safe: each slot only ever touches its own store.
 
+**But isolation is not migration — a schema bump needs one extra command per slot.** `store.SCHEMA_VERSION` (2 as of 2026-08-10) is stamped in each store's `meta` table, and `store.init()` **raises `StaleSchemaError` and refuses to start** when it does not match the code. That is deliberate: the DDL is `CREATE TABLE IF NOT EXISTS`, so without the check the old table would silently survive and the failure would surface hours later, mid-harvest, as `no such column`. What it means operationally: after deploying a release that bumps `SCHEMA_VERSION`, the freshly-built slot's own `jobs.db` is still the old shape, so **`verify-slot.sh` will report a dead slot** until you rebuild it:
+
+```bash
+sudo -u jobfitr JOBFITR_DB_PATH=/opt/jobfitr/<slot>/data/jobs.db \
+     JOBFITR_JOBS_PATH=/opt/jobfitr/data/jobs.json \
+     /opt/jobfitr/<slot>/jobfitr/.venv/bin/python \
+     /opt/jobfitr/<slot>/jobfitr/scripts/rebuild_store.py
+sudo systemctl restart jobfitr-web@<slot>
+```
+
+The store is a cache, so this costs the slot's live-fetch history and nothing else — the shared `jobs.json` reseeds it immediately. **Do not rebuild the ACTIVE slot's store**; that is the one serving traffic. Build and rebuild the inactive slot, verify, then flip — the rollback path stays intact because the old slot keeps its old store until you bring it up to the same build.
+
 **The shared `jobs.json` is the common inflow.** One harvest writes the single `data/jobs.json`; each slot imports it into its own db on init and again on every rewrite (`sync_snapshot`, background thread). One harvest, no doubled job-API traffic, two independent stores that both stay current.
 
 **Systemd implication.** The template unit (`jobfitr-web@.service`) sets `ReadWritePaths=/opt/jobfitr/%i/data` so each slot can write its own store under `ProtectSystem=strict` — mirroring the single-slot `jobfitr-web.service`. Create `/opt/jobfitr/{blue,green}/data/` (owned `jobfitr:jobfitr`) during setup.

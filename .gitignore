@@ -20,6 +20,10 @@ jobs.db
 *.db
 *.db-wal
 *.db-shm
+# scripts/rebuild_store.py renames the old store aside on every schema bump. The
+# suffix is a timestamp, so `*.db` does NOT cover it — and each one is a full copy
+# of the pool, in a public repo.
+*.db.bak-*
 shortlist.csv
 
 # Agent working notes. CLAUDE.md records the box's IP, the deploy topology, and where
