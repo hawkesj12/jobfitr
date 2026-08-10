@@ -49,7 +49,22 @@ EVICT_UNSEEN_DAYS = int(os.environ.get("JOBFITR_EVICT_UNSEEN_DAYS", "14"))
 EVICT_POSTED_DAYS = int(os.environ.get("JOBFITR_EVICT_POSTED_DAYS", "60"))
 MAX_ROWS = int(os.environ.get("JOBFITR_MAX_ROWS", "50000"))  # LRU cap (saturation)
 
-BODY_CAP = 2000
+# How much of a job description the scorer gets to read. Raised 2,000 -> 8,000 on
+# 2026-08-10. The metric is not characters, it is SHARE OF BOOST POINTS CAPTURED —
+# boosts decay 8/6/4/2 and stop counting at four occurrences, so what matters is
+# whether the terms are reachable at all:
+#
+#     2,000 -> 41.6%      4,000 -> 73.1%      8,000 -> 95.8%      12,000 -> 99.6%
+#
+# The median description in the pool is 7,208 characters, so at 2,000 the scorer was
+# reading 28% of the average posting and 14.4% of (user, listing) pairs had boost
+# evidence sitting past the cut. 12,000 buys the last 3.8 points for ~10% more scoring
+# time and 12% more storage, which is not worth it.
+#
+# MUST MOVE WITH snapshot.TEXT_CAP. The harvest truncates before jobs.json is written,
+# so raising only this one is a silent no-op for every harvested row and leaves
+# live-fetched rows carrying four times more text than harvested ones.
+BODY_CAP = 8000
 
 # ── US-only intake ────────────────────────────────────────────────────────────
 # jobfitr serves a US audience, so a posting in Berlin costs storage, scoring time

@@ -15,9 +15,11 @@ import pytest
 
 from jobfitr.match import (
     _TIER_RELATED,
+    _stem,
     has_term,
     norm_key,
     term_hits,
+    term_pattern,
     title_points,
     title_score,
 )
@@ -298,3 +300,55 @@ def test_a_root_identical_to_the_title_is_not_compared_twice():
     """The common case — nothing was stripped. Cheap, and it must not change the answer."""
     assert title_score(["ai engineer"], [], "AI Engineer", "AI Engineer")[0] == 100
     assert title_score(["ai engineer"], [], "Chef", "Chef")[0] == 0
+
+
+# ── the substring gate ───────────────────────────────────────────────────────
+def test_the_stem_gate_never_changes_an_answer():
+    """`term_hits`/`has_term` skip the regex when the term's first word is not even a
+    substring of the text. It is an OPTIMISATION ONLY — worth 2,071 ms -> 472 ms on the
+    widest profile once bodies went to 8,000 chars — so any answer it changes is a bug.
+
+    The cases below are chosen to attack the gate's assumption that the first word must
+    appear literally: plurals (the suffix goes on the LAST word), hyphens (the
+    alternative sits BETWEEN words), and punctuation inside a term."""
+    cases = [
+        ("rag", "we use RAG and RAGs heavily"),
+        ("rag", "storage leverage coverage"),  # substring traps — must NOT match
+        ("forward deployed", "a forward-deployed engineer"),
+        ("forward deployed", "forward deployed engineer"),
+        ("forward deployed", "deployed forward"),
+        ("month end close", "owns the month end close cycle"),
+        ("node.js", "we run Node.js in production"),
+        ("c++", "strong C++ background"),
+        ("variance analysis", "no such phrase here"),
+        ("excel", "excels at communication"),  # whole-word: must not match
+    ]
+    for term, text in cases:
+        gated_hits = term_hits(term, text)
+        gated_has = has_term(term, text)
+        # recompute WITHOUT the gate, straight off the pattern
+        pat = term_pattern(term)
+        raw_hits = sum(1 for _ in pat.finditer(text)) if pat else 0
+        raw_has = bool(pat and pat.search(text))
+        assert gated_hits == raw_hits, f"{term!r} in {text!r}: {gated_hits} != {raw_hits}"
+        assert gated_has == raw_has, f"{term!r} in {text!r}: {gated_has} != {raw_has}"
+
+
+def test_the_stem_is_the_first_word_normalised():
+    assert _stem("Month End Close") == "month"
+    assert _stem("forward-deployed") == "forward"
+    assert _stem("node.js") == "node"
+    assert _stem("") == ""
+
+
+def test_the_gate_is_case_insensitive_like_the_pattern_it_guards():
+    """The bug this nearly shipped. Patterns compile with re.IGNORECASE, so a
+    case-SENSITIVE gate returns 0 for 'we use RAG' while the regex finds it. Every
+    caller in this repo pre-lowercases, which is precisely what would have kept it
+    hidden."""
+    # 1, not 2: "rag" is 3 chars and _MIN_PLURAL_LEN is 4, so no plural suffix is
+    # added and "RAGs" is correctly not a match. The gate must not change that either.
+    assert term_hits("rag", "we use RAG and RAGs heavily") == 1
+    assert term_hits("stakeholder", "STAKEHOLDERS and Stakeholder alike") == 2
+    assert has_term("staffing", "A STAFFING AGENCY") is True
+    assert term_hits("month end close", "owns the MONTH-END CLOSE") == 1

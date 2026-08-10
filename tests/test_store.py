@@ -1222,3 +1222,14 @@ def test_state_is_normalised_to_a_usps_code(db):
     assert store.normalize_job(rows[1])["state"] == "CA"
     assert store.normalize_job(rows[2])["state"] is None  # foreign, not a US state
     assert store.normalize_job(rows[3])["state"] is None
+
+
+def test_the_two_body_caps_must_stay_equal():
+    """`snapshot.TEXT_CAP` truncates before jobs.json is written and `store.BODY_CAP`
+    truncates on the way into the store. Raising only the second is a silent no-op for
+    every harvested row; raising only the first leaves the harvest and the live fetch
+    feeding the scorer different amounts of the same job. There is no reason for them
+    ever to differ, and every reason for the difference to go unnoticed."""
+    from jobfitr import snapshot
+
+    assert store.BODY_CAP == snapshot.TEXT_CAP

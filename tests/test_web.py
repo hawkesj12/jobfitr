@@ -121,7 +121,12 @@ def test_snapshot_roundtrip(tmp_path, monkeypatch):
     store.init()
 
     rows = [
-        {**_job("Data Engineer", text="x" * 5000), "sources": {"remotive", "remoteok"}},
+        # longer than the cap ON PURPOSE, expressed relative to it so raising the
+        # constant can never quietly stop exercising the truncation it guards.
+        {
+            **_job("Data Engineer", text="x" * (snapshot.TEXT_CAP + 1000)),
+            "sources": {"remotive", "remoteok"},
+        },
         {**_job("Product Manager", url="https://x/pm"), "sources": {"jobicy"}},
     ]
     monkeypatch.setattr(

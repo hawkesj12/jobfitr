@@ -187,9 +187,34 @@ def term_pattern(term: str) -> re.Pattern[str] | None:
 #     past four never changes a score — which is why overlap semantics
 #     are not load-bearing.
 # ═══════════════════════════════════════════════════════════════
+@lru_cache(maxsize=512)
+def _stem(term: str) -> str:
+    """The term's first normalised word — the cheapest thing that MUST be present.
+
+    This is the gate in front of every regex in this file, and it exists because bodies
+    went from 2,000 characters to 8,000: `in` on a str is a memchr-backed scan, the
+    compiled pattern is a backtracking automaton, and on the widest profile (7 terms x
+    5,300 candidates) the difference is 2,064 ms of regex against 967 ms gated.
+
+    Sound because the pattern always requires this word LITERALLY: the plural suffix is
+    applied to the last word only, and the `[\\s-]+` alternative sits between words, so
+    neither can alter the first one.
+
+    THE `.lower()` AT THE CALL SITE IS NOT OPTIONAL. The patterns compile with
+    re.IGNORECASE, so a case-sensitive gate silently returns 0 for "we use RAG" while
+    the regex would have found it. Every caller in this repo happens to pre-lowercase,
+    which is exactly what makes that class of bug survive review — it costs ~500 ms of
+    the saving and buys a function that cannot be wrong for a caller that does not.
+    """
+    key = norm_key(term)
+    return key.split()[0] if key else ""
+
+
 def term_hits(term: str, text: str) -> int:
     pattern = term_pattern(term)
     if pattern is None or not text:
+        return 0
+    if _stem(term) not in text.lower():
         return 0
     return sum(1 for _ in pattern.finditer(text))
 
@@ -204,6 +229,8 @@ def term_hits(term: str, text: str) -> int:
 def has_term(term: str, text: str) -> bool:
     pattern = term_pattern(term)
     if pattern is None or not text:
+        return False
+    if _stem(term) not in text.lower():  # the same gate as term_hits — see _stem
         return False
     return pattern.search(text) is not None
 

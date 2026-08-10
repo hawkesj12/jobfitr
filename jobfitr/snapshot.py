@@ -22,9 +22,12 @@ from job_radar.config import load_config
 
 _ET = ZoneInfo("America/New_York")
 
-# Per-row JD text is the biggest contributor to file size; cap it. Scoring only
-# needs enough body to match keywords, and the UI shows a short snippet.
-TEXT_CAP = 2000
+# Per-row JD text is the biggest contributor to file size; cap it. But it is also the
+# BOOST EVIDENCE, and this cap is upstream of the store's — it truncates before
+# jobs.json is written, so a body cut here can never be recovered by the scorer.
+# Raised 2,000 -> 8,000 with store.BODY_CAP on 2026-08-10; the two must stay equal or
+# the harvest and the live fetch feed the scorer different amounts of the same job.
+TEXT_CAP = 8000
 
 # Where the cache lives by default. The server reads the same path (JOBS_PATH env
 # override honored there); the harvester writes it.
