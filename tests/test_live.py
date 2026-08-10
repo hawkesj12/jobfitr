@@ -112,3 +112,74 @@ def test_single_flight_distinct_searches_each_fetch(monkeypatch):
     live.coalesced_fetch(["accountant"], "remote")
     live.coalesced_fetch(["nurse"], "remote")
     assert fetches["n"] == 2  # different keys → separate fetches
+
+
+def test_prep_location_catches_the_measured_dead_searches():
+    """Adzuna's `where` resolves against a PLACE HIERARCHY, so a non-place returns zero.
+    Probed live with `what=software engineer`, where blank returns 148,341: 'work from
+    home', 'wfh', 'anywhere in the us', 'remote (us)', 'home based', 'virtual',
+    'no preference' and 'flexible' all returned 0, and 'nationwide' returned 143 —
+    worse than zero, because it matches SOMETHING and silently narrows the board."""
+    for word in [
+        "work from home", "WFH", "Nationwide", "anywhere in the US", "Remote (US)",
+        "no preference", "flexible", "home based", "virtual", "telecommute",
+    ]:
+        assert live._prep_location(word) == "", word
+
+
+def test_prep_location_maps_the_whole_country_to_blank():
+    """`us`, `usa` and `united states` each return the identical 148,341 that blank
+    does, so mapping them to blank is the same request said plainly. This is also why
+    the planned 'send United States instead of blank' change was dropped."""
+    for word in ["us", "USA", "United States", "u.s.", "U.S.A."]:
+        assert live._prep_location(word) == "", word
+
+
+def test_prep_location_keeps_a_real_place():
+    for word in ["Denver, CO", "Louisville, KY", "Austin", "New York, NY"]:
+        assert live._prep_location(word) == word
+
+
+def test_a_location_that_returns_nothing_is_retried_nationwide(monkeypatch):
+    """THE NET. No list of non-place words is ever finished — the eight above were found
+    by probing, not by imagining. A location that returns nothing from every keyed source
+    is one the APIs could not resolve, and a nationwide board beats an empty one."""
+    seen = []
+
+    def adzuna(q):
+        seen.append(live.jr_config.active().location)
+        return [] if seen[-1] else [{"url": "u1", "title": "Nationwide hit"}]
+
+    monkeypatch.setattr(live.sources, "search_adzuna", adzuna)
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
+
+    rows = live.live_fetch(["engineer"], "Zzyzx Township")
+    assert seen == ["Zzyzx Township", ""]  # tried the place, then fell back
+    assert rows == [{"url": "u1", "title": "Nationwide hit"}]
+
+
+def test_the_retry_does_not_fire_when_the_location_was_already_blank(monkeypatch):
+    """It cannot loop, and a genuinely empty nationwide result must not cost two calls."""
+    calls = []
+    monkeypatch.setattr(
+        live.sources, "search_adzuna", lambda q: calls.append(1) or []
+    )
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
+    assert live.live_fetch(["engineer"], "remote") == []
+    assert len(calls) == 1
+
+
+def test_the_retry_does_not_fire_when_the_place_found_something(monkeypatch):
+    calls = []
+
+    def adzuna(q):
+        calls.append(live.jr_config.active().location)
+        return [{"url": "u1", "title": "Denver job"}]
+
+    monkeypatch.setattr(live.sources, "search_adzuna", adzuna)
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
+    live.live_fetch(["engineer"], "Denver, CO")
+    assert calls == ["Denver, CO"]

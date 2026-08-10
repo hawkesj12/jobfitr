@@ -78,9 +78,14 @@ profile:
 
 filters:
   remote_only: false # keep on-site + hybrid too; the user narrows later
-  # Empty = no geographic filter, so Adzuna/USAJOBS return jobs NATIONWIDE (a real
-  # place name here, e.g. "remote", makes Adzuna's `where=` match a city and return
-  # nothing). The per-user location lens is applied later at request time.
+  # READ BY NOTHING IN THIS HARVEST — kept only because job_radar's Config expects the
+  # key. Exactly three adapters consult `cfg.location` (adzuna, usajobs, google_jobs),
+  # and all three are the per-user LIVE sources deliberately excluded from `boards:`
+  # below. The nightly lane is free boards + per-company ATS, which fetch whole boards
+  # and take no geography at all. Changing this value does not change the harvest.
+  #
+  # The place that actually decides geography for a search is `live._prep_location`, at
+  # request time. (US-only intake is a third thing again — `store.servable_in_us`.)
   location: ""
   exclude_titles: [] # no exclusions at harvest — the user excludes at request time
   max_age_days: 90 # generous; per-user freshness is applied at request time
