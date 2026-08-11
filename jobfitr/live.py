@@ -21,6 +21,7 @@ from __future__ import annotations
 import threading
 
 from job_radar import config as jr_config
+from job_radar.engine import _coerce
 from job_radar import sources
 
 from . import store
@@ -118,7 +119,25 @@ def live_fetch(titles: list[str], location: str | None) -> list[dict]:
 
 def _fetch_all(cfg, titles: list[str]) -> list[dict]:
     """One pass over the keyed sources under the config lock (job_radar's adapters read
-    a process-global active config, so set+call must not interleave)."""
+    a process-global active config, so set+call must not interleave).
+
+    Every row goes through `engine._coerce`, which is what makes it a job_radar RECORD
+    rather than raw adapter output. Calling the adapters directly — which this module
+    does, to skip the harvest machinery — bypassed it, and `_coerce`'s own docstring
+    calls itself "the one boundary every posting crosses". It was not.
+
+    Measured: a live row arrived with **14 of the 21 contract fields absent**, including
+    `title_root` (so the root-title tier could never fire on a live-fetched job),
+    `salary_min`/`salary_currency` (so the salary filter and the USD test could not see
+    it), and `direct_apply` — which mattered most, because a MISSING direct_apply
+    renders as `apply_via: "aggregator"`, an assertion we had not earned. This is the
+    class of bug the store's own facet rule exists to prevent: never claim what the
+    source did not say.
+
+    `_coerce` is private. Reaching for it is deliberate and has precedent
+    (`store` imports `job_radar.discover._norm_name`); the alternative is a job_radar
+    release to make it public, which is worth doing when that repo next opens.
+    """
     rows: list[dict] = []
     with _CFG_LOCK:
         jr_config.set_active(cfg)
@@ -131,7 +150,7 @@ def _fetch_all(cfg, titles: list[str]) -> list[dict]:
                 rows.extend(fn(titles) or [])
             except Exception:  # a dead source never fails the whole fetch
                 continue
-    return rows
+    return [_coerce(r) for r in rows]
 
 
 # ── single-flight (threading; the scorer calls this from a threadpool) ────────

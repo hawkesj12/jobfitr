@@ -41,7 +41,7 @@ def test_live_fetch_calls_only_keyed_sources(monkeypatch):
     )
 
     rows = live.live_fetch(["product manager"], "remote")
-    assert rows == [{"url": "u", "title": "X"}]
+    assert [(r["url"], r["title"]) for r in rows] == [("u", "X")]
     # the three keyed sources, in order
     assert [c[0] for c in calls] == ["adz", "usa", "goog"]
     assert calls[0][1] == ["product manager"]
@@ -67,9 +67,8 @@ def test_live_fetch_survives_a_dead_source(monkeypatch):
         live.sources, "search_usajobs", lambda q: [{"url": "u2", "title": "Y"}]
     )
     monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
-    assert live.live_fetch(["nurse"], "") == [
-        {"url": "u2", "title": "Y"}
-    ]  # one dead, one ok
+    rows = live.live_fetch(["nurse"], "")  # one dead, one ok
+    assert [(r["url"], r["title"]) for r in rows] == [("u2", "Y")]
 
 
 def test_single_flight_coalesces_concurrent_identical_searches(monkeypatch):
@@ -96,7 +95,8 @@ def test_single_flight_coalesces_concurrent_identical_searches(monkeypatch):
 
     assert fetches["n"] == 1  # 8 concurrent identical searches → ONE upstream fetch
     assert all(
-        r == [{"url": "same", "title": "Grocery Store Manager"}] for r in results
+        [(x["url"], x["title"]) for x in r] == [("same", "Grocery Store Manager")]
+        for r in results
     )
 
 
@@ -156,7 +156,7 @@ def test_a_location_that_returns_nothing_is_retried_nationwide(monkeypatch):
 
     rows = live.live_fetch(["engineer"], "Zzyzx Township")
     assert seen == ["Zzyzx Township", ""]  # tried the place, then fell back
-    assert rows == [{"url": "u1", "title": "Nationwide hit"}]
+    assert [(r["url"], r["title"]) for r in rows] == [("u1", "Nationwide hit")]
 
 
 def test_the_retry_does_not_fire_when_the_location_was_already_blank(monkeypatch):
@@ -183,3 +183,28 @@ def test_the_retry_does_not_fire_when_the_place_found_something(monkeypatch):
     monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
     live.live_fetch(["engineer"], "Denver, CO")
     assert calls == ["Denver, CO"]
+
+
+def test_live_rows_cross_the_record_boundary(monkeypatch):
+    """Live rows go through `engine._coerce`, the same boundary the harvest crosses.
+
+    They did not, and it was invisible: calling the adapters directly to skip the
+    harvest machinery also skipped the thing that MAKES a row a job_radar record.
+    Measured against the real API, a live row arrived with 14 of 21 contract fields
+    absent — `title_root` (so the root-title tier could never fire on a live job),
+    `salary_min`/`salary_currency` (invisible to the salary filter and the USD test),
+    and `direct_apply`, whose absence renders as `apply_via: "aggregator"` — a claim
+    about the employer we had not earned."""
+    monkeypatch.setattr(
+        live.sources,
+        "search_adzuna",
+        lambda q: [{"url": "u", "title": "Senior Data Engineer (Remote)", "company": "Acme"}],
+    )
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda q: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda q: [])
+
+    row = live.live_fetch(["data engineer"], "")[0]
+    assert row["title"] == "Senior Data Engineer (Remote)"  # verbatim, untouched
+    assert row["title_root"] == "Data Engineer"  # derived by the boundary
+    for field in ("direct_apply", "salary_min", "salary_currency", "seniority", "locations"):
+        assert field in row, f"{field} never reached the record"
