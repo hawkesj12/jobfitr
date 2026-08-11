@@ -203,6 +203,27 @@ QUALIFIED_PENALTY = {
     "our client": r"\bour clients?[,']?\s+(is|are|has|have|was|were)\b|\bon behalf of (our|a) clients?\b|\bour client,\s|\bfor one of our clients?\b",
 }
 
+# Compiled ONCE, here, not per candidate. `re.compile` was inside the scoring loop, so
+# every one of these was rebuilt for every listing of every search.
+#
+# Each pattern is paired with a LITERAL that every one of its alternatives requires, so
+# a cheap substring test can decide "definitely not here" before the automaton runs —
+# the same gate `match._stem` puts in front of boost matching, which was built and then
+# not applied to this path. Soundness is by inspection of the alternations above:
+# `agenc` is in both `agenc(y|ies)` branches, `client` in all four "our client" ones,
+# and `recruiting`/`recruiter`/`staffing` lead their own. Measured on 2,869 real bodies,
+# results IDENTICAL: staffing 620->46 ms, agency 754->188, our client 381->100.
+_QUALIFIED_COMPILED = {
+    key: (re.compile(pat, re.IGNORECASE).search, lit)
+    for key, pat, lit in (
+        ("agency", QUALIFIED_PENALTY["agency"], "agenc"),
+        ("recruiting", QUALIFIED_PENALTY["recruiting"], "recruiting"),
+        ("recruiter", QUALIFIED_PENALTY["recruiter"], "recruiter"),
+        ("staffing", QUALIFIED_PENALTY["staffing"], "staffing"),
+        ("our client", QUALIFIED_PENALTY["our client"], "client"),
+    )
+}
+
 # The one term whose bare form is untrustworthy even in a company name — 420 federal
 # listings say so.
 QUALIFY_IN_COMPANY_TOO = frozenset({"agency"})
@@ -461,8 +482,62 @@ def _shape(c: dict, points: int, why: str, parts: list) -> dict:
     }
 
 
+def _eligible(candidates: list, exclude, remote_only: bool, max_age_days) -> list:
+    """The user's three HARD filters — terms they said to hide, remote-only if they
+    chose it, their own recency preference. Everything else is ranking, not filtering.
+
+    THIS MUST RUN BEFORE `_dedupe_listings`, AND THAT ORDER IS A BUG FIX, NOT A STYLE
+    CHOICE. Dedupe collapses on (company, title) and keeps the row with the longest
+    body — a tiebreak that knows nothing about whether the survivor is one the user can
+    actually receive. Filtering afterwards therefore had a hole with no error in it: a
+    REMOTE listing whose non-remote twin carried more text was discarded by dedupe, and
+    the surviving twin was then removed by the remote-only filter. The job vanished from
+    a search that had asked for exactly it.
+
+    Measured on the frozen corpus: **42 remote listings erased across 10 of the 20
+    remote-only profiles**, including the owner's own daily search. The same hole exists
+    for `exclude` and `max_age_days` — it is a property of the ordering, not of remote —
+    which is why the fix is to filter first rather than to push one predicate into SQL.
+
+    Idempotent, so `_rank` calls it again harmlessly and there is no second copy of a
+    predicate to drift.
+    """
+    out = []
+    for c in candidates:
+        title = (c.get("title") or "").lower()
+        # Exclusions test the COMPANY as well as the title: "recruiting agency" is an
+        # employer trait, not a job trait, so a title-only test let a staffing firm's
+        # normal-sounding listings through under the very term meant to remove them.
+        #
+        # WHOLE-WORD, not substring. This read `x in blob` — the exact substring test
+        # deliberately removed from scoring, still living in the one path that DELETES a
+        # listing rather than ranking it. Measured: 220 of 2,573 exclusions (8.6%) were
+        # false hides — `intern` deleting "Software Engineer, Internal Systems", `sales`
+        # deleting "Sr. Forward Deployed Engineer - Salesforce Health Cloud", 13 of them
+        # exact title matches. Hiding a job is the most destructive thing this code does
+        # and it was the least precise test in it.
+        if any(
+            has_term(x, f"{title} {(c.get('company') or '').lower()}") for x in exclude
+        ):
+            continue
+        if remote_only and c.get("remote") != "remote":
+            continue
+        # `None` means the user never expressed a recency preference, so we do not
+        # invent one. The old ladder always imposed an age — 90 days at its loosest —
+        # which meant nothing older was reachable no matter what anyone wanted.
+        if max_age_days is not None:
+            age = age_int(c.get("posted", ""))
+            if age is not None and age > max_age_days:
+                continue
+        out.append(c)
+    return out
+
+
 def _dedupe_listings(candidates: list) -> list:
     """Collapse rows that are the same job posted twice, keeping the richest one.
+
+    RUN `_eligible` FIRST — see its docstring. The longest-body tiebreak below is blind
+    to the user's filters, so deduping an unfiltered set silently deletes jobs.
 
     The same opening reaches the pool from more than one source (an aggregator and the
     employer's own ATS), and the two rows are rarely byte-identical — different URLs,
@@ -523,8 +598,20 @@ def scoreboard(
     penalties: list,
     related_titles: list | None = None,
     title_root: str = "",
+    lowered: bool = False,
 ) -> dict:
+    """Score one listing. `lowered` asserts title/company/body are ALREADY lowercase and
+    lets the term gate skip re-copying the body once per term — see `match._stem`. It
+    defaults False so the goldens, which pass raw-case text, keep the safe path."""
     parts: list[tuple[str, int]] = []
+
+    # Hoisted out of the term loops below. `f"{title} {body}"` was rebuilt once per boost
+    # term and `f"{title} {company}"` once per penalty term, so a seven-boost search
+    # copied an 8,000-character body seven times for every candidate on the board.
+    # `body_lc` exists only for the penalty gate, which tests a plain literal.
+    blob = f"{title} {body}"
+    title_company = f"{title} {company}"
+    body_lc = body if lowered else body.lower()
 
     # Title: the BEST single tier across the titles the user named — and only if none
     # of them land, a flat 30 for matching one the MODEL suggested. Tiers do not stack
@@ -540,7 +627,7 @@ def scoreboard(
     for term in boosts:
         if not term:
             continue
-        hits = term_hits(term, f"{title} {body}")
+        hits = term_hits(term, blob, lowered=lowered)
         if not hits:
             continue
         # Diminishing per occurrence: the 5th mention says little the 4th did not,
@@ -559,22 +646,23 @@ def scoreboard(
         key = norm_key(term)
         if key in COMPANY_ONLY_PENALTY:
             # Company field alone — not the title, and never the body. See the constant.
-            in_title = has_term(term, company)
+            in_title = has_term(term, company, lowered=lowered)
             in_body = False
-        elif (qualifier := QUALIFIED_PENALTY.get(key)) is not None:
-            found = re.compile(qualifier, re.IGNORECASE).search
-            in_body = bool(found(body))
+        elif (compiled := _QUALIFIED_COMPILED.get(key)) is not None:
+            found, literal = compiled
+            # The gate: no alternative can match without this literal present.
+            in_body = bool(found(body)) if literal in body_lc else False
             # A company that names itself "…Staffing" has disclosed what it is; a body
             # that says "high agency" has not. Same word, different evidential weight,
             # so the bare form is still trusted in a name unless measurement says no.
             in_title = (
-                bool(found(f"{title} {company}"))
+                bool(found(title_company))
                 if key in QUALIFY_IN_COMPANY_TOO
-                else has_term(term, f"{title} {company}")
+                else has_term(term, title_company, lowered=lowered)
             )
         else:
-            in_title = has_term(term, f"{title} {company}")
-            in_body = has_term(term, body)
+            in_title = has_term(term, title_company, lowered=lowered)
+            in_body = has_term(term, body, lowered=lowered)
         if in_title:
             hit = PENALTY_TITLE  # naming itself a staffing firm is the strongest tell
         elif in_body:
@@ -619,22 +707,8 @@ def _rank(
     t[1] and the caller unpacks all four.
     """
     scored = []
-    for c in candidates:
+    for c in _eligible(candidates, exclude, remote_only, max_age_days):
         title = (c.get("title") or "").lower()
-        # Exclusions test the COMPANY as well as the title: "recruiting agency" is an
-        # employer trait, not a job trait, so a title-only test let a staffing firm's
-        # normal-sounding listings through under the very term meant to remove them.
-        if any(x in f"{title} {(c.get('company') or '').lower()}" for x in exclude):
-            continue
-        if remote_only and c.get("remote") != "remote":
-            continue
-        # `None` means the user never expressed a recency preference, so we do not
-        # invent one. The old ladder always imposed an age — 90 days at its loosest —
-        # which meant nothing older was reachable no matter what anyone wanted.
-        if max_age_days is not None:
-            age = age_int(c.get("posted", ""))
-            if age is not None and age > max_age_days:
-                continue
         body = (c.get("body") or "").lower()
         board = scoreboard(
             title,
@@ -645,6 +719,7 @@ def _rank(
             penalties,
             related_titles,
             (c.get("title_root") or "").lower(),
+            lowered=True,  # every string above is already .lower()'d — see match._stem
         )
         # `why` is built FROM the parts, not computed separately. It used to test
         # `term in blob` — the same substring bug removed from scoring — so boosting
@@ -744,17 +819,32 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     # what the retrieval did — otherwise v1 bundles two changes and the before/after
     # cannot say which one worked.
     search_titles = titles + related if RELATED_IN_RETRIEVAL else titles
-    candidates = (
-        _dedupe_listings(store.bm25_candidates(search_titles)) if search_titles else []
-    )
 
     # Read recency off the payload rather than cfg, because cfg.max_age_days carries a
     # 60-day DEFAULT and a default is not a preference. Absent → no age filter at all.
+    # Hoisted above retrieval because `_eligible` needs it — see the next block.
     raw_age = payload.get("max_age_days")
     max_age_days = (
         int(raw_age)
         if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool)
         else None
+    )
+
+    # FILTER, THEN DEDUPE. The order is load-bearing: dedupe keeps the longest-bodied
+    # row of each (company, title) pair, which is blind to whether that row is one the
+    # user can receive — so deduping first silently deleted 42 remote listings across
+    # half the remote-only profiles. See `_eligible`.
+    candidates = (
+        _dedupe_listings(
+            _eligible(
+                store.bm25_candidates(search_titles),
+                exclude,
+                cfg.remote_only,
+                max_age_days,
+            )
+        )
+        if search_titles
+        else []
     )
     kept, top = _rank(
         candidates,

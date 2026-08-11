@@ -200,21 +200,29 @@ def _stem(term: str) -> str:
     applied to the last word only, and the `[\\s-]+` alternative sits between words, so
     neither can alter the first one.
 
-    THE `.lower()` AT THE CALL SITE IS NOT OPTIONAL. The patterns compile with
-    re.IGNORECASE, so a case-sensitive gate silently returns 0 for "we use RAG" while
-    the regex would have found it. Every caller in this repo happens to pre-lowercase,
-    which is exactly what makes that class of bug survive review — it costs ~500 ms of
-    the saving and buys a function that cannot be wrong for a caller that does not.
+    THE GATE MUST SEE LOWERCASE TEXT. The patterns compile with re.IGNORECASE, so a
+    case-sensitive gate silently returns 0 for "we use RAG" while the regex would have
+    found it — a wrong answer with no exception, which is the worst shape a bug takes
+    here.
+
+    So `term_hits`/`has_term` lowercase the text themselves BY DEFAULT, and a caller
+    that has already done it opts out with `lowered=True`. Opt-in, never assumed: the
+    default keeps a function that cannot be wrong for a caller who did not read this,
+    and the opt-in stops the hot path from allocating a fresh 8 KB copy of the same body
+    once per term per candidate. Measured on 3,000 real bodies x 8 terms — 354 ms with
+    the copy, 65 ms without; on the full 57-profile sweep the two together are worth
+    roughly half of scoring time.
     """
     key = norm_key(term)
     return key.split()[0] if key else ""
 
 
-def term_hits(term: str, text: str) -> int:
+def term_hits(term: str, text: str, lowered: bool = False) -> int:
+    """Occurrences of `term` in `text`. Set `lowered` only if `text` is already lower."""
     pattern = term_pattern(term)
     if pattern is None or not text:
         return 0
-    if _stem(term) not in text.lower():
+    if _stem(term) not in (text if lowered else text.lower()):
         return 0
     return sum(1 for _ in pattern.finditer(text))
 
@@ -226,11 +234,12 @@ def term_hits(term: str, text: str) -> int:
 # them all — used by the penalty path, which only cares whether the
 # term is there.
 # ═══════════════════════════════════════════════════════════════
-def has_term(term: str, text: str) -> bool:
+def has_term(term: str, text: str, lowered: bool = False) -> bool:
+    """Whether `term` is in `text`. Set `lowered` only if `text` is already lower."""
     pattern = term_pattern(term)
     if pattern is None or not text:
         return False
-    if _stem(term) not in text.lower():  # the same gate as term_hits — see _stem
+    if _stem(term) not in (text if lowered else text.lower()):  # same gate — see _stem
         return False
     return pattern.search(text) is not None
 

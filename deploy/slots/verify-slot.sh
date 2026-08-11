@@ -40,6 +40,36 @@ snapcount=$(jqv snapshot_count)
 imported=$(jqv snapshot_imported_at)
 adz=$(jqv adzuna_ok)
 
+# 2b. THE RELEASE'S OWN COLUMNS ARE ACTUALLY FILLED.
+#
+# This gate had no idea what a v2 store is supposed to contain. A slot rebuilt from a
+# snapshot written by an OLDER job-radar comes up healthy in every other check here —
+# service responds, pool the right size, snapshot fresh — with title_root, category and
+# seniority at 0%. The board renders, every filter drawer is empty, and the title scorer
+# runs on one surface instead of two. Nothing errors, so nothing here noticed.
+#
+# title_root is the tell: a 0.7.0 harvest fills it on 100% of rows, so anything near zero
+# means the snapshot predates the engine. `rebuild_store.py` now refuses that rebuild
+# outright — this is the second line of defence for a store that got there another way.
+db="/opt/jobfitr/${slot}/data/jobs.db"
+fillpy='import sqlite3,sys
+c=sqlite3.connect("file:%s?mode=ro"%sys.argv[1],uri=True)
+n=c.execute("SELECT count(*) FROM jobs").fetchone()[0]
+if not n: print("STALE|no rows"); raise SystemExit
+def f(col): return c.execute("SELECT count(*) FROM jobs WHERE \"%s\" IS NOT NULL AND \"%s\" <> \x27\x27"%(col,col)).fetchone()[0]
+r=f("title_root")
+print(("OK" if r*2>n else "STALE")+"|"+" · ".join("%s %.0f%%"%(k,100*f(k)/n) for k in ("title_root","category","seniority")))'
+if [[ -r "$db" ]]; then
+	fillrep=$(python3 -c "$fillpy" "$db" 2>/dev/null)
+	case "${fillrep%%|*}" in
+	OK) ok "new-schema columns" "${fillrep#*|}" ;;
+	STALE) bad "new-schema columns" "${fillrep#*|} — rebuilt from a PRE-0.7.0 snapshot; re-harvest then rerun rebuild_store.py" ;;
+	*) bad "new-schema columns" "could not read ${db}" ;;
+	esac
+else
+	say "new-schema columns" "– skipped (${db} not readable from here)"
+fi
+
 # 2. the pool is not just NON-EMPTY but the right SIZE. A fixed >1000 floor let a
 #    harvest that silently dropped 90% of the depth lane pass (the pool is ~34k). Gate
 #    on the ratio to what the slot should be serving: the pool is the snapshot plus

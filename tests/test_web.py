@@ -1268,3 +1268,64 @@ def test_a_foreign_currency_posting_never_reaches_the_board(client, monkeypatch)
     titles = [j["title"] for j in d["jobs"]]
     assert "Yen Role" not in titles
     assert "Dollar Role" in titles
+
+
+# ── the 2026-08-11 panel blockers ────────────────────────────────────────────
+def test_exclude_hides_by_whole_word_not_substring(client, monkeypatch):
+    """B3. The exclude path is the most destructive thing this code does — it deletes a
+    listing rather than ranking it — and it was the least precise test in the codebase.
+    Measured on the frozen corpus: 220 of 2,573 exclusions (8.6%) were false hides,
+    13 of them EXACT title matches, including one on the owner's own profile."""
+    _seed(
+        [
+            _job("Software Engineer, Internal Systems", url="https://x/internal"),
+            _job("AI Engineer - Salesforce Health Cloud", url="https://x/sfdc"),
+            _job("Engineering Intern", url="https://x/intern"),
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post(
+        "/api/score", json={"titles": ["engineer"], "exclude": ["intern", "sales"]}
+    ).json()
+    titles = {j["title"] for j in d["jobs"]}
+    assert "Software Engineer, Internal Systems" in titles  # 'intern' in 'Internal'
+    assert "AI Engineer - Salesforce Health Cloud" in titles  # 'sales' in 'Salesforce'
+    assert "Engineering Intern" not in titles  # the TRUE positive still hides
+
+
+def test_a_remote_job_survives_dedupe_against_a_longer_nonremote_twin(
+    client, monkeypatch
+):
+    """B2. `_dedupe_listings` collapses on (company, title) keeping the longest body —
+    a tiebreak blind to whether the survivor is one the user can receive. Deduping
+    before filtering therefore deleted the remote copy and then filtered out the twin
+    that replaced it. Measured: 54 jobs restored across 14 of 20 remote-only profiles,
+    0 lost."""
+    _seed(
+        [
+            _job(
+                "Data Engineer",
+                text="x" * 4000,  # the LONGER body, so dedupe would prefer it
+                url="https://x/onsite",
+                location="Austin, TX",
+                remote_type="onsite",
+                remote_basis="stated",
+            ),
+            _job(
+                "Data Engineer",
+                text="short",
+                url="https://x/remote",
+                location="Remote",
+                remote_type="remote",
+                remote_basis="stated",
+            ),
+        ]
+    )
+    _mark_fresh(["data engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post(
+        "/api/score", json={"titles": ["data engineer"], "location": "remote"}
+    ).json()
+    urls = {j["url"] for j in d["jobs"]}
+    assert "https://x/remote" in urls, "the remote job was eaten by dedupe"

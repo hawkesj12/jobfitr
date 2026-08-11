@@ -352,3 +352,22 @@ def test_the_gate_is_case_insensitive_like_the_pattern_it_guards():
     assert term_hits("stakeholder", "STAKEHOLDERS and Stakeholder alike") == 2
     assert has_term("staffing", "A STAFFING AGENCY") is True
     assert term_hits("month end close", "owns the MONTH-END CLOSE") == 1
+
+
+def test_lowered_is_opt_in_and_never_assumed():
+    """B4. The gate must see lowercase text or it silently returns 0 while the
+    re.IGNORECASE pattern would have matched. The fast path is therefore OPT-IN: the
+    default keeps a function that cannot be wrong for a caller who did not read the
+    docstring, and only `_rank` — which already lowercases everything — opts out of the
+    per-term copy of an 8,000-character body."""
+    # default path: correct on ANY case
+    assert term_hits("rag", "we use RAG heavily") == 1
+    assert has_term("staffing", "A STAFFING AGENCY") is True
+    # opt-in path on already-lowered text: identical answer
+    assert term_hits("rag", "we use rag heavily", lowered=True) == 1
+    assert has_term("staffing", "a staffing agency", lowered=True) is True
+    # and the two agree wherever the text is already lower
+    for term, text in [("python", "senior python engineer"), ("rag", "no match here"),
+                       ("month end close", "owns the month-end close")]:
+        assert term_hits(term, text) == term_hits(term, text, lowered=True), term
+        assert has_term(term, text) == has_term(term, text, lowered=True), term

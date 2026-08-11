@@ -63,7 +63,15 @@ jobfitr is a **live-fetch-on-search hybrid**: the web process doesn't just read 
 
 **But isolation is not migration — a schema bump needs one extra command per slot.** `store.SCHEMA_VERSION` (2 as of 2026-08-10) is stamped in each store's `meta` table, and `store.init()` **raises `StaleSchemaError` and refuses to start** when it does not match the code. That is deliberate: the DDL is `CREATE TABLE IF NOT EXISTS`, so without the check the old table would silently survive and the failure would surface hours later, mid-harvest, as `no such column`. What it means operationally: after deploying a release that bumps `SCHEMA_VERSION`, the freshly-built slot's own `jobs.db` is still the old shape, so **`verify-slot.sh` will report a dead slot** until you rebuild it:
 
+**HARVEST FIRST, THEN REBUILD. The order is the whole thing.** `harvest-active.sh` resolves the active slot at run time, so the nightly harvest runs whatever is _currently_ production — which means the shared `jobs.json` on the box was written by the OLD engine, and a rebuild from it produces a v2 store with **every new column at 0%**. The site comes up, the board renders, and every filter drawer is empty. Measured on the 2026-08-10 release: `title_root`, `category`, `seniority`, `state`, `salary_min` and `direct_apply` all zero, and the US/USD intake policy silently a no-op because no row carries a country.
+
 ```bash
+# 1. harvest FROM THE NEW SLOT'S OWN BINARY — not harvest-active.sh, which would run
+#    the old code. Writes the shared snapshot; ~4-8 min.
+sudo -u jobfitr /opt/jobfitr/<slot>/jobfitr/.venv/bin/jobfitr-snapshot
+
+# 2. then rebuild that slot's store from it. Exits NON-ZERO if a column came back
+#    completely empty, which is how you find out you got the order wrong.
 sudo -u jobfitr JOBFITR_DB_PATH=/opt/jobfitr/<slot>/data/jobs.db \
      JOBFITR_JOBS_PATH=/opt/jobfitr/data/jobs.json \
      /opt/jobfitr/<slot>/jobfitr/.venv/bin/python \
@@ -71,7 +79,11 @@ sudo -u jobfitr JOBFITR_DB_PATH=/opt/jobfitr/<slot>/data/jobs.db \
 sudo systemctl restart jobfitr-web@<slot>
 ```
 
-The store is a cache, so this costs the slot's live-fetch history and nothing else — the shared `jobs.json` reseeds it immediately. **Do not rebuild the ACTIVE slot's store**; that is the one serving traffic. Build and rebuild the inactive slot, verify, then flip — the rollback path stays intact because the old slot keeps its old store until you bring it up to the same build.
+`verify-slot.sh` now prints a `new-schema columns` line and **fails on a stale rebuild**, so both gates catch it — they previously reported a clean green on exactly this state.
+
+The store is a cache, so a rebuild costs the slot's live-fetch history and nothing else; the `companies` resolution ledger and the daily fetch counter are carried forward automatically. **Do not rebuild the ACTIVE slot's store** — that is the one serving traffic. Build and rebuild the inactive slot, verify, then flip.
+
+> **Step 9 of the go-live runbook needs this too.** "Bring the old slot up to the same build so rollback stays available" runs `deploy-slot.sh` against a slot whose `jobs.db` is still the previous schema — it will crash-loop on `StaleSchemaError` and the script's own is-active check will report it failed to start. Loud, not silent, and production is untouched — but **rollback is not actually available until you rebuild that slot's store too.**
 
 **The shared `jobs.json` is the common inflow.** One harvest writes the single `data/jobs.json`; each slot imports it into its own db on init and again on every rewrite (`sync_snapshot`, background thread). One harvest, no doubled job-API traffic, two independent stores that both stay current.
 

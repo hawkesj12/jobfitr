@@ -338,3 +338,25 @@ def test_the_root_never_lets_a_suggestion_outrank_a_named_title(pairs):
             assert _score(p, related=[])["points"] <= 0 or all(
                 lbl != "title" for lbl in labels
             )
+
+
+@needs_corpus
+@pytest.mark.slow
+def test_the_penalty_gate_changes_no_verdict():
+    """B5. `QUALIFIED_PENALTY`'s patterns are now compiled once and run only when a
+    required literal is present. Sound because every alternative of each pattern
+    contains its literal — `agenc`, `recruiting`, `recruiter`, `staffing`, `client`.
+    An optimisation only: any verdict it changes is a bug in the literal."""
+    import re as _re
+
+    from jobfitr.server import _QUALIFIED_COMPILED, QUALIFIED_PENALTY
+
+    ungated = {k: _re.compile(v, _re.IGNORECASE).search for k, v in QUALIFIED_PENALTY.items()}
+    checked = 0
+    for p in _load_pairs(full=True):
+        body = p["body"]
+        for key, (found, literal) in _QUALIFIED_COMPILED.items():
+            gated = bool(found(body)) if literal in body else False
+            assert gated == bool(ungated[key](body)), f"{key!r} disagrees on {p['title']!r}"
+            checked += 1
+    assert checked, "the corpus produced no bodies to check"

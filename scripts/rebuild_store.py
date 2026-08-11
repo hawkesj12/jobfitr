@@ -114,6 +114,11 @@ def main(argv=None) -> int:
         "--keep-backups", type=int, default=3, help="older backups to prune (default 3)"
     )
     ap.add_argument(
+        "--allow-empty-columns",
+        action="store_true",
+        help="exit 0 even if a column is completely unfilled (stale-snapshot rebuilds)",
+    )
+    ap.add_argument(
         "--no-backup",
         action="store_true",
         help="discard the old store once carried forward (scratch DBs only)",
@@ -214,12 +219,21 @@ def main(argv=None) -> int:
     else:
         print()
 
+    # A COMPLETELY EMPTY COLUMN FAILS THE REBUILD. This printed a warning and then
+    # exited 0 saying "rebuild OK", which is how a slot rebuilt from a stale snapshot
+    # sails through every automated gate with the release's headline features at 0%
+    # fill: `verify-slot.sh` does not look at column fill either, so nothing between
+    # the operator and production measures the thing that actually broke.
+    #
+    # The likely cause is always the same and is worth naming in the message: the
+    # snapshot was written by an older engine, so re-harvest before rebuilding.
     if empty:
         print(f"\n  ⚠ {len(empty)} column(s) completely empty: {', '.join(empty)}")
-        print("    Check these against _private/raw/*/COVERAGE.md before trusting the")
-        print("    rebuild — a renamed engine key reads exactly like a thin source.")
+        print("    Almost always: jobs.json was written by an OLDER job-radar. Re-run")
+        print("    the harvest from THIS slot's binary, then rebuild. Pass")
+        print("    --allow-empty-columns if the emptiness is genuinely expected.")
 
-    ok = fts == stored and stored > 0
+    ok = fts == stored and stored > 0 and not (empty and not args.allow_empty_columns)
     print("\n  " + ("rebuild OK" if ok else "REBUILD FAILED ITS OWN CHECKS"))
     return 0 if ok else 1
 
