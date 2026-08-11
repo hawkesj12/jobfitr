@@ -1329,3 +1329,22 @@ def test_a_remote_job_survives_dedupe_against_a_longer_nonremote_twin(
     ).json()
     urls = {j["url"] for j in d["jobs"]}
     assert "https://x/remote" in urls, "the remote job was eaten by dedupe"
+
+
+def test_a_high_paying_job_survives_a_salary_floor(client, monkeypatch):
+    """M2 at the card level. `$255k – $290k` used to reach the front end as `255`, so
+    every slider position above it deleted the job — the best-paying listings on the
+    board were the ones a salary filter hid first."""
+    _seed(
+        [
+            _job("Staff Engineer", url="https://x/k", salary="$255k – $290k"),
+            _job("Junior Engineer", url="https://x/low", salary="$40,000 – $45,000"),
+        ]
+    )
+    _mark_fresh(["engineer"])
+    _no_fetch(monkeypatch)
+    d = client.post("/api/score", json={"titles": ["engineer"]}).json()
+    by = {j["title"]: j for j in d["jobs"]}
+    assert by["Staff Engineer"]["salary_min"] is None  # the engine parsed no figure...
+    assert "180k-plus" in by["Staff Engineer"]["tags"]  # ...but the band reads it right
+    assert "under-50k" in by["Junior Engineer"]["tags"]

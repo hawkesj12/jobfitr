@@ -86,9 +86,11 @@ BODY_CAP = 8000
 # 82.3% kept. The earlier rule EXEMPTED any row tagged remote from the country test, on
 # the reasoning that a remote posting has no country by nature. That reasoning holds for
 # a blank country — and a blank country passes the test anyway, so the exemption was
-# doing no work there. All it uniquely did was keep 455 rows that state a foreign
-# country outright ('Canada - Remote', 'Munich (Remote)', 'Paris (Remote)'). Remote
-# within another country is not location-independent; it is a job in that country.
+# doing no work there. All it uniquely did was keep 577 rows that state a foreign
+# country outright ('Canada - Remote', 'Munich (Remote)', 'Paris (Remote)') — CA 163 ·
+# GB 100 · IN 38 · DE 33 · BR 30 · JP 28. Remote within another country is not
+# location-independent; it is a job in that country. (This said 455 until a panel
+# reviewer failed to reproduce it and re-measured; the conclusion never moved.)
 #
 # KNOWN LEAK, measured, not guessed: unknown-country rows still pass, and some name a
 # foreign place in their location TEXT. The fix is better country derivation upstream,
@@ -109,10 +111,10 @@ def servable_in_us(job: dict) -> bool:
     True for any row tagged remote, before the country was ever read — on the reasoning
     that a remote posting has no country by nature. That is true of the 3,729 rows whose
     country is BLANK, and those still pass on the country test below without needing a
-    special case. What the exemption uniquely did was keep **455 rows that state a
+    special case. What the exemption uniquely did was keep **577 rows that state a
     foreign country outright**: 'Enterprise Sales Director — Canada - Remote (Remote)',
-    'Sales Director, DACH — Munich (Remote)', 'Strategist — Paris (Remote)'. CA 119 ·
-    GB 90 · DE 30 · IN 28 · JP 21 · SG 21. Those are not location-independent jobs; they
+    'Sales Director, DACH — Munich (Remote)', 'Strategist — Paris (Remote)'. CA 163 ·
+    GB 100 · IN 38 · DE 33 · BR 30 · JP 28. Those are not location-independent jobs; they
     are remote WITHIN another country, and a US audience cannot take them.
 
     CURRENCY is the second signal, and unlike the subdivision test that was tried and
@@ -151,6 +153,23 @@ def servable_in_us(job: dict) -> bool:
 # monthly and one weekly, across five currencies.
 _SALARY_PERIODS = {"year": 1, "month": 12, "week": 52, "hour": 2080, "day": 260}
 
+# Below this, a bare number is not a yearly salary. A US full-time year at the federal
+# minimum is ~$15,080, so this refuses hourly/daily figures that arrived without a
+# period while accepting everything a job could actually pay for a year's work.
+ANNUAL_FLOOR = 15_000
+
+# K-notation, which the old fallback could not see at all: `[\d,]{3,}` needs three
+# characters of digits-and-commas, so "$255k" contained NO match and the row banded as
+# if it had no salary — 1,919 of the 5,203 salary strings in the capture write it this
+# way, and they are the best-paying jobs on the board.
+#
+# THE 401k TRAP DOES NOT EXIST IN THIS FIELD, AND THAT WAS MEASURED, NOT ASSUMED. In a
+# job BODY "401k match" would make this read $401,000. In the `salary` field the only
+# two strings of that shape are "$401K – $445K" — a real $401,000 salary. The field is
+# short and structured. Do NOT reuse this helper against body text without re-measuring.
+_K_FIGURE = re.compile(r"([\d,]+(?:\.\d+)?)\s*[kK]\b")
+_PLAIN_FIGURE = re.compile(r"[\d,]{3,}")
+
 
 def annual_salary(job: dict) -> float | None:
     """A stated salary as an annual USD number, or None when it cannot be trusted.
@@ -159,7 +178,12 @@ def annual_salary(job: dict) -> float | None:
     carries CAD/EUR/GBP/INR/JPY, and their raw numbers are what put a ¥15,500,000 and a
     ₹3,000,000 above every real dollar figure; converting needs a live FX rate that a
     salary filter does not justify. **`fixed` is dropped** because a project fee is not
-    a salary. A blank period returns None, and callers fall back to the display string.
+    a salary. A blank period used to return None too, which threw away 154 rows carrying
+    a perfectly good parsed USD figure — `('$148,000–$187,000', 148000.0, None)` arrived
+    with a number, a currency and no period, and got nothing. A figure at or above
+    ANNUAL_FLOOR is now read as annual: that is just under a US full-time year at the
+    federal minimum, so nothing plausible as a salary is refused, and the one row in the
+    capture that genuinely is not annual (`$33–$41`) still is.
     """
     lo = job.get("salary_min")
     if not isinstance(lo, (int, float)) or lo <= 0:
@@ -167,8 +191,51 @@ def annual_salary(job: dict) -> float | None:
     cur = _s(job.get("salary_currency")).upper()
     if cur and cur != "USD":
         return None
-    mult = _SALARY_PERIODS.get(_s(job.get("salary_period")).lower())
+    period = _s(job.get("salary_period")).lower()
+    if not period:
+        return float(lo) if lo >= ANNUAL_FLOOR else None
+    mult = _SALARY_PERIODS.get(period)
     return float(lo) * mult if mult else None
+
+
+def _first_figure(salary: str) -> float | None:
+    """The BOTTOM of a stated salary range, read off the display string. None if none.
+
+    Two things this gets right that the inline version it replaces did not.
+
+    K-NOTATION. See `_K_FIGURE` — "$255k – $290k" used to contain no recognisable number
+    at all and banded `under-50k`, which is where the best-paying jobs on the board were
+    sitting, and which any salary floor then hid outright.
+
+    THE MINIMUM, NOT THE MAXIMUM. This took `max(nums)` while `annual_salary` reads
+    `salary_min`, so the same job got a different band depending only on whether the
+    engine had parsed it — 1,113 strings in the capture disagree between the two paths.
+    They have to agree, and the MINIMUM is the end that makes them agree correctly: the
+    card's slider is a FLOOR filter ("pay me at least X"), so the number behind the chip
+    has to be the floor too. A `$40k–$250k` posting wearing a `180k-plus` badge would be
+    promising a figure the job does not guarantee.
+    """
+    if not salary:
+        return None
+    figures = [
+        float(m.group(1).replace(",", "")) * 1000 for m in _K_FIGURE.finditer(salary)
+    ]
+    if figures:
+        # THE LEADING K IS OFTEN IMPLIED: "$200-260K" means $200K-$260K, and reading it
+        # literally puts the floor at $260,000 for a job whose floor is $200,000. So
+        # once a string has established it is speaking in thousands, a bare number under
+        # 1,000 in the SAME string is in thousands too. 26 distinct strings in the
+        # capture are this exact shape and every one is a genuine range.
+        #
+        # A bare number of 1,000 or more is already a full figure and is kept as-is —
+        # "$150,000 - 200K" has a floor of 150,000, and an earlier cut of this dropped
+        # it entirely and answered 200,000.
+        for n in _PLAIN_FIGURE.findall(_K_FIGURE.sub(" ", salary)):
+            v = float(n.replace(",", ""))
+            figures.append(v * 1000 if v < 1000 else v)
+    else:
+        figures = [float(n.replace(",", "")) for n in _PLAIN_FIGURE.findall(salary)]
+    return min(figures) if figures else None
 
 
 def _salary_band(job: dict) -> str:
@@ -180,22 +247,18 @@ def _salary_band(job: dict) -> str:
     needs 3+ digits, so it saw no number at all in "$200-400/hr" and every hourly rate
     banded as if the hourly figure were the annual one.
     """
-    top = annual_salary(job)
-    if top is None:
-        salary = _s(job.get("salary"))
-        if not salary:
-            return ""
-        nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]{3,}", salary)]
-        if not nums:
-            return ""
-        top = max(nums)
-    if top < 50_000:
+    figure = annual_salary(job)
+    if figure is None:
+        figure = _first_figure(_s(job.get("salary")))
+    if figure is None:
+        return ""
+    if figure < 50_000:
         return "under-50k"
-    if top < 80_000:
+    if figure < 80_000:
         return "50-80k"
-    if top < 120_000:
+    if figure < 120_000:
         return "80-120k"
-    if top < 180_000:
+    if figure < 180_000:
         return "120-180k"
     return "180k-plus"
 

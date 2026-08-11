@@ -357,9 +357,16 @@ def title_score(
     THE MAX FORM IS THE WHOLE POINT, and it is measured. Swapping the root in regresses
     3,254 pairs, 3,202 of them 80 -> 0: `Software Engineer, Applied AI` scores 80 for
     someone wanting "AI Engineer" on the full title and 0 on the root, because the root
-    is where the qualifier went. Taking the max can only ever RAISE a tier, so it needs
-    no relevance judgment to be safe — over all 93,139 retrieved pairs it changes 10,452
-    with ZERO regressions.
+    is where the qualifier went. Taking the max can only ever RAISE a tier — over all
+    93,139 retrieved pairs it changes 10,452 with ZERO scores lowered.
+
+    THAT IS MONOTONE IN THE SCORE, NOT IN THE BOARD, and an earlier version of this
+    docstring claimed the stronger thing. Raising 10,452 pairs and lowering none still
+    demotes everything that did not rise, and `_rank` slices at RESULT_CAP: measured,
+    47 of 57 profiles reorder, 35 change their top-200 membership, and the worst case
+    delivers 176 of 200 different rows. The max form is safe in the sense that no
+    listing is scored lower than before — it is not a claim that the delivered board is
+    unchanged, and the harness has no relevance labels that could judge the difference.
 
     Both surfaces are folded in HERE rather than by max()-ing two calls, so the
     precedence rule survives untouched: a related title can never outrank a real one,

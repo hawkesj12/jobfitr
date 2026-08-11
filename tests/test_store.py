@@ -1233,3 +1233,67 @@ def test_the_two_body_caps_must_stay_equal():
     from jobfitr import snapshot
 
     assert store.BODY_CAP == snapshot.TEXT_CAP
+
+
+# ── the salary cluster (panel majors M2, M3, M4) ─────────────────────────────
+def test_k_notation_is_read_as_thousands():
+    """M2. The old fallback regex needed 3+ digit characters, so "$255k" contained no
+    number at all and the row banded `under-50k` — the best-paying jobs on the board in
+    the lowest drawer, hidden outright by any salary floor. 1,919 of 5,203 salary
+    strings in the capture write it this way."""
+    assert store._first_figure("$255k – $290k") == 255_000
+    assert store._salary_band({"salary": "$255k – $290k"}) == "180k-plus"
+    # the leading K is often implied: "$200-260K" is $200K-$260K, not $200-$260,000
+    assert store._first_figure("$200-260K") == 200_000
+    assert store._first_figure("$300 - $350K") == 300_000
+    # ...but a bare number already 1,000 or more is a full figure and stays one
+    assert store._first_figure("$150,000 - 200K") == 150_000
+
+
+def test_the_401k_shape_is_a_real_salary_in_this_field():
+    """The trap that would break a K rule in BODY text — "401k match" reading as
+    $401,000 — was measured against the real `salary` field before this was written:
+    the only two strings of that shape are "$401K – $445K", a genuine $401,000 salary.
+    The field is short and structured. This pins that scope: if someone reuses
+    `_first_figure` against a job body, this test is the reminder to re-measure."""
+    assert store._first_figure("$401K – $445K") == 401_000
+
+
+def test_the_band_and_the_slider_read_the_same_end_of_a_range():
+    """M3. `annual_salary` read `salary_min` while the fallback took `max(nums)`, so the
+    same job got a different band depending only on whether the engine had parsed it —
+    1,113 strings in the capture disagree. They must agree, and the MINIMUM is the end
+    that makes them agree correctly: the card's slider is a FLOOR filter, so the number
+    behind the chip has to be the floor too."""
+    assert store._first_figure("$171,000 – $256,400") == 171_000
+    assert store._salary_band({"salary": "$171,000 – $256,400"}) == "120-180k"
+    # a wide range is banded by what the job GUARANTEES, not what it might pay
+    assert store._salary_band({"salary": "$40,000 – $250,000"}) == "under-50k"
+
+
+def test_a_blank_period_still_yields_an_annual_figure():
+    """M4. 154 rows carried a clean parsed USD figure with no stated period and got
+    nothing. ANNUAL_FLOOR is just under a US full-time year at the federal minimum."""
+    usd = {"salary_currency": "USD", "salary_period": ""}
+    assert store.annual_salary({**usd, "salary_min": 148_000}) == 148_000
+    assert store.annual_salary({**usd, "salary_min": store.ANNUAL_FLOOR}) is not None
+    # below the floor it is not a yearly salary — the capture's one such row is "$33–$41"
+    assert store.annual_salary({**usd, "salary_min": 33}) is None
+    # a STATED period still wins over the default
+    assert store.annual_salary(
+        {"salary_currency": "USD", "salary_period": "hour", "salary_min": 93}
+    ) == 93 * 2080
+
+
+def test_the_engine_figure_beats_the_string_fallback():
+    """The fallback is a fallback. A row the engine parsed must not be re-read off its
+    display string, or the two rules could disagree on the same row."""
+    band = store._salary_band(
+        {
+            "salary": "$40,000",  # the string says one thing
+            "salary_min": 200_000,  # the engine says another, and the engine wins
+            "salary_currency": "USD",
+            "salary_period": "year",
+        }
+    )
+    assert band == "180k-plus"

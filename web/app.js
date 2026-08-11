@@ -292,7 +292,25 @@ function salaryMin(job) {
   // slider position. job-radar 0.7.0 parses the figure properly; the regex stays only
   // as the fallback for rows whose source stated a salary it could not parse.
   if (typeof job.salary_min === "number" && job.salary_min > 0) return job.salary_min;
-  const m = String(job.salary || "").match(/\d[\d,]*/);
+  // K-notation, or "$255k – $290k" reads as 255 and the job disappears under any slider
+  // position above it — which is where the best-paying listings on the board were
+  // going. 1,919 of 5,203 salary strings write it this way.
+  //
+  // `store._first_figure` is the source of truth for this rule; keep the two in step.
+  // Both take the range's MINIMUM (this regex matches the first number, which is the
+  // same thing) because the slider is a FLOOR filter — see that function's docstring.
+  const s = String(job.salary || "");
+  const k = s.match(/([\d,]+(?:\.\d+)?)\s*[kK]\b/);
+  if (k) {
+    const v = parseFloat(k[1].replace(/,/g, "")) * 1000;
+    // A bare number before the K is in thousands too: "$200-260K" is $200K-$260K.
+    const lead = s.slice(0, k.index).match(/([\d,]+)(?!.*[\d,])/);
+    const l = lead ? parseFloat(lead[1].replace(/,/g, "")) : NaN;
+    const leadVal = Number.isFinite(l) ? (l < 1000 ? l * 1000 : l) : NaN;
+    const best = Number.isFinite(leadVal) ? Math.min(leadVal, v) : v;
+    return Number.isFinite(best) && best > 0 ? best : null;
+  }
+  const m = s.match(/\d[\d,]*/);
   if (!m) return null;
   const n = parseInt(m[0].replace(/,/g, ""), 10);
   return Number.isFinite(n) && n > 0 ? n : null;
