@@ -77,6 +77,15 @@ def _prune_backups(db: Path, keep: int) -> list[Path]:
 # Deliberately NOT carried: `searches` (the per-(title,location) freshness clock — the
 # jobs it vouched for are gone, so a re-fetch is CORRECT), and the snapshot mtime, so
 # init() re-imports jobs.json instead of thinking it already has it.
+# The columns a 0.7.0 harvest fills on EVERY row, so a zero here means the snapshot
+# predates the engine rather than that the sources were thin. That distinction is the
+# whole job of the gate below: an earlier cut failed on ANY completely-empty column and
+# tripped on `salary_estimated_min/max` — Adzuna's model guesses, ~3% fill in a big
+# harvest and legitimately zero in a small one. A gate that cries wolf on a healthy
+# rebuild teaches you to pass --allow-empty-columns reflexively, which is worse than no
+# gate at all.
+_ALWAYS_FILLED = ("title_root", "direct_apply")
+
 _CARRY_TABLES = ("companies",)
 _CARRY_META_KEYS = ("live_fetch_usage",)
 
@@ -247,11 +256,19 @@ def main(argv=None) -> int:
     # snapshot was written by an older engine, so re-harvest before rebuilding.
     if empty:
         print(f"\n  ⚠ {len(empty)} column(s) completely empty: {', '.join(empty)}")
-        print("    Almost always: jobs.json was written by an OLDER job-radar. Re-run")
-        print("    the harvest from THIS slot's binary, then rebuild. Pass")
-        print("    --allow-empty-columns if the emptiness is genuinely expected.")
 
-    ok = fts == stored and stored > 0 and not (empty and not args.allow_empty_columns)
+    # Only the always-filled columns FAIL the rebuild. Everything else being empty is
+    # information, not an error — a thin harvest genuinely has no Adzuna salary
+    # estimates, and treating that as a failure would be a false alarm on a good build.
+    stale = [c for c in _ALWAYS_FILLED if c in empty]
+    if stale:
+        print(
+            f"\n  ✗ {', '.join(stale)} is empty — a 0.7.0 harvest fills it on EVERY row,"
+            "\n    so jobs.json was written by an OLDER job-radar. Re-run the harvest"
+            "\n    from THIS slot's binary, then rebuild. --allow-empty-columns overrides."
+        )
+
+    ok = fts == stored and stored > 0 and not (stale and not args.allow_empty_columns)
     print("\n  " + ("rebuild OK" if ok else "REBUILD FAILED ITS OWN CHECKS"))
     return 0 if ok else 1
 
