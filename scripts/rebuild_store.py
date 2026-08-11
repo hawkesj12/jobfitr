@@ -89,8 +89,24 @@ def _carry_forward(backup: Path, db: Path) -> dict[str, int]:
         for t in _CARRY_TABLES:
             if t not in have:
                 continue
-            n = c.execute(f"INSERT OR REPLACE INTO {t} SELECT * FROM old.{t}").rowcount
+            # NAME THE COLUMNS. `SELECT *` binds positionally, and this is the script
+            # that exists FOR schema changes — the one schema it could not survive a
+            # change to was the very table it is preserving. Taking the intersection of
+            # old and new also means a column added to `companies` does not break the
+            # carry-forward; it just arrives empty, which is correct for a new column.
+            new_cols = [r[1] for r in c.execute(f"PRAGMA table_info({t})")]
+            old_cols = {r[1] for r in c.execute(f"PRAGMA old.table_info({t})")}
+            shared = [col for col in new_cols if col in old_cols]
+            if not shared:
+                continue
+            cols = ",".join(f'"{col}"' for col in shared)
+            n = c.execute(
+                f"INSERT OR REPLACE INTO {t}({cols}) SELECT {cols} FROM old.{t}"
+            ).rowcount
             carried[t] = n
+            if len(shared) != len(new_cols):
+                missing = sorted(set(new_cols) - old_cols)
+                print(f"  note       {t}: {', '.join(missing)} not in the old schema")
         if "meta" in have:
             keys = ",".join("?" * len(_CARRY_META_KEYS))
             n = c.execute(
@@ -149,7 +165,9 @@ def main(argv=None) -> int:
     except (json.JSONDecodeError, OSError) as e:
         print(f"error: {jobs_json} is unreadable ({e})", file=sys.stderr)
         return 2
-    rows_in = len(snap.get("jobs", []) if isinstance(snap, dict) else snap)
+    # `sync_snapshot` only ever reads the dict form, so a bare list would pass this
+    # precheck and then import zero rows. Use the same rule it does.
+    rows_in = len(snap.get("jobs", [])) if isinstance(snap, dict) else 0
     if not rows_in:
         print(f"error: {jobs_json} holds no jobs", file=sys.stderr)
         return 2

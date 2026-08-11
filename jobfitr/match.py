@@ -126,7 +126,15 @@ def norm_key(value) -> str:
 # across a paragraph as a hit and inflate every downstream number.
 # Cached, because the same handful of terms is tested against tens of
 # thousands of listings per request.
+#
+# Cached on the RAW term, not just the normalised one. `_PATTERN_CACHE`
+# below is keyed on `norm_key(term)`, so the char-by-char normaliser ran
+# on every call just to find out the answer was already known — 45,904
+# times per request for five distinct terms. The lru_cache short-circuits
+# that; the inner dict stays because two raw spellings can normalise to
+# one key and should share the compiled pattern.
 # ═══════════════════════════════════════════════════════════════
+@lru_cache(maxsize=512)
 def term_pattern(term: str) -> re.Pattern[str] | None:
     key = norm_key(term)
     if not key:

@@ -1297,3 +1297,37 @@ def test_the_engine_figure_beats_the_string_fallback():
         }
     )
     assert band == "180k-plus"
+
+
+def test_bm25_ordering_is_the_boards_tie_break(db):
+    """`d["bm25"]`'s VALUE is read by nothing, and a handoff note once concluded from
+    that the whole thing was dead code. It is not: `server._rank` sorts by points with
+    Python's STABLE sort, so equal-scoring listings keep retrieval's order — and that is
+    `ORDER BY rank`. Ties are the normal case (23 of the top 50 for a one-word query),
+    and measured, shuffling candidate order moves 51-65 of the delivered top 200.
+
+    Asserted as the PROPERTY, not a fixed permutation: BM25 length-normalises, so which
+    document wins is its business. What must hold is that the rows come back in its
+    order, and that a stable sort therefore preserves it for tied scores."""
+    store.upsert_jobs(
+        [
+            _job("w1", "Data Analyst", "analyst " * 40),
+            _job("w2", "Data Analyst", "analyst " * 4),
+            _job("w3", "Data Analyst", "analyst"),
+        ],
+        path=db,
+    )
+    got = store.bm25_candidates(["data analyst"], path=db)
+    assert len(got) == 3
+    scores = [c["bm25"] for c in got]
+    # returned in BM25 order, best first — this is what the stable sort inherits
+    assert scores == sorted(scores, reverse=True), f"not in BM25 order: {scores}"
+    assert len(set(scores)) > 1, "the fixture produced no BM25 spread to order by"
+
+    # and the tie-break survives the scorer: three listings on the SAME points come out
+    # in the order retrieval gave them, not an arbitrary one.
+    from jobfitr.server import _rank
+
+    kept, _ = _rank(got, ["data analyst"], [], [], [], False, None, 10, [])
+    assert len({pts for _, pts, _, _ in kept}) == 1, "fixture should tie on points"
+    assert [c["url"] for c, _, _, _ in kept] == [c["url"] for c in got]

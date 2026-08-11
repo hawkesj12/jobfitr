@@ -112,8 +112,20 @@ DESC_CHARS = 1200
 # A scoreboard has neither problem. Nothing is earned except by evidence, and evidence
 # only ever adds — so naming another skill can never cost you.
 #
-# BM25 is deliberately absent. It is still what ORDERS the candidates coming out of FTS5;
-# it is no longer part of what a job is WORTH.
+# BM25 IS NOT PART OF THE SCORE — BUT IT IS THE TIE-BREAK, AND THAT IS SPEC, NOT TRIVIA.
+# It no longer contributes to what a job is WORTH. It still ORDERS the candidates coming
+# out of FTS5, and `_rank` finishes with a STABLE sort on points, so two listings on the
+# same score keep the order retrieval gave them — which is BM25 order.
+#
+# Ties are the normal case, not the edge: 23 of the top 50 for a one-word query land on
+# exactly the same number, and 56% of a typical board sits at the flat related-title 30.
+# Measured, shuffling the candidate order moves 51-65 of the delivered top 200.
+#
+# So a reader hand-computing a golden gets the NUMBER right and cannot predict the
+# ORDER, and `store.py`'s note that `d["bm25"]` is read by nothing is true of the VALUE
+# and misleading about the ORDERING. Deleting `ORDER BY rank` to save the sort is a
+# ranking change wearing an optimisation's clothes; if it ever goes, it has to be
+# replaced by an explicit deterministic tie-break, not by nothing.
 BOOST_DECAY = (8, 6, 4, 2)  # points for the 1st..4th occurrence of one term → 20 max
 # Penalties read the BODY as well as the title and company, weighted by where the tell
 # appears. An earlier version scored title+company only, on the measured grounds that
@@ -339,7 +351,7 @@ def _note_fetch() -> None:
 # client fixes every consumer at once and shrinks the payload.
 _SCRIPT_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _TAG_RE = re.compile(r"<[^>]+>")
-# A tag needs a closing '>' to match above, and the harvest caps body text at ~2000
+# A tag needs a closing '>' to match above, and the harvest caps body text at 8,000
 # chars — so a body cut mid-tag ends with an UNTERMINATED one that survived the strip
 # and rendered as literal markup on the card ('<a href="https://www.cnbc.com/2022/05').
 # Anchored at the end AND requiring a tag name right after the '<', so a real
@@ -372,7 +384,7 @@ def _description(text) -> str:
     """A fuller (but still capped) JD body for the expand-to-detail view.
 
     Still served from the cached snapshot — never a live fetch. The full untruncated
-    body is never returned; the harvest already caps text at ~2000 chars.
+    body is never returned; the harvest already caps text at 8,000 chars.
     """
     return _plain_text(text)[:DESC_CHARS]
 
@@ -433,6 +445,13 @@ def _norm_employment_type(value) -> str:
 # The gauge is explicitly "relative to your best match", so it is normalized ACROSS the
 # returned set rather than divided by the top score. The old ratio (score / top) died
 # whenever the top score was <= 0, which is the normal case for a common one-word query:
+def _apply_via(direct_apply) -> str:
+    """'employer' | 'aggregator' | '' — the third is "the source did not say"."""
+    if direct_apply is None:
+        return ""
+    return "employer" if direct_apply else "aggregator"
+
+
 def _shape(c: dict, points: int, why: str, parts: list) -> dict:
     """The lean per-card payload the front end renders (store row → card)."""
     body = c.get("body") or c.get("text") or ""
@@ -461,8 +480,14 @@ def _shape(c: dict, points: int, why: str, parts: list) -> dict:
         # facet. facet_counts skips falsy values — which is right for "the source said
         # nothing" but wrong for an integer 0 that means "we checked, it's an
         # aggregator". A word cannot be accidentally falsy.
-        "apply_via": "employer" if c.get("direct_apply") else "aggregator",
-        # An ANNUAL USD figure (see _annual_salary), not the raw column — the slider
+        #
+        # THREE states, not two. A NULL `direct_apply` means the source never said, and
+        # collapsing that to "aggregator" is exactly the unearned assertion the facet
+        # rule forbids — the same shape as the 12,623 rows that used to read "On-site"
+        # on no evidence. 0 rows are NULL today because live.py now crosses _coerce;
+        # this keeps that from silently re-arming if a source stops sending it.
+        "apply_via": _apply_via(c.get("direct_apply")),
+        # An ANNUAL USD figure (see store.annual_salary), not the raw column — the slider
         # compares these against each other and the raw values are in five currencies
         # and four periods. None means "we could not put this on the scale", and the
         # front end falls back to reading the display string.
@@ -867,7 +892,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
                 **c,
                 "category": c.get("category") or "",
                 "employment_type": _norm_employment_type(c.get("employment_type")),
-                "apply_via": "employer" if c.get("direct_apply") else "aggregator",
+                "apply_via": _apply_via(c.get("direct_apply")),
             }
             for c, _, _, _ in kept
         ]

@@ -12,7 +12,9 @@ their own dialect and nobody reconciled them.
 A drawer offering 487 "Field" options is not a filter. This module is where jobfitr decides
 what those values MEAN — which is an opinion, and therefore ours, not the engine's.
 
-WHY THESE CANONICAL SETS. `category` uses The Muse's 20-value taxonomy verbatim. Three reasons,
+WHY THESE CANONICAL SETS. `category` is The Muse's published 20-value taxonomy PLUS two
+additions of ours — Customer Service and Supply Chain, both of which several sources emit and
+neither of which The Muse names — so CATEGORIES holds 22. Three reasons for starting there,
 in order of weight: one of our sources already emits exactly it (1,958 rows need no mapping at
 all); it is deliberately not tech-centric, covering Animal Care, Food and Hospitality, Retail and
 Installation/Maintenance — the sectors this corpus is thin on; and adopting a published taxonomy
@@ -346,8 +348,11 @@ _STATE_NAMES = {
     "west virginia": "WV",
     "wisconsin": "WI",
     "wyoming": "WY",
-    # DC arrives punctuated three ways. 'washington dc' must be checked BEFORE the bare
-    # 'washington' -> WA above, which _clean's comma-stripping makes possible.
+    # DC arrives punctuated three ways. There is no ordering here to rely on — this is a
+    # dict, and lookup is exact. What makes it work is that us_state() strips ALL
+    # punctuation before the lookup, so 'Washington, D.C.' and 'Washington, DC' both
+    # normalise to the distinct key 'washington dc' and never collide with bare
+    # 'washington' -> WA.
     "district of columbia": "DC",
     "washington d c": "DC",
     "washington dc": "DC",

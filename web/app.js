@@ -24,8 +24,8 @@ const FACET_GROUPS = [
 // Work style is FOUR states in the store — remote | hybrid | onsite | null. Only the
 // first three ever reach here: a job whose posting never stated an arrangement carries
 // null, server.py drops falsy values from job.tags, and so it simply has no Work-style
-// chip and stays on the board unless the user narrows. That is deliberate — 54.6% of
-// the corpus is in that bucket, and the previous binary labelled every one of them
+// chip and stays on the board unless the user narrows. That is deliberate — 57.2% of
+// the stored pool is in that bucket, and the previous binary labelled every one of them
 // "On-site" on no evidence.
 const REMOTE_LABELS = { remote: "Remote", hybrid: "Hybrid", onsite: "On-site" };
 const REMOTE_TAGS = new Set(Object.keys(REMOTE_LABELS));
@@ -33,16 +33,25 @@ const REMOTE_TAGS = new Set(Object.keys(REMOTE_LABELS));
 // value to its drawer, so a level missing here silently lands under Salary.
 const SENIORITY_TAGS = new Set(["intern", "entry", "mid", "senior", "staff", "lead", "director", "executive"]);
 
+// One map, two uses — the labels AND the membership test in tagGroup(). Keeping them
+// as separate literals is how the seniority set drifted from vocab.SENIORITY_LEVELS.
+const BAND_LABELS = { "under-50k": "< $50k", "50-80k": "$50–80k", "80-120k": "$80–120k", "120-180k": "$120–180k", "180k-plus": "$180k+" };
+const SALARY_BANDS = new Set(Object.keys(BAND_LABELS));
+
 function labelBand(v) {
-  return (
-    { "under-50k": "< $50k", "50-80k": "$50–80k", "80-120k": "$80–120k", "120-180k": "$120–180k", "180k-plus": "$180k+" }[v] || v
-  );
+  return BAND_LABELS[v] || v;
 }
 // Which facet group a derived job.tags value belongs to.
+// Returns null for anything it does not recognise, and the caller DROPS it. This used
+// to fall through to "salary_band", so a level added to vocab.SENIORITY_LEVELS without
+// touching SENIORITY_TAGS above landed silently in the Salary drawer wearing a
+// labelBand() label. Losing a chip is a visible, harmless miss; corrupting a drawer is
+// neither.
 function tagGroup(tag) {
   if (REMOTE_TAGS.has(tag)) return "remote";
   if (SENIORITY_TAGS.has(tag)) return "seniority";
-  return "salary_band";
+  if (SALARY_BANDS.has(tag)) return "salary_band";
+  return null;
 }
 
 const $ = (s, r = document) => r.querySelector(s);

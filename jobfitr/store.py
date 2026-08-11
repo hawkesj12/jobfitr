@@ -281,8 +281,11 @@ def _remote(
     "unspecified" and stays on the board — a job that didn't state its arrangement is
     not a job you want hidden from someone who might take it either way.
 
-    Reconciled over the capture: 54.6% NULL · 29.8% remote · 8.4% hybrid · 7.2% onsite,
-    replacing a flat 64.1% onsite / 35.9% remote that was 3/4 guess.
+    Reconciled over the capture: 55.0% NULL · 29.4% remote · 8.4% hybrid · 7.2% onsite,
+    replacing a flat 64.1% onsite / 35.9% remote that was 3/4 guess. Those are the
+    numbers BEFORE the US/USD intake filter, which is the layer this function feeds; what
+    the store actually ends up holding is 57.2 / 32.0 / 7.0 / 3.7, because a foreign
+    posting is likelier to be onsite than an American one.
     """
     stated = _s(job.get("remote_type")).lower()
     if stated in REMOTE_STATES:
@@ -436,6 +439,12 @@ def normalize_job(job: dict) -> dict:
 # nightly harvest and live search together. Deriving the list makes that class of
 # drift impossible instead of merely tested. `url` is the PRIMARY KEY, so it is
 # inserted but never in the update set.
+#
+# THE ONE WAY TO BREAK THIS: make a key CONDITIONAL. `normalize_job` must return the
+# same key set for every input — it returns one dict literal, which is what makes
+# `normalize_job({})` a schema declaration. An `if x: d["foo"] = …` would shrink the
+# derived list for that row's shape and the column would quietly stop being written,
+# with no error anywhere.
 _ROW_COLUMNS: tuple[str, ...] = tuple(normalize_job({}))
 _UPDATE_COLUMNS: tuple[str, ...] = tuple(c for c in _ROW_COLUMNS if c != "url")
 
@@ -1132,6 +1141,9 @@ def bm25_candidates(
     q = _fts_query(titles)
     if not q:
         return []
+    # `ORDER BY rank` is LOAD-BEARING even though nothing reads the bm25 VALUE:
+    # server._rank's sort is stable, so this ordering survives as the tie-break for
+    # equal-scoring listings. See the spec note above server.scoreboard.
     sql = """SELECT j.*, bm25(jobs_fts, 8.0, 2.0, 1.0) AS rank
              FROM jobs_fts JOIN jobs j ON j.rowid = jobs_fts.rowid
              WHERE jobs_fts MATCH ?

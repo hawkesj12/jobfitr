@@ -101,10 +101,13 @@ points = title tier + Σ boost points − penalties
 | **Penalties** | **−30** when an avoid-term is in the title or the employer's name, **−15** when it is buried in the body. Strongest hit only.                                                                                                                                                                                                                                                                                                                  |
 | **Freshness** | not scored. A three-day-old wrong job is not a better fit than a month-old perfect one — recency is a filter.                                                                                                                                                                                                                                                                                                                                  |
 
-Two properties this design guarantees, and both are tested over every listing in the corpus:
+Three properties this design guarantees, and all three are tested over every listing in the corpus:
 
+- **The number means the same thing every day.** 92 is 92 whether it's alone on the board or one of fifty, and whether you search today or next month. Only the card's *bar* is relative — it's a fraction of the best match in front of you.
 - **Naming another skill can never lower your score.** Evidence only ever adds.
 - **The chips on the card sum to the number beside them.** A breakdown that doesn't reconcile is worse than showing none, because it invites you to trust a wrong explanation.
+
+Two listings on the same score are shown in retrieval order — how well the search engine matched them — which is why a board can have a run of identical numbers in a deliberate sequence rather than an arbitrary one.
 
 Matching is **whole-word, plus a plural** — not substring. Boosting "rag" matches _RAG_, not _storage_, _leverage_, or _coverage_. Multi-word terms match as a phrase, and accept the hyphen English writes half the time ("forward deployed" finds "forward-deployed").
 
