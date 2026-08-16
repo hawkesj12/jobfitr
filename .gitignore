@@ -24,6 +24,9 @@ jobs.db
 # suffix is a timestamp, so `*.db` does NOT cover it — and each one is a full copy
 # of the pool, in a public repo.
 *.db.bak-*
+# ...and ANY other suffixed copy.  (a 150 MB pre-migration
+# backup) matched none of the patterns above and was one  from the repo.
+*.db.*
 shortlist.csv
 
 # Agent working notes. CLAUDE.md records the box's IP, the deploy topology, and where

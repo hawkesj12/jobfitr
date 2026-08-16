@@ -130,7 +130,35 @@ def servable_in_us(job: dict) -> bool:
     if currency and currency != "USD":
         return False
     country = _s(job.get("country")).upper()
-    return country in ("", "US")  # unknown passes; only KNOWN-foreign is dropped
+    if country not in ("", "US"):
+        return False
+
+    # ── the blank-country half, which is where the leak lived ────────────────
+    # 14,616 of 31,790 rows arrive with NO country, so "we don't know" and "this is
+    # fine" were the same answer and ~5,600 foreign jobs reached a board the README
+    # calls US-only. On a real remote user's 200 cards that was 20-27%; on the owner's
+    # own live search, 11 of the top 20.
+    #
+    # TWO SIGNALS, STRUCTURED FIRST. `remote_areas` is job-radar 0.8.x's parse of the
+    # boundary the posting actually STATED — an ISO alpha-2 list, or `US-TX`. Measured
+    # on the corpus it identifies 3,398 rows kept today whose stated boundary is
+    # entirely non-US, against 188 for the currency test above: 18x the reach, from the
+    # engine rather than a regex, with no false-positive class of its own.
+    #
+    # An EMPTY list is not "no answer" — it is the posting saying "anywhere, worldwide",
+    # which a US worker can take. Only a non-empty list naming no US entry is foreign.
+    areas = job.get("remote_areas")
+    if isinstance(areas, (list, tuple)) and len(areas) > 0:
+        if not any(str(a).upper() == "US" or str(a).upper().startswith("US-") for a in areas):
+            return False
+        return True  # a stated US boundary is the best evidence there is
+
+    # FALLBACK: read the location text. The engine refuses to guess here and is right to
+    # ("a None here costs a filter; a wrong city is a permanently wrong row"), but its
+    # curated 60-name country map cannot see Uruguay, Armenia, Slovakia or a bare foreign
+    # city, and that is 2,343 rows the structured field misses. jobfitr owns the US-only
+    # opinion, so jobfitr reads the text.
+    return vocab.place_evidence(job.get("location")) != "foreign"
 
 
 # ── tag derivation (rule-based only — no LLM, no fabrication) ──────────────────
@@ -309,6 +337,29 @@ def _s(v) -> str:
     return str(v)
 
 
+def _json_or_null(v) -> str | None:
+    """JSON-encode a scope column, preserving the difference between NULL and '[]'.
+
+    `_json` below deliberately collapses an empty list to NULL, which is right for the
+    four container columns it serves — an empty `tags` and an absent `tags` mean the same
+    thing there. It is WRONG for the remote-scope columns, where job-radar 0.8.0 made the
+    distinction load-bearing:
+
+        None -> the posting said nothing about where you may sit
+        []   -> the posting STATED it is open anywhere, worldwide
+
+    `[]` satisfies every scope filter and NULL satisfies none, so collapsing them either
+    hides the most permissive postings in the feed or admits bounded ones into a filter
+    meant to exclude them. Upstream measured that a third of one live feed states
+    worldwide with an empty array.
+    """
+    if v is None:
+        return None
+    if not isinstance(v, (list, tuple, dict)):
+        return None
+    return json.dumps(list(v) if isinstance(v, tuple) else v, separators=(",", ":"))
+
+
 def _json(v) -> str | None:
     """JSON-encode a container column, or NULL. Empty is NULL, never the string "null".
 
@@ -410,7 +461,22 @@ def normalize_job(job: dict) -> dict:
         "state": vocab.us_state(job.get("state")),
         "country": _s(job.get("country")),
         "locations": _json(job.get("locations")),
-        "remote_region": _s(job.get("remote_region")),
+        # THREE FIELDS, EACH MEANING ONE THING — they replaced `remote_region`, which
+        # held ISO country codes, ISO subdivisions, business regions and sentinels in one
+        # column at once; measured upstream, 1,162 of 1,168 adapter-written values (99.5%)
+        # fell outside the vocabulary its own docstring claimed.
+        #
+        # NULL AND '[]' ARE DIFFERENT ANSWERS and the column must preserve that:
+        #   NULL -> the posting said nothing about where you may sit
+        #   '[]' -> the posting STATED it is open anywhere (worldwide)
+        # `[]` satisfies every scope filter; NULL does not. Collapsing them either drops
+        # the most permissive postings in the feed or admits bounded ones into a filter
+        # meant to exclude them — the same unearned assertion the facet rules exist to
+        # stop. `_json_or_null` is what keeps them apart; plain `_json` would write '[]'
+        # for both.
+        "remote_areas": _json_or_null(job.get("remote_areas")),
+        "remote_regions": _json_or_null(job.get("remote_regions")),
+        "remote_scope_raw": _s(job.get("remote_scope_raw")),
         "tags": _json(job.get("tags")),
         "employment_type": _s(job.get("employment_type")),
         "employment_type_raw": _s(job.get("employment_type_raw")),
@@ -501,8 +567,14 @@ CREATE TABLE IF NOT EXISTS jobs(
   city TEXT, state TEXT, country TEXT,   -- indexed below; `state` is US-only by construction
   locations TEXT,          -- JSON array. 9.4% of rows carry more than one location.
   remote TEXT,             -- jobfitr's decided state. Still binary in v2; four states land in step 2.
-  remote_basis TEXT,       -- 'stated' | 'board' | 'location' | 'text' | 'derived' | NULL
-  remote_region TEXT,      -- where a remote worker may sit
+  -- 'stated' | 'board' | 'location' | 'title' | 'text' | the engine's closed set, plus
+  -- jobfitr's own 'derived' (see _remote) | NULL. `title` arrived with job-radar 0.8.0
+  -- and this comment did not, which is the whole reason a closed vocabulary is written
+  -- down: 462 rows carry it, from the adapters that send no structured remote field.
+  remote_basis TEXT,
+  remote_areas TEXT,       -- JSON list of ISO alpha-2 / US-XX. NULL = unstated, '[]' = worldwide
+  remote_regions TEXT,     -- JSON list from a closed token set (EMEA, APAC, ...). NEVER a country
+  remote_scope_raw TEXT,   -- the vendor's own words, verbatim
   body TEXT,
 
   -- the job ────────────────────────────────────────────────────────
@@ -607,7 +679,7 @@ CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status, checked_at)
 """
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _SCHEMA_VERSION_KEY = "schema_version"
 
 

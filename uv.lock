@@ -233,16 +233,16 @@ wheels = [
 
 [[package]]
 name = "job-radar"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyyaml" },
     { name = "rapidfuzz" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/38/8cd05d5ca0140f80562f82b46af6ebb19e93888053802359a9e3fcf24889/job_radar-0.7.0.tar.gz", hash = "sha256:ef7f3002c697b8d5c1d1390a9cdca7b3b3e53e38a31336b57c023f895b252493", size = 231016, upload-time = "2026-08-09T23:46:25.341Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/3b/c7f93e5fe54f7e675ca87e6d0f69e0baef0d826a6488803eedb80a9681c9/job_radar-0.8.2.tar.gz", hash = "sha256:d3bf25f064d76f4fb7d8922d4196a21b20bbe8bb36eb2659fad8eaaa70c2b668", size = 300217, upload-time = "2026-08-15T12:25:14.538Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/45/199947336f73401dc63782d28fb811d92aed02722ee70116b10672efc6e9/job_radar-0.7.0-py3-none-any.whl", hash = "sha256:b006a05f291ff4d0767f6ba14911ce78560c1e74d3c237e76737a42d195fb114", size = 153932, upload-time = "2026-08-09T23:46:23.967Z" },
+    { url = "https://files.pythonhosted.org/packages/98/f7/4110623c42cb2905514af10e12876393087331c0516835fc07b7ff5cf22d/job_radar-0.8.2-py3-none-any.whl", hash = "sha256:97f865fdd8d6181676f3e66622d58b3b3c3822fc4ca908cb9f71edaf7ed0274e", size = 188308, upload-time = "2026-08-15T12:25:12.857Z" },
 ]
 
 [[package]]
@@ -276,7 +276,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'web'", specifier = ">=0.27" },
-    { name = "job-radar", specifier = ">=0.6,<0.8" },
+    { name = "job-radar", specifier = ">=0.8,<0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "slowapi", marker = "extra == 'web'", specifier = ">=0.1.9" },

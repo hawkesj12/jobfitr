@@ -31,6 +31,9 @@ anyone mapping on the word "engineering".
 from __future__ import annotations
 
 import html
+import re
+import unicodedata
+from functools import lru_cache
 
 # ── category ─────────────────────────────────────────────────────────────────
 # The Muse's published taxonomy, verbatim. Do not extend casually: every value added
@@ -381,3 +384,323 @@ def us_state(raw) -> str | None:
     if up in US_STATES:
         return up
     return _STATE_NAMES.get(s)
+
+
+# ── reading a place out of free-text location ────────────────────────────────
+# `servable_in_us` could only ever test the `country` COLUMN, and 14,616 of 31,790 rows
+# arrive with it blank — so "we don't know" and "this is fine" were the same answer, and
+# ~5,800 foreign jobs reached a board the README calls US-only. On a real remote user's
+# 200 cards that is 20-27%; on the owner's own live search, 11 of the top 20.
+#
+# The engine is not at fault and must not be changed: job_radar's `split_place()` returns
+# all-None for a comma-less string and refuses a two-letter tail, deliberately — "a None
+# here costs a filter; a wrong city is a permanently wrong row". It says "I don't know".
+# Reading the raw text is jobfitr's job, because US-only is jobfitr's opinion.
+#
+# COMPOSITION of those 14,616, measured on frozen-8k.db with the engine's own 60 curated
+# country names — no list invented here:
+#
+#     3,516  name a FOREIGN country only              -> foreign
+#     2,564  name the US only                         -> US, and that is affirmative
+#       157  name BOTH ("United States or Canada")    -> US WINS, keep
+#     8,379  name no country at all
+#              ...of which 2,435 name a foreign CITY
+#
+# TWO TRAPS, both found by running code rather than reading it:
+#
+#   1. A BARE TWO-LETTER CODE IS NOT EVIDENCE. Seven of the engine's country codes are
+#      also USPS state codes: AR CA CO DE ID IL IN. A prototype "rescued" `Berlin, DE;
+#      Hamburg, DE; Munich, DE` as American because DE is Delaware. Codes are read ONLY
+#      through us_state(), never as country evidence.
+#
+#   2. SUBSTRING MATCHING ON COUNTRY NAMES IS WORSE. That same prototype built its US
+#      token set by splitting "united states", so the bare token `united` matched
+#      `United Kingdom` — 488 rows silently kept. Every name here is matched WHOLE-WORD
+#      and longest-first.
+#
+# US-AFFIRMATIVE WINS. Measured: of 2,435 rows naming a foreign city, 110 also carry a US
+# signal, and all 110 are correct keeps — `Cambridge, MA USA` x47, `Manchester, NH`,
+# `Vienna, Virginia`, `Hybrid - San Francisco, New York City, London, Berlin`. The
+# Dublin-CA / Berlin-CT / Toronto-OH collision fear is fully absorbed by that precedence
+# rule; it is not a separate risk the city list introduces.
+_LOC_SCAN_CHARS = 120
+# `location` is not always a location: 1,027 rows exceed 60 chars, 394 exceed 100, and the
+# longest is 2,158 — greenhouse and HN rows where the whole job body landed in the field
+# (one is a 900-word pitch). A bag-of-words scan over that matches any place mentioned in
+# passing, so the scan is bounded to the head, where a real location lives.
+
+
+@lru_cache(maxsize=2048)
+def _loc_tokens(text: str) -> str:
+    """Lowercased, accent-folded, punctuation-flattened, bounded head of a location.
+
+    ACCENTS ARE FOLDED because the vocabularies below are ASCII and the sources are not:
+    `Türkiye, Remote` read as unknown until this existed, since `ü` is alnum and survived
+    the punctuation pass while `turkiye` is what the list holds. Same class as `Bogotá`,
+    `São Paulo`, `Zürich`, `Malmö` — NFKD splits the accent into a combining mark and the
+    category test drops it, leaving the ASCII letter behind.
+    """
+    head = unicodedata.normalize("NFKD", (text or "")[:_LOC_SCAN_CHARS])
+    head = "".join(ch for ch in head if not unicodedata.combining(ch))
+    return (
+        " "
+        + " ".join("".join(ch if ch.isalnum() else " " for ch in head).lower().split())
+        + " "
+    )
+
+
+# Country NAMES come from the ENGINE'S OWN curated map, not a list invented here — 60
+# entries, maintained upstream by the same people who maintain `split_place`, so it does
+# not rot on jobfitr's side. Longest-first so "united states" is tested before "united
+# kingdom" can be reached by a shorter alternative.
+def _country_names():
+    from job_radar.vocab import _COUNTRY_CODES
+
+    return sorted(_COUNTRY_CODES.items(), key=lambda kv: -len(kv[0]))
+
+
+# Foreign CITIES are the one list jobfitr owns, and it is deliberately separate from the
+# country lane so it can be reverted on its own. It covers 2,435 rows the country names
+# miss (London 213, Madrid 130, Amsterdam 51, Munich 49, Dublin 44, Bangalore 40).
+#
+# A list like this rots — but it rots SAFELY, and that direction matters. The comparable
+# regex in _private/before-after/rank_test.py needed three patches in one day, every one
+# of them because it MISSED a place (Utrecht, then LatAm, then Costa Rica). Missing is a
+# recall failure, and a recall failure here is the status quo: a foreign job leaks
+# through. It does not drift toward deleting American jobs.
+_FOREIGN_CITIES = frozenset("""
+london madrid amsterdam munich dublin bangalore bengaluru warsaw toronto vancouver
+montreal ottawa calgary edmonton winnipeg quebec mississauga
+paris lyon marseille berlin hamburg frankfurt cologne stuttgart dusseldorf
+barcelona valencia seville lisbon porto milan rome turin naples florence
+vienna zurich geneva bern brussels antwerp rotterdam utrecht eindhoven hague
+copenhagen stockholm gothenburg oslo helsinki reykjavik
+prague brno budapest bucharest sofia zagreb ljubljana bratislava krakow wroclaw gdansk
+athens istanbul ankara kyiv kiev lviv minsk moscow petersburg
+dubai doha riyadh jeddah kuwait manama muscat
+jerusalem haifa cairo casablanca nairobi lagos accra johannesburg
+durban pretoria
+mumbai delhi hyderabad chennai kolkata pune gurugram gurgaon noida ahmedabad
+kochi jaipur chandigarh mohali
+singapore bangkok jakarta manila hanoi
+tokyo osaka kyoto yokohama seoul busan taipei
+beijing shanghai shenzhen guangzhou macau
+sydney melbourne brisbane perth adelaide canberra auckland wellington christchurch
+rio brasilia curitiba recife
+santiago bogota medellin lima quito caracas montevideo asuncion
+guadalajara monterrey queretaro
+""".split())
+
+
+# ═══════════════════════════════════════════════════════════════
+# place_evidence()
+# ═══════════════════════════════════════════════════════════════
+# What a raw location STRING says about whether a job is American:
+# "us" | "foreign" | None (it said nothing either way).
+#
+# US wins outright — a posting listing "United States or Canada"
+# is one a US worker can take, and 110 of 110 measured rows where
+# a US signal sits beside a foreign city are correct keeps.
+# ═══════════════════════════════════════════════════════════════
+_AMBIGUOUS_CODES = frozenset("AR CA CO DE ID IL IN".split())
+
+
+def _comma_segments(text) -> list[str]:
+    """The comma/semicolon/slash-delimited pieces of a location, accent-folded.
+
+    A US state arrives as the tail of `City, ST` — never as a loose word in a sentence.
+    Reading segments instead of tokens is what stops the English word `or` from being
+    Oregon, and it costs nothing: `Austin, TX` still yields `tx`.
+    """
+    t = _loc_tokens(text)  # folded + lowercased, but commas are gone by then
+    raw = unicodedata.normalize("NFKD", str(text or "")[:_LOC_SCAN_CHARS])
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    out = []
+    for part in re.split(r"[,;/|]|\s+-\s+", raw):
+        part = " ".join(
+            "".join(ch if ch.isalnum() else " " for ch in part).lower().split()
+        )
+        if part:
+            out.append(part)
+    del t
+    return out
+
+# The countries the ENGINE'S map does not carry. job_radar's `_COUNTRY_CODES` is a
+# curated 60 (62 in 0.8.2, which adds only bulgaria and dominican republic) — deliberately
+# the ones its sources actually send, not all ~195. Measured, the gap is real and it is
+# not closed by upgrading: a random 30 of the rows this detector called "unknown" held
+# Slovenia, Slovakia, Albania, Bulgaria and Türkiye, all foreign, all invisible to the
+# engine's list. Completing it here catches 381 rows.
+#
+# A country list is CLOSED-WORLD and barely moves — a new country appears roughly once a
+# decade. That is a completely different rot profile from the city list below, and the
+# reason this one is safe to own.
+_MORE_COUNTRIES = frozenset("""
+afghanistan albania algeria andorra angola armenia azerbaijan bahrain bangladesh belarus
+belize benin bhutan bolivia bosnia botswana brunei burundi cambodia cameroon chad congo
+croatia cuba cyprus czechia estonia ethiopia fiji gabon gambia ghana guatemala guinea
+guyana haiti honduras iceland iran iraq jamaica jordan kazakhstan kenya kosovo kuwait
+kyrgyzstan laos latvia lebanon liberia libya liechtenstein lithuania luxembourg
+madagascar malawi maldives mali malta mauritius moldova monaco mongolia montenegro
+morocco mozambique myanmar namibia nepal nicaragua niger oman panama papua paraguay
+qatar rwanda senegal serbia seychelles slovakia slovenia somalia sudan suriname syria
+tajikistan tanzania togo trinidad tunisia turkmenistan turkiye uganda ukraine uruguay
+uzbekistan venezuela yemen zambia zimbabwe
+""".split())
+_MORE_COUNTRY_PHRASES = (
+    "costa rica", "ivory coast", "north macedonia", "sri lanka", "sierra leone",
+)
+
+# MULTI-WORD CITIES, as phrases. These were first written concatenated
+# (`kualalumpur`, `buenosaires`, `telaviv`) into the token set above, where they could
+# NEVER match: the tokenizer splits on whitespace, so the text yields `kuala` and
+# `lumpur` and the joined form is unreachable. Nine entries were dead on arrival, and
+# they were most of what still leaked — `Kuala Lumpur` x37, `Buenos Aires` x28,
+# `Tel Aviv` x16. A silent no-op, found by measuring what the filter still let through
+# rather than by reading the list.
+_FOREIGN_CITY_PHRASES = (
+    "kuala lumpur", "buenos aires", "tel aviv", "ho chi minh", "sao paulo",
+    "cape town", "abu dhabi", "new delhi", "st petersburg", "rio de janeiro",
+    "mexico city", "hong kong", "san jose costa rica", "port of spain",
+)
+
+# MULTI-COUNTRY REGIONS. A posting bounded to one of these is not a US job, and 232 rows
+# say so plainly: `LatAm (Remote)` x34, `Latin America` x35, `Remote - Europe` x15.
+# job-radar 0.8.1 reached the same conclusion independently and added asia/africa/oceania
+# to its own default exclusions.
+# `european union` is listed SEPARATELY from `europe` and that is not redundancy: the
+# match is whole-word, and the token in `European Union (Remote)` is `european`, which
+# `europe` never equals. 37 EU-bounded rows were being served on a US-only board — an
+# ACTIVE leak, not a latent one, and invisible because the row simply looked unresolved.
+_FOREIGN_REGIONS = (
+    "europe", "european union", "european economic area", "eea",
+    "latin america", "latam", "emea", "apac", "apj", "middle east",
+    "caribbean", "nordics", "benelux", "asia pacific", "sub saharan",
+)
+
+
+def place_evidence(location) -> str | None:
+    t = _loc_tokens(location)
+    if not t.strip():
+        return None
+
+    # ── US evidence, graded, because not all of it is equally good ───────────
+    # STRONG: the country spelled out, or a subdivision that is unambiguously American.
+    # Matched whole-word — the bare token `united` matches "United Kingdom", which is how
+    # a prototype kept 488 British rows as American.
+    # `U.S.` flattens to the two tokens `u s`, and the test never looked for that form —
+    # `Remote, U.S.` read as no evidence at all on 127 rows. Latent today because unknown
+    # passes, but it is the prerequisite for ever inverting that default.
+    strong_us = (
+        " united states " in t
+        or " usa " in t
+        or " u s a " in t
+        or " us " in t
+        or " u s " in t
+    )
+    if not strong_us:
+        # A two-letter code counts ONLY where a state actually appears — after a comma,
+        # in `City, ST` form. Scanning every token instead read the English words that
+        # collide with USPS codes as geography: `or` is Oregon, so `Italy or France or
+        # Germany` was AMERICAN, and 130 rows in the corpus were kept on exactly that.
+        # `in` `me` `hi` `ok` `de` `la` `co` `id` `ma` `pa` `oh` are all the same shape.
+        # This is trap #1 in the comment block above, re-entered from the other side.
+        # The FIRST TOKEN of a segment, not the whole segment. `Lima, OH (Onsite Yard)`
+        # yields the segment `oh onsite yard`, and requiring an exact match meant OHIO was
+        # never seen — the row was dropped as Lima, Peru. Same for `Naples, FL (10106)`
+        # and `810 Olympic Dr., Athens, GA 30601`.
+        #
+        # AND THIS IS STRONG, not weak, even for the seven codes that are also country
+        # codes. `<name>, <US state code>` is American address FORMATTING, and the
+        # structure is the evidence — `Lebanon, IN` is Indiana whatever Lebanon is
+        # elsewhere. Treating it as weak let the country name win and dropped real US
+        # jobs in Lebanon IN, Panama City FL, Athens GA and Jordan Creek IA.
+        #
+        # Residue, accepted and measured: `Berlin, DE; Hamburg, DE` reads American on the
+        # same rule, because DE is Delaware. One row shape, no country name to break the
+        # tie, and unresolvable from the string alone.
+        for seg in _comma_segments(location):
+            # BOTH forms, because each catches what the other misses. The WHOLE segment
+            # is how a spelled-out state arrives (`Los Alamos, New Mexico` -> `new
+            # mexico`), and a first-token-only test fails it because `us_state('new')` is
+            # nothing. The FIRST TOKEN is how a code arrives with trailing noise (`Lima,
+            # OH (Onsite Yard)` -> `oh onsite yard`), which a whole-segment test fails.
+            #
+            # `New Mexico` is also why the country lane cannot be trusted alone here:
+            # the substring ` mexico ` sits inside ` new mexico `, so 15 Los Alamos and
+            # Albuquerque rows were being dropped as Mexican.
+            toks = seg.split()
+            # `Olathe KS`, `Atlanta GA`, `Denver CO` — a state code as the LAST token of a
+            # segment with no comma before it. 279 rows carried no US evidence at all.
+            # Safe because it is the tail: an English word that is also a code (`or`,
+            # `in`, `me`) does not end a location string, and the uppercase guard below
+            # applies here too.
+            if (
+                len(toks) > 1
+                and len(toks[-1]) == 2
+                and us_state(toks[-1])
+                and re.search(rf"\b{toks[-1].upper()}\b", str(location or ""))
+            ):
+                strong_us = True
+                break
+            # A BARE TWO-LETTER CODE MUST BE UPPERCASE IN THE RAW STRING. The first-token
+            # rule above re-armed the `or`-is-Oregon trap from the other direction:
+            # `Paris, or Lyon` segments to `or lyon`, whose first token is `or`. Measured,
+            # comma-tail two-letter codes in the corpus run 12,505 uppercase against 170
+            # lowercase, and the lowercase ones are overwhelmingly the conjunction. Case
+            # is the cheap discriminator, and it still keeps
+            # `San Francisco, CA, New York, NY, Portland, OR, or Remote` — which carries
+            # both spellings and is American.
+            head = toks[0] if toks else ""
+            code_ok = (
+                len(head) == 2
+                and us_state(head)
+                and re.search(rf"\b{head.upper()}\b", str(location or ""))
+            )
+            if us_state(seg) or code_ok or (len(head) > 2 and us_state(head)):
+                # WEAK when the token is one of the seven USPS codes that are also
+                # country codes (AR CA CO DE ID IL IN) — `DE` is Delaware and Germany,
+                # and the string alone cannot always say which.
+                strong_us = True
+                break
+    if strong_us:
+        return "us"
+
+    # MULTI-WORD STATE NAMES as a substring, because they arrive embedded rather than as
+    # a clean segment: `New Mexico-Remote`, `Chicago, Montreal, New York City`,
+    # `South Jordan Utah`. The 12 entries in _STATE_NAMES carrying a space are never
+    # English filler the way a bare code is, so a substring test is safe here where it
+    # would be reckless there. Measured on the corpus: rescues 8 rows, drops 0.
+    if not strong_us and any(
+        f" {name} " in t for name in _STATE_NAMES if " " in name
+    ):
+        strong_us = True
+    if strong_us:
+        return "us"
+
+    # ── foreign evidence, also graded ────────────────────────────────────────
+    toks = set(t.split())
+    named_country = (
+        any(code != "US" and f" {name} " in t for name, code in _country_names())
+        or bool(toks & _MORE_COUNTRIES)
+        or any(f" {ph} " in t for ph in _MORE_COUNTRY_PHRASES)
+        or any(f" {rg} " in t for rg in _FOREIGN_REGIONS)
+    )
+    named_city = any(tok in _FOREIGN_CITIES for tok in t.split()) or any(
+        f" {ph} " in t for ph in _FOREIGN_CITY_PHRASES
+    )
+
+    # A spelled-out foreign COUNTRY outranks a weak two-letter code: measured, 42 rows
+    # pair the two and they read `Anywhere in France, Belgium, Spain` (x10) and `Berlin
+    # Office; Munich Office; Remotely in Germany` (x5). A foreign CITY deliberately does
+    # NOT outrank it — that is precisely `Dublin, CA` and `Berlin, CT`, which are American.
+    # `weak_us` used to sit between these two, holding the case where the only US signal
+    # was one of the seven codes that are also country codes. It is gone: a `City, ST`
+    # tail is now STRONG evidence on its own, because the FORMATTING is the signal —
+    # `Lebanon, IN` is Indiana whatever Lebanon is elsewhere. Grading it weak let the
+    # country name win and dropped real US jobs.
+    if named_country:
+        return "foreign"
+    if named_city:
+        return "foreign"
+    return None

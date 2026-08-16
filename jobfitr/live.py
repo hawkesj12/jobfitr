@@ -22,7 +22,7 @@ import os
 import threading
 
 from job_radar import config as jr_config
-from job_radar.engine import _coerce
+from job_radar.engine import _coerce, derive_remote
 from job_radar import sources
 
 from . import store
@@ -223,7 +223,20 @@ def _fetch_all(cfg, titles: list[str]) -> list[dict]:
                 report[name] = {"n": 0, "why": f"error:{type(e).__name__}"}
                 continue
     _LAST_REPORT.update(report)
-    return [_coerce(r) for r in rows]
+    # `derive_remote` IS THE SECOND HALF OF THE BOUNDARY, and forgetting it repeats the
+    # bug this function's docstring already describes. job-radar 0.8.0 moved remote
+    # derivation OUT of `_coerce` into a separate pass that the harvest calls from
+    # `engine._consume` — the machinery this module deliberately skips. Measured on
+    # 0.8.2, a live row for `Remote - US` came back remote_type=None / basis=None /
+    # areas=None where the harvest gives remote / location / ['US'], so the SAME URL got
+    # a different answer depending on which lane found it, and the live lane is the one
+    # serving a user's own search. Worse, a None remote_type sends store._remote() to its
+    # `remote_posting` fallback, which writes basis='derived' — jobfitr inventing a value
+    # for a field the engine would have answered properly.
+    #
+    # It scans the body, which is why the engine defers it past a relevance gate the live
+    # path does not have: this runs on every fetched row, a few hundred per search.
+    return [derive_remote(_coerce(r)) for r in rows]
 
 
 # ── single-flight (threading; the scorer calls this from a threadpool) ────────

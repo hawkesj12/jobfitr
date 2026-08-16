@@ -990,7 +990,9 @@ EXPECTED_COLUMNS = (
     "locations",
     "remote",
     "remote_basis",
-    "remote_region",
+    "remote_areas",
+    "remote_regions",
+    "remote_scope_raw",
     "body",
     "category",
     "tags",
@@ -1331,3 +1333,62 @@ def test_bm25_ordering_is_the_boards_tie_break(db):
     kept, _ = _rank(got, ["data analyst"], [], [], [], False, None, 10, [])
     assert len({pts for _, pts, _, _ in kept}) == 1, "fixture should tie on points"
     assert [c["url"] for c, _, _, _ in kept] == [c["url"] for c in got]
+
+
+# ── US-only intake: reading a place out of free text ─────────────────────────
+
+
+def test_a_stated_foreign_boundary_is_dropped():
+    """`remote_areas` is job-radar 0.8.x's parse of the boundary a posting actually
+    STATED, and it is the strongest geography signal available: 3,398 rows kept under the
+    old country+currency test have an entirely non-US stated boundary, against 188 for
+    currency. Structured evidence, not a regex."""
+    assert store.servable_in_us({"remote_areas": ["GB"]}) is False
+    assert store.servable_in_us({"remote_areas": ["CA", "MX"]}) is False
+    assert store.servable_in_us({"remote_areas": ["US", "US-TX"]}) is True
+    assert store.servable_in_us({"remote_areas": ["GB", "US"]}) is True, (
+        "a posting open to both is one a US worker can take"
+    )
+
+
+def test_an_empty_boundary_means_worldwide_not_unknown():
+    """job-radar 0.8.0 made this load-bearing: None = the posting said nothing, [] = it
+    STATED anywhere. Collapsing them drops the most permissive postings in the feed."""
+    assert store.servable_in_us({"remote_areas": []}) is True
+    assert store.servable_in_us({"remote_areas": None, "location": "Remote"}) is True
+
+
+def test_the_location_text_catches_what_the_engine_will_not_guess():
+    """The engine refuses a comma-less string and a two-letter tail, deliberately. Its
+    curated 60-name country map also cannot see Uruguay, Armenia or Slovakia — 2,343 rows
+    the structured field misses. jobfitr owns the US-only opinion, so jobfitr reads."""
+    for loc in ("Singapore", "London, UK", "Slovakia", "Madrid", "Bengaluru",
+                "LatAm (Remote)", "Remote - Europe", "Türkiye, Remote"):
+        assert store.servable_in_us({"location": loc}) is False, loc
+
+
+def test_a_us_city_sharing_a_foreign_name_is_kept():
+    """THE false-positive class, and the reason US evidence wins outright. Measured: of
+    2,435 rows naming a foreign city, 110 also carry a US signal and all 110 are correct
+    keeps — `Cambridge, MA USA` x47, `Manchester, NH`, `Vienna, Virginia`."""
+    for loc in ("Dublin, CA", "Berlin, CT", "Toronto, OH", "Paris, TX",
+                "Manchester, NH", "Moscow, ID", "Odessa, TX", "Versailles, KY",
+                "Cambridge, MA USA", "Vienna, Virginia"):
+        assert store.servable_in_us({"location": loc}) is True, loc
+
+
+def test_an_english_word_that_is_a_state_code_is_not_a_place():
+    """`us_state('or')` is Oregon, so scanning loose tokens made `Italy or France or
+    Germany` AMERICAN — 130 rows kept on exactly that. A state only ever appears as the
+    tail of `City, ST`, so only comma-delimited segments are read. Same shape for
+    in/me/hi/ok/de/la/co/id/ma/pa/oh."""
+    assert store.servable_in_us({"location": "Italy or France or Germany"}) is False
+    assert store.servable_in_us({"location": "London or Berlin HYBRID"}) is False
+    assert store.servable_in_us({"location": "Austin, TX"}) is True
+
+
+def test_unknown_still_passes():
+    """Evidence is ADDED; the default is not inverted. A placeless remote job names no
+    country and must not be inferred foreign."""
+    for loc in ("Remote", "Anywhere", "Global", "Distributed", ""):
+        assert store.servable_in_us({"location": loc}) is True, loc
