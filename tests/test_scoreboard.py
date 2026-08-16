@@ -31,12 +31,37 @@ from jobfitr.server import scoreboard
 # ── corpus fixtures ──────────────────────────────────────────────────────────
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# TWO corpora, and which one a measurement belongs on is not a detail.
+#
+#   frozen.db     39,597 rows, bodies capped at 2,000 — the ANCHOR. The 234 goldens, the
+#                 122,476-candidate retrieval baseline and every number in results-*.json
+#                 are measured against it, so it must not be replaced; its rows' full
+#                 bodies no longer exist anywhere, so "rebuilding" it would mean a
+#                 different row set and would silently void all three.
+#   frozen-8k.db  31,790 rows, bodies at 8,000 — what the scorer ACTUALLY READS since
+#                 caae8e4. Any boost- or body-side measurement belongs here.
+#
+# The gap is not cosmetic. Measured over the same 57 profiles:
+#
+#                    zero-boost   mean   p99   max
+#     frozen.db         79.7%     3.30    38    76
+#     frozen-8k.db      54.1%    10.10    66   126   <- a listing can out-boost a
+#                                                       perfect title match
+#
+# Title-tier work can use either (a tier does not depend on body length). Anything that
+# touches boosts, penalties-in-body, or BODY_CAP must use the 8k corpus or it is
+# measuring a scorer that stopped running on 2026-08-10.
 _FROZEN = os.path.join(_ROOT, "_private", "before-after", "frozen.db")
+_FROZEN_8K = os.path.join(_ROOT, "_private", "before-after", "frozen-8k.db")
 _USERS = os.path.join(_ROOT, "_private", "before-after", "users.json")
 
 needs_corpus = pytest.mark.skipif(
     not os.path.exists(_FROZEN),
     reason="the frozen corpus is gitignored — the unit layer carries the contract without it",
+)
+needs_8k_corpus = pytest.mark.skipif(
+    not os.path.exists(_FROZEN_8K),
+    reason="frozen-8k.db is gitignored — rebuild it from a current jobs.json snapshot",
 )
 
 # Scoring 123,015 pairs takes ~16s per pass and the monotonicity checks need two, so the
@@ -55,7 +80,7 @@ def _user_count() -> int:
     return len(json.loads(open(_USERS).read())["users"])
 
 
-def _load_pairs(full: bool):
+def _load_pairs(full: bool, db: str | None = None):
     import json
 
     from jobfitr import store
@@ -68,7 +93,7 @@ def _load_pairs(full: bool):
         cfg = u["config"]
         rows = _dedupe_listings(
             store.bm25_candidates(
-                cfg["titles"] + (cfg.get("related_titles") or []), None, _FROZEN
+                cfg["titles"] + (cfg.get("related_titles") or []), None, db or _FROZEN
             )
         )
         if not full:
@@ -360,3 +385,56 @@ def test_the_penalty_gate_changes_no_verdict():
             assert gated == bool(ungated[key](body)), f"{key!r} disagrees on {p['title']!r}"
             checked += 1
     assert checked, "the corpus produced no bodies to check"
+
+
+# ── the body-cap corpus ──────────────────────────────────────────────────────
+@needs_8k_corpus
+@pytest.mark.slow
+def test_boosts_are_live_on_a_corpus_that_matches_production():
+    """The measurement B7 exists to protect.
+
+    Every boost-side constant in this repo was chosen against `frozen.db`, whose bodies
+    are capped at 2,000 characters — while `BODY_CAP` went to 8,000 on 2026-08-10, 29
+    minutes after that corpus was frozen. So the standing claim "boosts are zero for 75%
+    of pairs, therefore the title tier is effectively the whole score" described a scorer
+    that had stopped running.
+
+    On a corpus that matches production, boosts are live on ~46% of pairs and a single
+    listing can reach **more boost points than an exact title match is worth**. That is
+    the fact any future tuning of BOOST_DECAY or a boost cap has to start from, and this
+    test fails if the corpus silently reverts to truncated bodies.
+    """
+    import sqlite3
+
+    max_body = (
+        sqlite3.connect(f"file:{_FROZEN_8K}?mode=ro", uri=True)
+        .execute("SELECT max(length(body)) FROM jobs")
+        .fetchone()[0]
+    )
+    assert max_body > 2000, (
+        f"frozen-8k.db holds {max_body}-char bodies — it is not a body-cap corpus"
+    )
+
+    pairs = _load_pairs(full=True, db=_FROZEN_8K)
+    boosts = []
+    for p in pairs:
+        board = _score(p)
+        boosts.append(
+            sum(
+                d
+                for lbl, d in board["parts"]
+                if lbl not in ("title", "related title") and d > 0
+            )
+        )
+    zero = sum(1 for b in boosts if b == 0) / len(boosts)
+    assert zero < 0.65, (
+        f"{zero:.1%} of pairs score no boost — is this the 2,000 corpus?"
+    )
+    assert max(boosts) > 100, (
+        f"max boost {max(boosts)} — a listing should be able to out-boost a perfect "
+        "title, which is the whole reason a cap is on the table"
+    )
+    print(
+        f"\n  {len(pairs):,} pairs · zero-boost {zero:.1%} · "
+        f"mean {sum(boosts) / len(boosts):.2f} · max {max(boosts)}"
+    )

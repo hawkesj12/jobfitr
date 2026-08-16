@@ -26,12 +26,24 @@ Restart=always
 RestartSec=3
 
 # Hardening — the web process reads/writes its OWN per-slot store dir (the live-fetch
-# hybrid upserts fetched jobs into /opt/jobfitr/%i/data/jobs.db), nothing else.
+# hybrid upserts fetched jobs into /opt/jobfitr/%i/data/jobs.db) plus the SHARED data
+# dir, and nothing else.
+#
+# The shared dir is here for ONE file: searches.jsonl, the search-quality log. It is
+# shared rather than per-slot on purpose — a blue-green flip changes which process
+# serves traffic, so a per-slot log would split the history at every deploy and the
+# whole point is reviewing weeks of it at once. failures.log already lives there for
+# the same reason.
+#
+# ProtectSystem=strict makes this line load-bearing: without the shared path the log
+# writes fail with EROFS, and searchlog.record() swallows the error by design, so the
+# only symptom is a log file that stays empty. If searches.jsonl is not growing, check
+# this line FIRST.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/jobfitr/%i/data
+ReadWritePaths=/opt/jobfitr/%i/data /opt/jobfitr/data
 
 [Install]
 WantedBy=multi-user.target

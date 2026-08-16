@@ -7,6 +7,7 @@ graceful degradation when the daily ceiling trips.
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -1230,12 +1231,26 @@ def test_filter_fields_reach_the_card_and_the_drawer(client, monkeypatch):
     vanish), and `salary_min` is annualised USD."""
     _seed(
         [
-            _job("Role A", url="https://x/a", state="Ohio", direct_apply=True,
-                 salary="$140,000", salary_min=140000, salary_period="year",
-                 salary_currency="USD"),
-            _job("Role B", url="https://x/b", state="Ontario", direct_apply=False,
-                 salary="$170/hr", salary_min=170, salary_period="hour",
-                 salary_currency="USD"),
+            _job(
+                "Role A",
+                url="https://x/a",
+                state="Ohio",
+                direct_apply=True,
+                salary="$140,000",
+                salary_min=140000,
+                salary_period="year",
+                salary_currency="USD",
+            ),
+            _job(
+                "Role B",
+                url="https://x/b",
+                state="Ontario",
+                direct_apply=False,
+                salary="$170/hr",
+                salary_min=170,
+                salary_period="hour",
+                salary_currency="USD",
+            ),
         ]
     )
     _mark_fresh(["role"])
@@ -1258,10 +1273,30 @@ def test_a_foreign_currency_posting_never_reaches_the_board(client, monkeypatch)
     """jobfitr is US and USD only. A yen figure sorted as dollars is what put a
     JPY 15,500,000 job at the top of the live pool; the row is now dropped at intake
     rather than shown with an unusable salary."""
-    _seed([_job("Yen Role", url="https://x/y", salary="¥15.5M", salary_min=15500000,
-                salary_period="year", salary_currency="JPY")])
-    _seed([_job("Dollar Role", url="https://x/d", salary="$150,000", salary_min=150000,
-                salary_period="year", salary_currency="USD")])
+    _seed(
+        [
+            _job(
+                "Yen Role",
+                url="https://x/y",
+                salary="¥15.5M",
+                salary_min=15500000,
+                salary_period="year",
+                salary_currency="JPY",
+            )
+        ]
+    )
+    _seed(
+        [
+            _job(
+                "Dollar Role",
+                url="https://x/d",
+                salary="$150,000",
+                salary_min=150000,
+                salary_period="year",
+                salary_currency="USD",
+            )
+        ]
+    )
     _mark_fresh(["role"])
     _no_fetch(monkeypatch)
     d = client.post("/api/score", json={"titles": ["role"]}).json()
@@ -1348,3 +1383,126 @@ def test_a_high_paying_job_survives_a_salary_floor(client, monkeypatch):
     assert by["Staff Engineer"]["salary_min"] is None  # the engine parsed no figure...
     assert "180k-plus" in by["Staff Engineer"]["tags"]  # ...but the band reads it right
     assert "under-50k" in by["Junior Engineer"]["tags"]
+
+
+# ── the search log ───────────────────────────────────────────────────────────
+
+
+def test_a_real_search_writes_a_log_line(client, monkeypatch, tmp_path):
+    """The WIRING, which the searchlog unit tests cannot see. They call record()
+    directly; this proves /api/score actually calls it, with the real funnel numbers
+    rather than placeholders."""
+    from jobfitr import searchlog
+
+    p = tmp_path / "searches.jsonl"
+    monkeypatch.setattr(searchlog, "LOG_PATH", str(p))
+    _seed(
+        [
+            _job("AI Engineer", url="https://x/1"),
+            _job("Data Analyst", url="https://x/2"),
+        ]
+    )
+    _mark_fresh(["ai engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post(
+        "/api/score", json={"titles": ["AI Engineer"], "boosts": ["python"]}
+    ).json()
+
+    line = json.loads(p.read_text().strip())
+    # NORMALIZED, not the raw casing the user typed — `search_inputs` lowercases, and
+    # what belongs in the log is the query that actually ran. Reviewing a search that
+    # returned nothing, the useful question is what retrieval was given, not what the
+    # text box held.
+    assert line["titles"] == ["ai engineer"] and line["boosts"] == ["python"]
+    assert line["delivered"] == d["count"], "the log and the response must agree"
+    assert line["candidates"] >= line["delivered"], "candidates is the wider funnel"
+    assert line["pool"] == d["pool"]
+    assert line["top"][0]["t"] == d["jobs"][0]["title"]
+    assert line["top"][0]["p"] == d["jobs"][0]["points"]
+    assert line["ms"] >= 0
+
+
+def test_the_log_never_costs_a_user_their_search(client, monkeypatch, tmp_path):
+    """A search must succeed even when the log cannot be written — the production case
+    is a systemd ReadWritePaths that was not updated, which fails every write with
+    EROFS. The board is the product; the log is not."""
+    from jobfitr import searchlog
+
+    monkeypatch.setattr(
+        searchlog, "LOG_PATH", str(tmp_path / "missing-dir" / "s.jsonl")
+    )
+    _seed([_job("AI Engineer", url="https://x/1")])
+    _mark_fresh(["ai engineer"])
+    _no_fetch(monkeypatch)
+
+    r = client.post("/api/score", json={"titles": ["AI Engineer"]})
+    assert r.status_code == 200 and r.json()["count"] == 1
+
+
+def test_an_exhausted_serpapi_quota_tells_the_user(client, monkeypatch):
+    """The hole this closes: Google for Jobs went live 2026-08-15 with no accounting,
+    and `live._fetch_all` swallows a dead source, so an exhausted plan returned a thinner
+    board with no banner and no log line. It is the only lane reaching the Workday/iCIMS
+    postings large local employers use — measured on one Louisville search, 14 of its 17
+    employers appeared in NO other source.
+
+    Note what is NOT here: any counter. The plan is shared with job-radar CLI runs this
+    process cannot see, so a local tally drifts low and stops gating exactly when it
+    matters. Nothing is predicted; the source runs and the real account is asked why only
+    once it has already come back empty."""
+    from jobfitr import live
+
+    monkeypatch.setenv("SERPAPI_KEY", "x")
+    monkeypatch.setattr(live.sources, "search_adzuna", lambda t: [])
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda t: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda t: [])
+    monkeypatch.setattr(live, "_serp_exhausted", lambda: True)
+
+    _seed([_job("Warehouse Supervisor", url="https://x/w")])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["Warehouse Supervisor"], "location": "Louisville, KY"},
+    ).json()
+
+    assert d["degraded"] == "monthly_source_limit"
+    assert live.last_source_report()["google_jobs"]["why"] == "quota"
+
+
+def test_an_empty_google_result_is_not_reported_as_a_quota_problem(client, monkeypatch):
+    """A source that ran fine and simply had no matches is a different fact from one
+    that could not run. Telling a user their board is short because of a spent quota,
+    when really nothing matched, is exactly the confident-and-wrong claim the diagnosis
+    path exists to avoid."""
+    from jobfitr import live
+
+    monkeypatch.setenv("SERPAPI_KEY", "x")
+    monkeypatch.setattr(live.sources, "search_adzuna", lambda t: [])
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda t: [])
+    monkeypatch.setattr(live.sources, "search_google_jobs", lambda t: [])
+    monkeypatch.setattr(live, "_serp_exhausted", lambda: False)
+
+    _seed([_job("Warehouse Supervisor", url="https://x/w3")])
+    d = client.post(
+        "/api/score",
+        json={"titles": ["Warehouse Supervisor"], "location": "Erie, PA"},
+    ).json()
+
+    assert live.last_source_report()["google_jobs"]["why"] == "empty"
+    assert d["degraded"] != "monthly_source_limit"
+
+
+def test_a_missing_serpapi_key_is_recorded_rather_than_silent(client, monkeypatch):
+    """A key that was never deployed and a quota that ran out look identical from the
+    board — both just return fewer jobs. They are different problems and the log has to
+    tell them apart."""
+    from jobfitr import live
+
+    monkeypatch.delenv("SERPAPI_KEY", raising=False)
+    monkeypatch.setattr(live.sources, "search_adzuna", lambda t: [])
+    monkeypatch.setattr(live.sources, "search_usajobs", lambda t: [])
+    _seed([_job("Warehouse Supervisor", url="https://x/w2")])
+    client.post(
+        "/api/score", json={"titles": ["Warehouse Supervisor"], "location": "Erie, PA"}
+    )
+    assert live.last_source_report()["google_jobs"]["why"] == "no_key"

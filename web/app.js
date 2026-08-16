@@ -253,6 +253,12 @@ function renderNotice(data) {
   if (data.degraded === "live_search_limit") {
     msg =
       "🌅 We've hit today's live-search limit. jobfitr is a free tool running on free APIs — no paid services — so there's a daily ceiling to stay in budget. These are the freshest saved matches; check back a bit later and the live search opens back up.";
+  } else if (data.degraded === "monthly_source_limit") {
+    // Distinct from live_search_limit on purpose: that one resets at midnight, so
+    // "check back a bit later" is true advice. This is a MONTHLY budget, and telling
+    // someone to come back later when the reset is three weeks out is a small lie.
+    msg =
+      "🙏 Thanks for using jobfitr. One of our job sources has hit its monthly free limit, so this board is built from the others plus our saved matches. jobfitr runs entirely on free APIs with no paid services, so we ration them to keep it free. The limit resets at the start of next month.";
   } else if (data.degraded === "fetch_error") {
     msg =
       "A job source hiccuped just now, so these are the most recent saved matches. Try again in a moment for a fresh pull.";

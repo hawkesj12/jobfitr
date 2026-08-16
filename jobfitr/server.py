@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from . import chat as chatmod
-from . import live, snapshot, store
+from . import live, searchlog, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
 from .match import has_term, norm_key, term_hits, title_score
 from .snapshot import load_dotenv
@@ -780,6 +781,14 @@ def _warm_cache(titles: list, location: str) -> str | None:
             store.upsert_jobs(rows)
         store.mark_fetched(key)
         _note_fetch()
+        # A fetch that SUCCEEDED can still be short a source. Google for Jobs is the only
+        # lane reaching the Workday/iCIMS postings large local employers use — measured
+        # on one Louisville search, 14 of its 17 employers appeared in no other source —
+        # so losing it quietly costs a local searcher most of the real employers on their
+        # board while everything reads healthy. Say so instead.
+        why = live.last_source_report().get("google_jobs", {}).get("why", "")
+        if why == "quota":
+            return "monthly_source_limit"
         return None
     except Exception:  # noqa: BLE001
         return "fetch_error"  # serve whatever's cached
@@ -817,6 +826,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     fetch never stalls the event loop, and live.coalesced_fetch (threading) coalesces
     concurrent identical searches. Degrades to the cache when the daily ceiling trips.
     """
+    started = time.perf_counter()
     cfg = config_from_dict(payload)
     titles, location = search_inputs(payload)
     boosts = _clean_list(payload.get("boosts"))
@@ -897,11 +907,35 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
             for c, _, _, _ in kept
         ]
     )
+    pool = store.pool_size()
+    # AFTER the response is fully built, so the log records what was actually delivered
+    # and a logging fault cannot cost a user their search. `record` swallows everything
+    # for the same reason — see its block header.
+    searchlog.record(
+        titles=titles,
+        related=related,
+        boosts=boosts,
+        exclude=exclude,
+        location=location,
+        remote_only=cfg.remote_only,
+        max_age_days=max_age_days,
+        min_score=payload.get("min_score"),
+        pool=pool,
+        candidates=len(candidates),
+        kept=kept,
+        degraded=degraded,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+        # Empty when the search served a fresh cache and called nobody — which is itself
+        # worth being able to tell apart from "every source returned nothing".
+        sources=live.last_source_report() or None,
+        # verify-slot.sh sets this so its pre-flip searches do not read as user demand.
+        probe=payload.get("probe") is True,
+    )
     return {
         "count": len(results),
         "degraded": degraded,
         "facets": facets,
-        "pool": store.pool_size(),
+        "pool": pool,
         "jobs": results,
     }
 

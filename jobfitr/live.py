@@ -18,6 +18,7 @@ Two concurrency controls:
 
 from __future__ import annotations
 
+import os
 import threading
 
 from job_radar import config as jr_config
@@ -81,6 +82,47 @@ _NON_PLACE = {
 }
 
 
+# The most recent per-source outcome, for the search log and the notice. A module-level
+# dict rather than a return value because `live_fetch` is called through
+# `coalesced_fetch`, whose followers share the LEADER's result — threading a second
+# return value through that handoff would mean followers reporting sources they never
+# called. Last-writer-wins is right here: the log records one line per request and a
+# follower's line honestly describes the fetch its board came from.
+_LAST_REPORT: dict[str, dict] = {}
+
+
+def last_source_report() -> dict:
+    return dict(_LAST_REPORT)
+
+
+def _serp_exhausted() -> bool:
+    """Is the SerpApi plan actually out? Asked of SerpApi, never inferred.
+
+    Called ONLY when google_jobs already returned nothing, so it costs one HTTP round
+    trip on a path that has just failed — never on a healthy search. `total_searches_left`
+    is the account-wide truth, so it counts CLI runs and every other consumer of the same
+    key, which is the property a local counter could never have.
+
+    Any failure here answers False: not knowing why a source was quiet must never turn
+    into telling the user something confident and wrong.
+    """
+    key = os.environ.get("SERPAPI_KEY", "")
+    if not key:
+        return False
+    try:
+        from job_radar.config import Config
+        from job_radar.sources import _serpapi_searches_left
+
+        left = _serpapi_searches_left(key)
+        if left is None:
+            return False
+        # job-radar holds a reserve back rather than spending to zero, so "exhausted"
+        # for our purposes is "at or under the reserve it refuses to touch".
+        return left <= max(0, getattr(Config(), "serpapi_reserve", 0))
+    except Exception:  # noqa: BLE001 — a diagnostic must not break the search
+        return False
+
+
 def _prep_location(location: str | None) -> str:
     loc = (location or "").strip()
     return "" if loc.lower() in _NON_PLACE else loc
@@ -139,17 +181,48 @@ def _fetch_all(cfg, titles: list[str]) -> list[dict]:
     release to make it public, which is worth doing when that repo next opens.
     """
     rows: list[dict] = []
+    # PER-SOURCE OUTCOMES, not a silent swallow. The `except: continue` below is still
+    # right — one dead vendor must never fail a whole search — but until 2026-08-15 it
+    # was the ONLY record that anything went wrong, so a board could arrive thin with no
+    # banner, no log line and no health signal. Two Louisville searches an hour apart
+    # differed by 130 rows and nothing on the box could say which source moved.
+    #
+    # `report` is written into the search log and drives the user-facing notice, so a
+    # source that returns nothing now says WHY: no_key, quota, error, or a real empty.
+    report: dict[str, dict] = {}
     with _CFG_LOCK:
         jr_config.set_active(cfg)
-        for fn in (
-            sources.search_adzuna,
-            sources.search_usajobs,
-            sources.search_google_jobs,
+        for name, fn in (
+            ("adzuna", sources.search_adzuna),
+            ("usajobs", sources.search_usajobs),
+            ("google_jobs", sources.search_google_jobs),
         ):
-            try:
-                rows.extend(fn(titles) or [])
-            except Exception:  # a dead source never fails the whole fetch
+            if name == "google_jobs" and not os.environ.get("SERPAPI_KEY"):
+                report[name] = {"n": 0, "why": "no_key"}
                 continue
+            try:
+                got = fn(titles) or []
+                rows.extend(got)
+                why = "" if got else "empty"
+                # DIAGNOSE, DO NOT PREDICT. An earlier version kept a local monthly
+                # tally and refused to call the source once it hit 250. That was wrong
+                # twice over: the same SerpApi plan is also spent by job-radar CLI runs
+                # this process cannot see, so the tally drifts low and stops gating
+                # exactly when it matters; and a local guess about a remote budget is
+                # the same unearned assertion this codebase keeps removing elsewhere.
+                #
+                # So nothing is gated. The source runs, and ONLY if it came back empty
+                # do we spend one cheap call on the real account to say WHY. job-radar
+                # already asks the same endpoint before spending (sources._serpapi_budget)
+                # and prints the answer; that print goes to journald and never reaches
+                # the person waiting on the board, which is the whole gap being closed.
+                if name == "google_jobs" and not got:
+                    why = "quota" if _serp_exhausted() else "empty"
+                report[name] = {"n": len(got), "why": why}
+            except Exception as e:  # a dead source never fails the whole fetch
+                report[name] = {"n": 0, "why": f"error:{type(e).__name__}"}
+                continue
+    _LAST_REPORT.update(report)
     return [_coerce(r) for r in rows]
 
 

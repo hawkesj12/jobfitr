@@ -39,6 +39,12 @@ holding zero occupational therapists answers that search with 33 of them in abou
 next person who asks gets them free from the cache. That is what keeps the whole thing runnable on a
 small box and free API tiers instead of trying to warehouse every job that exists.
 
+**The same is true of _where_, not just _what_.** ATS boards skew remote as well as tech, so the stored
+pool is thin on local work by construction — searching it for warehouse jobs in Louisville finds almost
+nothing. That is not a gap; it is the division of labour. A real search for `Warehouse Supervisor` in
+`Louisville, KY` pulls the local employers in on demand, and the board comes back led by Louisville,
+Watson, New Albany and Shepherdsville. Judge coverage by running a search, never by querying the pool.
+
 ```
 nightly:      resolve companies → harvest → jobs.json ──▶ the SQLite/FTS5 store
 per request:  your 4 answers ──▶ fresh cache OR one live fetch ──▶ rank the store ──▶ ranked links
@@ -160,12 +166,37 @@ Same-origin; the front end talks to these directly.
 | `GET /api/meta`      | `count` (pool size), `harvested_at`, and the `code_sha` this process is running.                                                                                                                                                                                               |
 | `GET /api/health`    | Which feeds are live, the daily fetch budget used, pool size vs. the snapshot it should be serving, and when that snapshot was last ingested.                                                                                                                                  |
 
+## What gets recorded
+
+**No account, no tracking is meant literally.** There is no login, no cookie, no
+analytics script, and nothing that follows a person between visits or between searches.
+
+A self-hosted instance can optionally keep a **search-quality log** — set
+`JOBFITR_SEARCH_LOG` to a file path, and each search appends one JSON line: the query
+shape (titles, boosts, exclusions, location), how the funnel went (candidates retrieved,
+jobs delivered, latency), and the top five results with their scores. It exists because
+every ranking number in this repo is measured against synthetic, author-written profiles,
+which cannot tell you whether a *real* search returned something a real person wanted.
+
+What that log deliberately does not contain: no IP address, no user agent, no referer,
+no session or request id, and no text from the chat interview. Two identical searches an
+hour apart are indistinguishable from two different people. That is a real cost — one
+person's refine loop is not reconstructable — and it is accepted rather than engineered
+around, because the alternative is an identifier.
+
+**It is off unless you set the variable.** Read it with:
+
+```bash
+python scripts/review_searches.py /path/to/searches.jsonl --days 7
+```
+
 ## Project layout
 
 ```
 jobfitr/
   server.py           FastAPI: /api/chat + /api/score + /api/meta + /api/health; the scoreboard; serves web/
   store.py            SQLite + FTS5 — the job pool, BM25 retrieval, eviction, the company→ATS ledger
+  searchlog.py        optional append-only record of searches + what they returned (off unless configured)
   match.py            term matching (whole-word + plural) and the title tiers
   live.py             the per-search live fetch, single-flighted
   snapshot.py         the baseline harvest → atomic jobs.json; the cached reader

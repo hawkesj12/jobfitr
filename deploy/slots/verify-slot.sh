@@ -106,10 +106,20 @@ fi
 #    few huge employers (Veterans Health Administration, McLane), so a cap that only
 #    reorders instead of filtering fails here while "engineer" passes. That exact gap
 #    shipped once — the gate must cover it.
+# The search log's path comes from the service's own env file, so this checks the
+# CONFIGURED location rather than a guess. Unset is a legitimate config (logging off).
+searchlog=$(sed -n 's/^[[:space:]]*JOBFITR_SEARCH_LOG=//p' /etc/jobfitr/jobfitr.env 2>/dev/null \
+	| tr -d "\"'" | tail -1)
+searchlog_before=0
+if [[ -n "$searchlog" && -f "$searchlog" ]]; then
+	searchlog_before=$(wc -l < "$searchlog")
+fi
+
 for title in engineer nurse driver; do
+	# "probe":true keeps these three out of the quality digest — see searchlog.record.
 	res=$(curl -s --max-time 45 -X POST "${base}/api/score" \
 		-H 'Content-Type: application/json' \
-		-d "{\"titles\":[\"${title}\"],\"location\":\"\",\"min_score\":\"plenty\"}" 2>/dev/null)
+		-d "{\"titles\":[\"${title}\"],\"location\":\"\",\"min_score\":\"plenty\",\"probe\":true}" 2>/dev/null)
 	if [[ -z "$res" ]]; then
 		bad "search: ${title}" "/api/score returned nothing"
 		continue
@@ -172,6 +182,27 @@ PY
 	rm -f "$tmp"
 	[[ $rc -ne 0 ]] && fail=1
 done
+
+# 6. the search log actually received those three searches.
+#
+# This check exists because EVERY way the log can be broken is silent. record() swallows
+# all exceptions on purpose (the observer must never take down the thing it observes), so
+# a missing ReadWritePaths, a wrong owner, or a full disk all present identically: a file
+# that simply stays empty, discovered weeks later when you sit down to review a month of
+# searches and there are none. The three searches above just ran; if the log is
+# configured and did not grow, it is broken NOW, while there is still a gate to fail.
+if [[ -z "$searchlog" ]]; then
+	ok "search log" "not configured (JOBFITR_SEARCH_LOG unset)"
+else
+	searchlog_after=0
+	[[ -f "$searchlog" ]] && searchlog_after=$(wc -l < "$searchlog")
+	grew=$((searchlog_after - searchlog_before))
+	if [[ "$grew" -ge 3 ]]; then
+		ok "search log" "+${grew} lines at ${searchlog}"
+	else
+		bad "search log" "configured at ${searchlog} but grew ${grew}/3 — check ReadWritePaths in jobfitr-web@.service, then owner"
+	fi
+fi
 
 echo
 if [[ "$fail" -eq 0 ]]; then
