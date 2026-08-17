@@ -1128,13 +1128,49 @@ def test_direct_apply_false_is_zero_not_null(db, monkeypatch):
 # since adzuna's redirects answer 403 to both HEAD and GET and cannot be verified at all.
 
 
-def test_an_aggregator_link_is_dropped_at_intake(db):
+def test_a_non_carried_aggregator_link_is_dropped_at_intake(db):
+    """himalayas/jobicy/remoteok/hn are pure interstitials AND do not serve the local lane —
+    measured, they contributed 0 of 217 in-metro results across four metros."""
     store.upsert_jobs(
-        [_job("agg", "Analyst", direct_apply=False), _job("emp", "Analyst", direct_apply=True)],
+        [_job("https://himalayas.app/jobs/1", "Analyst", direct_apply=False),
+         _job("emp", "Analyst", direct_apply=True)],
         path=db,
     )
     with sqlite3.connect(db) as c:
         assert [r[0] for r in c.execute("SELECT url FROM jobs")] == ["emp"]
+
+
+def test_an_adzuna_row_is_CARRIED_despite_being_a_redirect(db):
+    """THE FENCE. This exact row shape is what the first version of the policy dropped, and
+    dropping it cost 92.6% of in-metro results across four metros — the documented Louisville
+    test went 36 jobs to 4, none of them local. Adzuna supplies 83.0% of in-metro results on
+    local, non-tech searches (180 of 217, 2026-08-17); google_jobs supplies 12.4%.
+
+    If a future change makes this go red, it is removing local coverage, whatever else it
+    thinks it is doing."""
+    store.upsert_jobs(
+        [{"url": "https://www.adzuna.com/land/ad/5840267822", "title": "Warehouse Supervisor",
+          "company": "Acme", "source": "adzuna", "direct_apply": 0}],
+        path=db,
+    )
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1, (
+            "an adzuna row was dropped — local coverage depends on it"
+        )
+
+
+def test_a_carried_host_matches_subdomains_but_not_lookalikes(db):
+    keep = "https://www.adzuna.com/land/ad/1"
+    also = "https://adzuna.com/land/ad/2"
+    nope = "https://notadzuna.com/land/ad/3"
+    store.upsert_jobs(
+        [{"url": u, "title": "T", "company": "A", "source": "x", "direct_apply": 0}
+         for u in (keep, also, nope)],
+        path=db,
+    )
+    with sqlite3.connect(db) as c:
+        got = sorted(r[0] for r in c.execute("SELECT url FROM jobs"))
+    assert got == sorted([keep, also]), f"lookalike host handling is wrong: {got}"
 
 
 def test_an_unstated_direct_apply_is_DROPPED_and_that_is_deliberate(db):
@@ -1156,7 +1192,7 @@ def test_an_unstated_direct_apply_is_DROPPED_and_that_is_deliberate(db):
 def test_the_policy_can_be_turned_off(db, monkeypatch):
     """A self-hoster who would rather have the coverage than the promise."""
     monkeypatch.setattr(store, "DIRECT_ONLY", False)
-    store.upsert_jobs([_job("agg", "Analyst", direct_apply=False)], path=db)
+    store.upsert_jobs([_job("https://himalayas.app/jobs/9", "Analyst", direct_apply=False)], path=db)
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
 

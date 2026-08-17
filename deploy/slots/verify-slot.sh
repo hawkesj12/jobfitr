@@ -250,6 +250,45 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 6b. LOCAL SEARCH STILL WORKS — the check that would have caught 2026-08-17.
+#
+# On that day an intake policy removed 92.6% of in-metro results across four metros and
+# nothing noticed: the frozen corpus and the 57 synthetic profiles both skew remote/tech, and
+# local jobs mostly arrive on the LIVE lane, which the harness structurally cannot exercise.
+# `CLAUDE.md`'s flagship local test went from 36 jobs led by Louisville/Watson/New Albany to
+# FOUR, none of them local, and every other gate here stayed green.
+#
+# ASSERT LOCALITY AND SOURCE SPREAD, NOT A COUNT. A `>= N results` gate is both brittle (a
+# genuinely quiet market fails it) and blind — that regression returned 4 results, which any
+# sane threshold would have passed, while every one of them was out of state. Locality is the
+# property that actually collapsed (10 in-metro -> 0), and source spread catches the class:
+# "a change silently removed an entire source from local results", whatever causes it next.
+#
+# Carries "probe":true like the searches above, so it does not pollute the search digest.
+locality=$(curl -s --max-time 90 -X POST "${base}/api/score" \
+	-H 'Content-Type: application/json' \
+	-d '{"titles":["Warehouse Supervisor"],"location":"Louisville, KY","probe":true}' |
+	python3 -c '
+import json, re, sys
+try:
+    jobs = json.load(sys.stdin).get("jobs", [])
+except Exception:
+    print("BAD|no answer"); raise SystemExit
+if not jobs:
+    print("BAD|no results at all for a Louisville warehouse search"); raise SystemExit
+near = re.compile(r"louisville|jefferson|shepherdsville|new albany|clark county|floyd|\bKY\b|\bIN\b", re.I)
+local = sum(1 for j in jobs if near.search(j.get("location") or ""))
+srcs = {j.get("source") for j in jobs if j.get("source")}
+share = local / len(jobs)
+verdict = "OK" if (share >= 0.5 and len(srcs) >= 3) else "BAD"
+print(f"{verdict}|{local}/{len(jobs)} in-metro ({share:.0%}), {len(srcs)} sources: {sorted(srcs)}")
+')
+case "${locality%%|*}" in
+OK) ok "local search" "${locality#*|}" ;;
+*) bad "local search" "${locality#*|} — expected >=50% in-metro and >=3 sources; a change has removed a source from LOCAL results (see store.CARRIED_AGGREGATORS)" ;;
+esac
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 7. the board universe reached the box, and is not stale.
 #
 # `deploy/board-universe.json` is the ENTIRE input to board discovery. Production cannot

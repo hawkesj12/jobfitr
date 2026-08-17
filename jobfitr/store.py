@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import time
+from urllib.parse import urlparse
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -177,61 +178,65 @@ BODY_CAP = 8000
 # job-radar fix.
 US_ONLY = os.environ.get("JOBFITR_US_ONLY", "1") != "0"
 
-# Whether a posting must link to the EMPLOYER'S OWN board, not an aggregator's redirect.
+# Whether a posting must show positive evidence that its link reaches the employer.
 DIRECT_ONLY = os.environ.get("JOBFITR_DIRECT_ONLY", "1") != "0"
+
+# The aggregators jobfitr carries DELIBERATELY, despite their links being redirects.
+#
+# ADZUNA IS HERE FOR ONE MEASURED REASON: it supplies **83.0% of in-metro results on local,
+# non-tech searches** — 180 of 217 across four metros on 2026-08-17 (Louisville warehouse,
+# Grand Rapids nursing, Knoxville CDL, Des Moines retail), against google_jobs' 12.4% and the
+# ATS lane's 4.6%. Google for Jobs does NOT carry local on its own. Every adzuna URL is
+# `www.adzuna.com/land/ad/<id>` — a redirect, never the employer, and unverifiable (403 to
+# both HEAD and GET) — so carrying it is a deliberate exception, paid for by saying so on the
+# card and in the copy rather than by pretending otherwise.
+CARRIED_AGGREGATORS = tuple(
+    h.strip().lower()
+    for h in os.environ.get("JOBFITR_AGGREGATORS", "adzuna.com").split(",")
+    if h.strip()
+)
 
 
 def direct_to_employer(row: dict) -> bool:
-    """True when the apply link goes to the employer, not through an aggregator.
+    """True when the row may enter the store under the link policy.
 
-    ── WHY THIS IS A POLICY AND NOT A FACET ─────────────────────────────────────
-    The front page makes this a promise, in three places: "straight from the company",
-    "links you direct to the employer's own posting", "jobfitr never sits between you and the
-    application, and never takes a fee for it". Measured `[live prod]` on a 69,457-row pool,
-    **3,499 rows (5.04%) were aggregator links** — himalayas 1,667, adzuna 1,510, hn 175, and a
-    tail of jobicy/remoteok/arbeitnow/remotive. The `apply_via` facet labelled them honestly,
-    so the DATA never lied; the COPY did. Dropping them costs 5% and makes the claim true.
-    Justin's call, 2026-08-17, taken with that cost on the table.
+    ── THE RULE ────────────────────────────────────────────────────────────────
+    Positive evidence of directness (job-radar's `direct_apply`), OR a host named in
+    `CARRIED_AGGREGATORS`. Everything else is dropped at intake.
 
-    It also removes the rows where dead postings hide: `www.adzuna.com/land/ad/...` is a
-    redirect that answers **403 to both HEAD and GET** from the box, so it cannot be verified
-    at all. Post-drop, 99.94% of the pool is re-fetched nightly.
+    ── WHY AN ALLOWLIST AND NOT A DENYLIST OF MIDDLEMEN ────────────────────────
+    The first draft of this listed 16 middleman hosts to drop. Review pointed out that this
+    was a hand-maintained way of writing "direct_apply == 0 AND host is not adzuna", and that
+    it rots in the DANGEROUS direction: add a source next month and its redirect links are
+    carried silently until somebody notices. The allowlist fails CLOSED — a new source must
+    earn its way in — and it states the policy in one sentence.
 
-    ── ONLY POSITIVE EVIDENCE PASSES, and the first version got this wrong ──────
-    Requires an explicit truthy value. An earlier version kept NULL "because unknown stays
-    unknown, and a NULL from an ATS adapter is direct by construction". **That premise is
-    false**, and review caught it: `job_radar.engine._coerce` fills a BOOL for any row with a
-    truthy `source` — verified, greenhouse/ashby/lever all yield `True`, hn and adzuna `False`.
-    NULL is reachable only when `source` is falsy, i.e. a row that never crossed `_coerce`.
-    Measured: 0 NULLs in a 20,000-row snapshot sample and 0 in the pool. The sentence described
-    a row that does not exist.
+    ── WHAT THE FIRST VERSION OF THIS POLICY COST, and read this number first ───
+    Dropping every `direct_apply != 1` row looked like **3,499 of 69,457 (5.04%)** of the
+    POOL, and a review measured 4.46% mean loss across 57 synthetic profiles. Both numbers
+    were true and both were the wrong measurement. Measured on real searches afterwards, it
+    cost **92.6% of in-metro results across four metros** — `CLAUDE.md`'s own flagship local
+    test went from 36 jobs led by Louisville/Watson/New Albany to **4, none of them local**.
+    The corpus and the synthetic profiles skew remote/tech, so a concentrated loss in the
+    segment this product is weakest at showed up as a 5% average.
+    `CLAUDE.md` says it in bold — *to assess coverage, POST to /api/score, never SELECT from
+    jobs* — and the pool percentage above is exactly the kind of number it is warning about.
+    Keep both figures side by side so the next reader does not repeat the trade.
 
-    Nor does the geography analogy hold. `servable_in_us` passes a blank country because blank
-    is the MAJORITY (14,616 of 31,790) and dropping it would gut the pool — a measured
-    necessity with a text fallback behind it, not a principle. Here "unknown" is zero rows, so
-    invoking "unknown stays unknown" borrowed authority from a rule that was decided on
-    evidence this case does not have.
-
-    So the choice costs nothing today and is purely about which way a future break fails:
-    keeping NULL breaks a front-page promise SILENTLY; dropping it loses rows LOUDLY, visible
-    in both the printed count and `pool_size` vs `snapshot_servable`. Loud wins. The invariant
-    is now statable: every stored row carries positive evidence of directness.
-
-    ── 87 ROWS ARE DROPPED THAT ARGUABLY SHOULD NOT BE ──────────────────────────
-    Of the 3,499, **87 have URLs job-radar's own `_is_direct_apply` calls direct** — all `hn`,
-    all matching its employer's-own-domain branch (`careers.snowflake.com`, `www.cora.ai`,
-    `starbridge.ai/careers`). The cause is upstream: `_coerce` decides `hn` from the SOURCE
-    NAME, while `google_jobs` is exempted and decides from the URL. Deliberately NOT rescued
-    here — a URL-based override would re-open the derive-vs-passthrough boundary for 2.5% of
-    the drop set, and this repo's rule is that jobfitr passes the engine's value through. The
-    fix belongs upstream: make `hn` URL-derived like `google_jobs`.
+    ── WHY `_is_direct_apply` IS NOT THE ORACLE ────────────────────────────────
+    The obvious "derive it per row from job-radar" move fails twice: it is positive-evidence
+    only, so `www.adzuna.com` fails it exactly as the flag does (stricter, not looser); and it
+    is WRONG on real employer pages — its company-token test rejects
+    `www.buckner.org/current-nonprofit-job-openings/?gh_jid=...` because `_norm_name("Buckner
+    International")` is not a substring of `wwwbucknerorg`. Measured, it rejected 11 genuine
+    employer careers pages across those four searches while still killing local.
     """
     if not DIRECT_ONLY:
         return True
-    # Reads the NORMALIZED row, not the raw one: `normalize_job` has already run, and its
-    # value is the byte actually stored and read back by `server._apply_via`. A raw string
-    # "0" would pass a raw truthiness test and then store as 1.
-    return bool(row.get("direct_apply"))
+    if row.get("direct_apply"):
+        return True
+    host = urlparse(row.get("url") or "").netloc.lower()
+    return any(host == a or host.endswith("." + a) for a in CARRIED_AGGREGATORS)
 
 
 def servable_in_us(job: dict) -> bool:
