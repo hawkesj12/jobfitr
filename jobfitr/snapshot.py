@@ -200,26 +200,57 @@ _EMPTY = {
     "meta": {"count": 0, "harvested_at": None, "sources": [], "errors": []},
     "jobs": [],
 }
-_cache: dict[str, tuple[float, dict]] = {}
+# Only the small meta block is ever retained — see load_meta for what the old
+# whole-document cache cost (1,168 MB per web process).
+_meta_cache: dict[str, tuple[float, dict]] = {}
 
 
-def load_snapshot(path: str | os.PathLike = DEFAULT_JOBS_PATH) -> dict:
-    """Return the cached snapshot, re-reading only when the file's mtime changes.
+def load_meta(path: str | os.PathLike = DEFAULT_JOBS_PATH) -> dict:
+    """The snapshot's `meta` block, cached by mtime. THE PRODUCTION READ PATH.
 
-    Missing file → an empty snapshot (a fresh box before the first harvest).
+    ── WHY THIS REPLACED `load_snapshot` FOR /api/health ────────────────────────
+    `/api/health` needs five numbers. It used to get them from `load_snapshot`, which parsed
+    the WHOLE document and cached it in `_cache` — permanently, keyed by mtime, so a slot held
+    every job dict until the next harvest. Measured `[live prod]`: one call took a web process
+    from **27 MB to 1,168 MB**, and with both blue-green slots warm that was **3,447 MB of
+    7,941 MB** resident as two copies of the same document — including the IDLE slot, which
+    serves nothing.
+    That cache, not the harvest's peak, was the binding constraint on board discovery: at a
+    777 MB snapshot it projects ~2.4 GB per slot, ~4.8 GB for the pair, before the harvest
+    asks for anything.
+    `store.snapshot_meta` streams the meta value and stops, so only the small dict is held.
+
+    Missing file → the empty meta (a fresh box before the first harvest).
     """
     p = Path(path)
     try:
         mtime = p.stat().st_mtime
     except FileNotFoundError:
-        return _EMPTY
+        return dict(_EMPTY["meta"])
     key = str(p)
-    cached = _cache.get(key)
+    cached = _meta_cache.get(key)
     if cached and cached[0] == mtime:
         return cached[1]
-    snap = json.loads(p.read_text())
-    _cache[key] = (mtime, snap)
-    return snap
+    from . import store  # local, to avoid an import cycle
+
+    meta = store.snapshot_meta(p)
+    _meta_cache[key] = (mtime, meta)
+    return meta
+
+
+def load_snapshot(path: str | os.PathLike = DEFAULT_JOBS_PATH) -> dict:
+    """The WHOLE snapshot, parsed. Not for the server — see load_meta.
+
+    DELIBERATELY UNCACHED. It used to memoize the parsed document in a module-level dict,
+    which is what held 1,168 MB per web process; nothing in production needs the jobs array
+    in memory any more (the store imports it via `store.sync_snapshot`, streaming). Kept for
+    tests and one-off inspection, where holding it briefly is fine and retaining it is not.
+    """
+    p = Path(path)
+    try:
+        return json.loads(p.read_text())
+    except FileNotFoundError:
+        return _EMPTY
 
 
 # ── CLI: jobfitr-snapshot ─────────────────────────────────────────────────────

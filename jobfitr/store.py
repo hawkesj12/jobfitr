@@ -857,7 +857,7 @@ SNAPSHOT_MTIME_KEY = "jobs_json_mtime"
 
 
 class SnapshotTruncated(RuntimeError):
-    """jobs.json ended mid-object. Distinct from "unparseable" on purpose.
+    """jobs.json ended mid-value. Distinct from "unparseable" on purpose.
 
     A truncated file yields SOME rows before it fails, and importing a prefix would look
     exactly like a successful small harvest — the silent-zero shape this codebase keeps
@@ -866,10 +866,118 @@ class SnapshotTruncated(RuntimeError):
     """
 
 
+class SnapshotKeyless(RuntimeError):
+    """A parseable document with no `jobs` ARRAY in it.
+
+    THIS IS THE ONE THAT MATTERED, and an earlier version got the severity backwards by
+    returning quietly here. Review found the consequence: a quiet zero means `sync_snapshot`
+    reaches its success path and RECORDS THE MTIME, so the import is never retried — a
+    PERMANENT frozen pool, not a transient miss, with `/api/health` still reading fine.
+    Meanwhile the truncation case it did guard is largely closed already by the atomic
+    `os.replace` in snapshot.py, so the error handling was inverted relative to the real
+    risk.
+
+    An explicitly EMPTY array is NOT this: `"jobs": []` is a real answer and imports zero
+    rows. This is "the shape is wrong", which is always a bug worth shouting about.
+    """
+
+
+class _JsonStream:
+    """Just enough buffered JSON plumbing to walk one big document without loading it.
+
+    Shared by the two readers below so the parsing rules live in ONE place. The whole point
+    is that `meta` is small and can be materialized, while `jobs` must be streamed — but both
+    have to agree on how the top-level object is walked, or they will disagree about where it
+    is, which is the class of bug this replaced.
+    """
+
+    CHUNK = 1 << 16
+
+    def __init__(self, fp, name: str):
+        self.fp, self.name, self.buf, self.pos = fp, name, "", 0
+        self.dec = json.JSONDecoder()
+
+    def _more(self) -> bool:
+        chunk = self.fp.read(self.CHUNK)
+        if not chunk:
+            return False
+        self.buf += chunk
+        return True
+
+    def skip(self, chars: str) -> bool:
+        """Advance past any of `chars`, refilling as needed. False at EOF."""
+        while True:
+            while self.pos < len(self.buf) and self.buf[self.pos] in chars:
+                self.pos += 1
+            if self.pos < len(self.buf):
+                return True
+            self.buf, self.pos = self.buf[self.pos :], 0
+            if not self._more():
+                return False
+
+    def decode(self):
+        """raw_decode one value at the cursor, growing the buffer until it fits."""
+        while True:
+            try:
+                val, end = self.dec.raw_decode(self.buf, self.pos)
+                self.pos = end
+                return val
+            except ValueError:
+                if not self._more():
+                    raise SnapshotTruncated(
+                        f"{self.name} ended mid-value at offset ~{self.pos}"
+                    ) from None
+
+    def trim(self) -> None:
+        if self.pos > (1 << 20):
+            self.buf, self.pos = self.buf[self.pos :], 0
+
+    def enter_object(self) -> bool:
+        """Consume the opening `{`. False if the document is empty."""
+        if not self.skip(" \t\r\n\ufeff"):
+            return False
+        if self.buf[self.pos] != "{":
+            raise SnapshotKeyless(f"{self.name} is not a JSON object")
+        self.pos += 1
+        return True
+
+    def next_key(self) -> str | None:
+        """The next key of the current object, or None at its closing `}`."""
+        if not self.skip(" \t\r\n,"):
+            raise SnapshotTruncated(f"{self.name} ended inside the top-level object")
+        if self.buf[self.pos] == "}":
+            return None
+        key = self.decode()
+        if not self.skip(" \t\r\n:"):
+            raise SnapshotTruncated(f"{self.name} ended after key {key!r}")
+        return key
+
+
+def _walk_to(st: _JsonStream, want: str) -> bool:
+    """Advance to the VALUE of top-level key `want`. False if the object has no such key.
+
+    Walks keys STRUCTURALLY and never string-searches. An earlier version located the array
+    with `buf.index('"jobs"')`, and review broke that four ways with no escaping needed: a
+    string value that is exactly `jobs`, a source id named `jobs`, and a NESTED `jobs` key —
+    which in the worst case yielded `[1, 2, 3]` as "jobs" and killed the background sync
+    thread with `AttributeError: 'int' object has no attribute 'get'`.
+    (The escaped-quote vector I had assumed cannot fire: JSON writes an interior quote as
+    backslash-quote, so it never contains the bare substring.)
+    """
+    if not st.enter_object():
+        return False
+    while True:
+        key = st.next_key()
+        if key is None:
+            return False
+        if key == want:
+            return True
+        st.decode()  # not the key we want — consume its value and continue
+
+
 def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
     """Yield each job from a jobs.json WITHOUT holding the file in memory.
 
-    ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
     This used to be `json.loads(p.read_text())`, which holds the whole file three ways at
     once: raw bytes, then a decoded str, then the Python objects. Measured with tracemalloc,
     that parse peaks at **~2.6x the file size**, against **0.20x** for this streamer — a 13x
@@ -879,74 +987,41 @@ def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
 
     Do not confuse this with the harvest's own 2,876 MB peak on a 363 MB snapshot (7.9x).
     That was the WRITE side — the engine's rows, a full copy in `jobs`, and one giant
-    `json.dumps` string, all resident together — and it is fixed separately in
-    `snapshot.py`. Two different multipliers for two different paths; both had to go, because
-    together they capped board discovery at ~4,900 boards short of the full universe.
-
-    ── HOW, WITHOUT A DEPENDENCY ────────────────────────────────────────────────
-    `raw_decode` over a sliding buffer. It parses one object at a time from wherever it is
-    told to start, so we locate the `"jobs"` array once and then pull elements, refilling
-    the buffer only when a decode runs short. Deliberately NOT line-based: the file's
-    layout is not guaranteed (older harvests wrote it all on one line), and a reader that
-    assumed one-job-per-line would silently read zero from those.
-
-    Consumed prefix is trimmed as we go, so peak memory is the buffer plus one job, not the
-    file. `upsert_jobs` already iterates lazily, so handing it this generator keeps the
-    whole import flat without any batching logic.
+    `json.dumps` string, all resident together — and it is fixed separately in `snapshot.py`.
     """
-    dec = json.JSONDecoder()
-    read = 1 << 16
     with p.open("r", encoding="utf-8") as fp:
-        buf = ""
-        # locate `"jobs"` — meta may come before or after it
-        while '"jobs"' not in buf:
-            chunk = fp.read(read)
-            if not chunk:
-                return  # no jobs key at all: an empty answer, not a truncated one
-            buf += chunk
-        i = buf.index('"jobs"') + len('"jobs"')
-        # then the ':' and the opening '['
+        st = _JsonStream(fp, str(p))
+        if not _walk_to(st, "jobs"):
+            raise SnapshotKeyless(f"{p} has no 'jobs' key")
+        if st.buf[st.pos] != "[":
+            raise SnapshotKeyless(f"{p}: 'jobs' is not an array")
+        st.pos += 1
         while True:
-            while i < len(buf) and buf[i] in " \t\r\n:":
-                i += 1
-            if i < len(buf):
-                break
-            chunk = fp.read(read)
-            if not chunk:
-                return
-            buf += chunk
-        if buf[i] != "[":
-            return  # "jobs" is not an array — treat as no rows rather than guessing
-        i += 1
-        while True:
-            # skip whitespace and element commas, refilling as needed
-            while True:
-                while i < len(buf) and buf[i] in " \t\r\n,":
-                    i += 1
-                if i < len(buf):
-                    break
-                chunk = fp.read(read)
-                if not chunk:
-                    raise SnapshotTruncated(f"{p} ended inside the jobs array")
-                buf, i = buf[i:] + chunk, 0
-            if buf[i] == "]":
-                return  # clean end of the array
-            # decode exactly one element, growing the buffer until it fits
-            while True:
-                try:
-                    obj, end = dec.raw_decode(buf, i)
-                    break
-                except ValueError:
-                    chunk = fp.read(read)
-                    if not chunk:
-                        raise SnapshotTruncated(
-                            f"{p} ended mid-object at offset ~{i}"
-                        ) from None
-                    buf += chunk
-            yield obj
-            i = end
-            if i > (1 << 20):  # trim the consumed prefix so the buffer cannot grow
-                buf, i = buf[i:], 0
+            if not st.skip(" \t\r\n,"):
+                raise SnapshotTruncated(f"{p} ended inside the jobs array")
+            if st.buf[st.pos] == "]":
+                return  # clean end — nothing after the array is needed
+            yield st.decode()
+            st.trim()
+
+
+def snapshot_meta(p: Path) -> dict:
+    """The snapshot's `meta` block alone, without materializing `jobs`.
+
+    `/api/health` needs five numbers out of a 363 MB file. It used to get them via
+    `snapshot.load_snapshot`, which parsed the WHOLE document and cached it in a module-level
+    dict permanently — measured `[live prod]`, one call took a web process from 27 MB to
+    **1,168 MB**, and with both slots warm that was **3,447 MB of 7,941 MB** held as two
+    copies of the same document, the idle slot included.
+
+    That cache, not the harvest, was the real ceiling on board discovery.
+    """
+    with p.open("r", encoding="utf-8") as fp:
+        st = _JsonStream(fp, str(p))
+        if not _walk_to(st, "meta"):
+            return {}
+        meta = st.decode()
+    return meta if isinstance(meta, dict) else {}
 
 
 def sync_snapshot(path: str | None = None) -> int:
@@ -971,10 +1046,11 @@ def sync_snapshot(path: str | None = None) -> int:
         # the old `len(rows)` counted rows READ, so it over-reported by everything the
         # US-only filter dropped (15,983 on the most recent harvest).
         imported = upsert_jobs(_iter_snapshot_jobs(p), path=path)
-    except SnapshotTruncated as e:
-        # Do NOT record the mtime: a partial import must be retried, not accepted. And say
-        # so — this used to be swallowed into `return 0`, which reads identically to
-        # "already current".
+    except (SnapshotTruncated, SnapshotKeyless) as e:
+        # Do NOT record the mtime: a partial or misshapen import must be retried, not
+        # accepted. Recording it is what turns a bad read into a PERMANENT frozen pool, since
+        # the mtime gate then reports "already current" forever. And say so — this used to be
+        # swallowed into `return 0`, which reads identically to "nothing to do".
         print(f"  store: snapshot import ABORTED — {e}; will retry")
         return 0
     except (json.JSONDecodeError, OSError) as e:

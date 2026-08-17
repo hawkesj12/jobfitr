@@ -1013,9 +1013,15 @@ def meta() -> dict:
 
 
 def _snap_meta() -> dict:
-    """The current snapshot's meta block, or an empty one."""
+    """The current snapshot's meta block, or an empty one.
+
+    Streams just `meta` (see snapshot.load_meta). This used to call `load_snapshot`, which
+    parsed and then permanently cached the entire 363 MB document to read five numbers —
+    1,168 MB per web process, measured. Note health() calls this THREE times per request, so
+    it must stay cheap; the mtime cache makes the repeat calls free.
+    """
     try:
-        return snapshot.load_snapshot(store.JOBS_JSON_PATH)["meta"] or {}
+        return snapshot.load_meta(store.JOBS_JSON_PATH) or {}
     except Exception:  # noqa: BLE001 — health must answer even with no snapshot
         return {}
 

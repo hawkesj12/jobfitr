@@ -1745,12 +1745,98 @@ def test_a_truncated_snapshot_does_not_record_the_mtime(db, tmp_path, monkeypatc
     )
 
 
-def test_an_empty_or_keyless_snapshot_reads_as_no_rows_not_an_error(tmp_path):
-    """`[]` written on purpose is a real answer; only a TRUNCATED file is a failure."""
+def test_an_explicitly_empty_jobs_array_is_a_real_answer(tmp_path):
+    """`[]` written on purpose imports zero rows and is NOT an error. Only a wrong SHAPE is."""
     assert list(store._iter_snapshot_jobs(_snapfile(tmp_path, []))) == []
-    p = tmp_path / "nokey.json"
-    p.write_text(json.dumps({"meta": {}}), encoding="utf-8")
-    assert list(store._iter_snapshot_jobs(p)) == []
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"meta": {}},                        # no jobs key at all
+        {"meta": {}, "jobs": {"a": 1}},      # jobs is an object, not an array
+        {"meta": {}, "jobs": 7},             # jobs is a scalar
+        [1, 2, 3],                           # not even an object
+    ],
+    ids=["no-jobs-key", "jobs-is-object", "jobs-is-scalar", "not-an-object"],
+)
+def test_a_misshapen_snapshot_RAISES_rather_than_reading_as_zero(tmp_path, doc):
+    """CORRECTED SEVERITY (review, 2026-08-17). An earlier version returned quietly here,
+    and the consequence is worse than a missed import: a quiet zero lets `sync_snapshot`
+    reach its success path and RECORD THE MTIME, so the gate reports "already current"
+    forever. That is a PERMANENTLY frozen pool with /api/health still green — not a
+    transient miss. Raising converts it into a noisy retry."""
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(store.SnapshotKeyless):
+        list(store._iter_snapshot_jobs(p))
+
+
+# The four vectors that broke the previous `buf.index('"jobs"')` scan — contributed by
+# review as a failing fixture. None of them need escaping; `meta` is simply written first,
+# and a substring search takes the first match anywhere in the file. The worst case yielded
+# `[1, 2, 3]` as "jobs" and killed the background sync thread with
+# `AttributeError: 'int' object has no attribute 'get'`.
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"errors": ["jobs"]},
+        {"sources": ["jobs"]},
+        {"per_source": {"jobs": 12}},
+        {"per_source": {"jobs": [1, 2, 3]}},
+        {"errors": ['a quoted "jobs" inside a message']},
+        {"errors": ["brackets ] } { [ in a string"]},
+    ],
+    ids=["value-is-jobs", "source-named-jobs", "nested-scalar", "nested-array",
+         "quoted-decoy", "brackets-in-string"],
+)
+def test_the_reader_finds_the_TOP_LEVEL_jobs_key_not_a_substring(tmp_path, meta):
+    """Which is why the reader walks keys structurally and never string-searches."""
+    p = _snapfile(tmp_path, _jobrows(5))
+    p.write_text(json.dumps({"meta": meta, "jobs": _jobrows(5)}), encoding="utf-8")
+    assert [j["url"] for j in store._iter_snapshot_jobs(p)] == [
+        f"https://x/{i}" for i in range(5)
+    ]
+
+
+def test_a_misseek_would_not_be_recorded_as_a_successful_import(db, tmp_path, monkeypatch):
+    """The end-to-end of the severity: a nested decoy must still import all 5 rows, and a
+    genuinely misshapen file must leave the mtime unrecorded so it retries."""
+    p = tmp_path / "jobs.json"
+    p.write_text(json.dumps({"meta": {"per_source": {"jobs": 12}}, "jobs": _jobrows(5)}))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(p))
+    assert store.sync_snapshot(path=db) == 5, "imported nothing and called it success"
+
+    p.write_text(json.dumps({"meta": {}}))  # now misshapen
+    monkeypatch.setattr(store, "_meta_get", lambda *a, **k: None)  # force a re-read
+    assert store.sync_snapshot(path=db) == 0
+
+
+def test_snapshot_meta_reads_meta_without_materializing_jobs(tmp_path):
+    """/api/health needs five numbers out of a 363 MB file. Reading it via the whole-document
+    path cost a web process 1,168 MB, permanently cached — measured [live prod], and with both
+    slots warm that was 3,447 MB of 7,941 MB held as two copies of the same document."""
+    import tracemalloc
+
+    jobs = [{"url": f"https://x/{i}", "title": "T", "text": "z" * 400} for i in range(25_000)]
+    p = tmp_path / "jobs.json"
+    p.write_text(
+        json.dumps({"meta": {"count": 25_000, "servable_count": 20_000}, "jobs": jobs}),
+        encoding="utf-8",
+    )
+    size = p.stat().st_size
+    del jobs
+
+    tracemalloc.start()
+    meta = store.snapshot_meta(p)
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert meta["count"] == 25_000 and meta["servable_count"] == 20_000
+    assert peak < size / 10, (
+        f"reading meta peaked at {peak / 1e6:.1f} MB on a {size / 1e6:.1f} MB file — "
+        f"it is still parsing the jobs array"
+    )
 
 
 def test_sync_snapshot_reports_rows_KEPT_not_rows_read(db, tmp_path, monkeypatch):
