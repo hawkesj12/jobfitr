@@ -30,6 +30,9 @@ def _job(
 ):
     # default a UNIQUE url per title so upsert (dedups by url) keeps distinct rows
     row = {
+        # See tests/test_store.py::_job — a real row always carries this, and intake now
+        # requires positive evidence of directness.
+        "direct_apply": True,
         "title": title,
         "text": text,
         "company": company,

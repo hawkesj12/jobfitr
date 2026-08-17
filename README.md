@@ -129,6 +129,15 @@ It's deliberately _wide_ (broad titles, remote and on-site, generous freshness) 
 
 > **jobfitr serves the United States, and salaries in US dollars.** Postings that state another country, or quote pay in another currency, are dropped as they enter the store — about 18% of a typical harvest. That includes remote roles advertised _within_ another country ("Canada - Remote", "Munich (Remote)"): remote is not the same as location-independent. A posting that names no country still passes, because a genuinely placeless remote job has none to name. The engine underneath ([job-radar](https://github.com/hawkesj12/job-radar)) stays international on purpose — this is jobfitr's opinion, not the engine's, and it lives in `store.servable_in_us`. Set `JOBFITR_US_ONLY=0` to keep everything.
 
+> **Every stored posting links to the employer, not through an aggregator.** A row is kept only
+> if it carries positive evidence of directness (job-radar's `direct_apply`); anything that
+> would bounce you through a middleman is dropped as it enters the store — about 5% of a
+> typical harvest. That is what lets the front page say "straight from the company" literally
+> rather than approximately: the pool cannot contain a counter-example. An ATS host counts as
+> direct, because `job-boards.greenhouse.io/acme` IS Acme's own board, with no third party
+> between you and the application and no fee taken. Set `JOBFITR_DIRECT_ONLY=0` to keep
+> everything, at the cost of the claim.
+
 > Run it from the repo root. The config is resolved relative to the working directory, and falling through to job-radar's built-in defaults is a cliff, not a soft default — those are narrow and tech-only, so a harvest launched from elsewhere quietly returns a fraction of the jobs with no error. It prints a loud warning if it can't find one.
 
 **API keys** are optional and broaden coverage. Copy the template and fill in what you have:

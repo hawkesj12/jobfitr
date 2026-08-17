@@ -14,6 +14,7 @@ The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger
 | Pool eviction  | `jobfitr-evict.timer` → `jobfitr-evict` nightly 04:45, **after** the harvest — deletes unseen>14d / posted>60d |
 | Load-shed      | `ADZUNA_DAILY_CEILING` (env, default 200) → past it, a search degrades to the cache       |
 | Market policy  | `JOBFITR_US_ONLY=1` — US/USD only, enforced at intake in `store.servable_in_us`. On by code default; set explicitly so the deployment states it |
+| Link policy    | `JOBFITR_DIRECT_ONLY=1` — only postings that link to the employer, enforced at intake in `store.direct_to_employer`. Drops ~5% of a harvest and is what makes the front page's "straight from the company" literally true |
 | TLS + routing  | Caddy: serves `web/`, proxies `/api/*`, auto-HTTPS                                        |
 | Secrets        | `/etc/jobfitr/jobfitr.env` (`chmod 640`, root:jobfitr) — **never in git**                 |
 
@@ -106,6 +107,7 @@ For a box already running the old pure-cache build:
 sudo nano /etc/jobfitr/jobfitr.env        # + JOBFITR_DB_DIR=/opt/jobfitr/data
                                           # + ADZUNA_DAILY_CEILING=200
                                           # + JOBFITR_US_ONLY=1
+                                          # + JOBFITR_DIRECT_ONLY=1
 # 2. pull the new code + reinstall (sqlite3+fts5 are stdlib — no new deps)
 sudo -u jobfitr sh -c "cd /opt/jobfitr/jobfitr && git pull && .venv/bin/uv sync --frozen --extra web"
 # 3. install the new/updated units

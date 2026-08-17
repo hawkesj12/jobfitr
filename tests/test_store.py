@@ -31,6 +31,11 @@ def _job(url, title, text="", **kw):
         "posted": "2026-07-10",
         "salary": "",
         "source": "adzuna",
+        # A REAL ROW ALWAYS CARRIES THIS. job_radar's `_coerce` fills a bool for any row with a
+        # truthy source, so a fixture without it was never realistic — and since intake now
+        # requires positive evidence of directness (2026-08-17), omitting it silently emptied
+        # the store in 75 tests. Pass direct_apply=False/None explicitly to test the policy.
+        "direct_apply": True,
     }
     base.update(kw)
     return base
@@ -1108,7 +1113,7 @@ def test_direct_apply_false_is_zero_not_null(db, monkeypatch):
     rows labelled as aggregator links."""
     monkeypatch.setattr(store, "DIRECT_ONLY", False)
     store.upsert_jobs([_job("d1", "Analyst", direct_apply=False)], path=db)
-    store.upsert_jobs([_job("d2", "Analyst")], path=db)
+    store.upsert_jobs([_job("d2", "Analyst", direct_apply=None)], path=db)
     with sqlite3.connect(db) as c:
         vals = dict(c.execute("SELECT url, direct_apply FROM jobs").fetchall())
     assert vals["d1"] == 0
@@ -1132,18 +1137,20 @@ def test_an_aggregator_link_is_dropped_at_intake(db):
         assert [r[0] for r in c.execute("SELECT url FROM jobs")] == ["emp"]
 
 
-def test_an_unstated_direct_apply_is_kept_and_that_is_deliberate(db):
-    """UNKNOWN STAYS UNKNOWN, the same rule geography follows: refuse to assert what nobody
-    told us. Safe by construction today because a NULL arrives from the ATS adapters, whose URL
-    IS the employer's own board — and measured, there are zero NULLs in the live pool.
+def test_an_unstated_direct_apply_is_DROPPED_and_that_is_deliberate(db):
+    """ONLY POSITIVE EVIDENCE PASSES, and the first version of this rule got it backwards.
 
-    This test exists to NAME that assumption. If a future non-ATS source starts emitting NULL on
-    a redirect, the promise breaks silently, and whoever changes this should have to change a
-    test that says so out loud."""
-    store.upsert_jobs([_job("unstated", "Analyst")], path=db)
+    It kept NULL on the grounds that "unknown stays unknown, and a NULL from an ATS adapter is
+    direct by construction". Review showed the premise is false: `job_radar.engine._coerce`
+    fills a BOOL for any row with a truthy source, so NULL is only reachable for a row that
+    never crossed `_coerce`. Measured: zero NULLs in the pool. The sentence described a row that
+    does not exist.
+
+    Costing zero rows either way, the choice is purely which direction a future break fails:
+    keeping NULL breaks a front-page promise SILENTLY, dropping it loses rows LOUDLY. Loud."""
+    store.upsert_jobs([_job("unstated", "Analyst", direct_apply=None)], path=db)
     with sqlite3.connect(db) as c:
-        got = c.execute("SELECT url, direct_apply FROM jobs").fetchone()
-    assert got[0] == "unstated" and got[1] is None
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_the_policy_can_be_turned_off(db, monkeypatch):
@@ -1755,7 +1762,10 @@ def _snapfile(tmp_path, jobs, *, indent=None, meta_last=False, truncate=0):
 
 
 def _jobrows(n):
-    return [{"url": f"https://x/{i}", "title": f"T{i}", "company": "Acme"} for i in range(n)]
+    return [
+        {"url": f"https://x/{i}", "title": f"T{i}", "company": "Acme", "direct_apply": True}
+        for i in range(n)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2190,7 +2200,7 @@ def test_the_snapshot_servable_count_matches_what_intake_actually_keeps(tmp_path
         {"url": "https://x/1", "title": "T", "country": "US", "direct_apply": True},
         {"url": "https://x/2", "title": "T", "country": "US", "direct_apply": False},
         {"url": "https://x/3", "title": "T", "country": "GB", "direct_apply": True},
-        {"url": "https://x/4", "title": "T", "country": "US"},  # unstated → kept
+        {"url": "https://x/4", "title": "T", "country": "US"},  # unstated → DROPPED
     ]
     counted = sum(
         1 for r in rows if store.servable_in_us(r) and store.direct_to_employer(r)
@@ -2199,5 +2209,5 @@ def test_the_snapshot_servable_count_matches_what_intake_actually_keeps(tmp_path
     monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "none.json"))
     store.init(db)
     kept = store.upsert_jobs(rows, path=db)
-    assert counted == kept == 2, f"snapshot counted {counted}, intake kept {kept}"
+    assert counted == kept == 1, f"snapshot counted {counted}, intake kept {kept}"
     assert snap is not None

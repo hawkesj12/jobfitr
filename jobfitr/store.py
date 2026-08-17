@@ -181,7 +181,7 @@ US_ONLY = os.environ.get("JOBFITR_US_ONLY", "1") != "0"
 DIRECT_ONLY = os.environ.get("JOBFITR_DIRECT_ONLY", "1") != "0"
 
 
-def direct_to_employer(job: dict) -> bool:
+def direct_to_employer(row: dict) -> bool:
     """True when the apply link goes to the employer, not through an aggregator.
 
     ── WHY THIS IS A POLICY AND NOT A FACET ─────────────────────────────────────
@@ -190,29 +190,48 @@ def direct_to_employer(job: dict) -> bool:
     application, and never takes a fee for it". Measured `[live prod]` on a 69,457-row pool,
     **3,499 rows (5.04%) were aggregator links** — himalayas 1,667, adzuna 1,510, hn 175, and a
     tail of jobicy/remoteok/arbeitnow/remotive. The `apply_via` facet labelled them honestly,
-    so the DATA never lied; the COPY did.
-    Dropping them costs 5% of the pool and makes the claim literally true. Justin's call,
-    2026-08-17, taken with that cost on the table.
+    so the DATA never lied; the COPY did. Dropping them costs 5% and makes the claim true.
+    Justin's call, 2026-08-17, taken with that cost on the table.
 
-    It also collapses two other problems rather than just one. Those rows are where dead
-    postings hide: `www.adzuna.com/land/ad/...` is a redirect we cannot even verify, since
-    Adzuna answers **403 to both HEAD and GET** from the box. The rows with no nightly liveness
-    heartbeat were a subset of these, so dead-posting coverage goes from 97.7% to ~100%.
+    It also removes the rows where dead postings hide: `www.adzuna.com/land/ad/...` is a
+    redirect that answers **403 to both HEAD and GET** from the box, so it cannot be verified
+    at all. Post-drop, 99.94% of the pool is re-fetched nightly.
 
-    ── UNSTATED PASSES, deliberately ────────────────────────────────────────────
-    Only an explicit `0` is dropped. A NULL means the source never said, and this project's
-    standing rule is that unknown stays unknown — geography does exactly the same thing, and
-    for the same reason: refusing to assert what nobody told us. It is also safe by
-    construction here, because a NULL arrives from the ATS adapters, whose URL *is* the
-    employer's own board. Measured today: **zero NULLs in the pool**, so this changes nothing
-    now and stays honest if that changes.
-    If a future non-ATS source starts emitting NULL on a redirect, this becomes a silent hole —
-    which is why `test_an_unstated_direct_apply_is_kept_and_that_is_deliberate` names the
-    assumption instead of leaving it implicit.
+    ── ONLY POSITIVE EVIDENCE PASSES, and the first version got this wrong ──────
+    Requires an explicit truthy value. An earlier version kept NULL "because unknown stays
+    unknown, and a NULL from an ATS adapter is direct by construction". **That premise is
+    false**, and review caught it: `job_radar.engine._coerce` fills a BOOL for any row with a
+    truthy `source` — verified, greenhouse/ashby/lever all yield `True`, hn and adzuna `False`.
+    NULL is reachable only when `source` is falsy, i.e. a row that never crossed `_coerce`.
+    Measured: 0 NULLs in a 20,000-row snapshot sample and 0 in the pool. The sentence described
+    a row that does not exist.
+
+    Nor does the geography analogy hold. `servable_in_us` passes a blank country because blank
+    is the MAJORITY (14,616 of 31,790) and dropping it would gut the pool — a measured
+    necessity with a text fallback behind it, not a principle. Here "unknown" is zero rows, so
+    invoking "unknown stays unknown" borrowed authority from a rule that was decided on
+    evidence this case does not have.
+
+    So the choice costs nothing today and is purely about which way a future break fails:
+    keeping NULL breaks a front-page promise SILENTLY; dropping it loses rows LOUDLY, visible
+    in both the printed count and `pool_size` vs `snapshot_servable`. Loud wins. The invariant
+    is now statable: every stored row carries positive evidence of directness.
+
+    ── 87 ROWS ARE DROPPED THAT ARGUABLY SHOULD NOT BE ──────────────────────────
+    Of the 3,499, **87 have URLs job-radar's own `_is_direct_apply` calls direct** — all `hn`,
+    all matching its employer's-own-domain branch (`careers.snowflake.com`, `www.cora.ai`,
+    `starbridge.ai/careers`). The cause is upstream: `_coerce` decides `hn` from the SOURCE
+    NAME, while `google_jobs` is exempted and decides from the URL. Deliberately NOT rescued
+    here — a URL-based override would re-open the derive-vs-passthrough boundary for 2.5% of
+    the drop set, and this repo's rule is that jobfitr passes the engine's value through. The
+    fix belongs upstream: make `hn` URL-derived like `google_jobs`.
     """
     if not DIRECT_ONLY:
         return True
-    return job.get("direct_apply") != 0
+    # Reads the NORMALIZED row, not the raw one: `normalize_job` has already run, and its
+    # value is the byte actually stored and read back by `server._apply_via`. A raw string
+    # "0" would pass a raw truthiness test and then store as 1.
+    return bool(row.get("direct_apply"))
 
 
 def servable_in_us(job: dict) -> bool:
@@ -1603,7 +1622,7 @@ def upsert_jobs(jobs: Iterable[dict], path: str | None = None) -> int:
             if not servable_in_us(raw):
                 skipped_non_us += 1
                 continue
-            if not direct_to_employer(raw):
+            if not direct_to_employer(r):
                 skipped_indirect += 1
                 continue
             c.execute(_UPSERT_SQL, {**r, "now": now})
@@ -1739,7 +1758,12 @@ def facet_counts(rows: list[dict]) -> dict:
         "seniority": {},
         "salary_band": {},
         "state": {},  # a USPS code — vocab.us_state guarantees the closed set
-        "apply_via": {},  # 'employer' | 'aggregator'
+        # 'employer' | 'aggregator' | '' — but in practice ONE value since 2026-08-17, because
+        # aggregator links are dropped at intake (see direct_to_employer). The other states are
+        # reachable only with JOBFITR_DIRECT_ONLY=0. web/app.js hides a one-chip facet group, so
+        # the Apply drawer stops rendering on its own rather than showing a control that cannot
+        # narrow anything.
+        "apply_via": {},
     }
     for r in rows:
         for f in facets:
