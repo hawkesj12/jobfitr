@@ -88,7 +88,23 @@ DB_PATH = _default_db_path()
 JOBS_JSON_PATH = os.environ.get("JOBFITR_JOBS_PATH", "jobs.json")
 
 SEARCH_TTL_SECONDS = int(os.environ.get("JOBFITR_SEARCH_TTL", str(24 * 3600)))  # 24h
+# How long a job survives without being SEEN again. `last_seen` is a heartbeat, not an age:
+# `upsert_jobs` refreshes it on every re-harvest, so a posting the employer takes down simply
+# stops being returned and its heartbeat stops advancing. That is the "the listing withdrew
+# itself" rule, and it is a different question from EVICT_POSTED_DAYS ("this listing is old").
+#
+# TWO WINDOWS, because the heartbeat is not equally trustworthy for every source. The nightly
+# harvest re-fetches 11 sources, so for those, absence is confirmed EVERY NIGHT and 14 days is
+# far more patience than the evidence needs — a dead posting sits on the board for a fortnight.
+# The per-search live lane (adzuna, usajobs, google_jobs) is only re-fetched when a user's
+# search happens to match, so its `last_seen` means "someone searched something like this
+# recently", not "this job is alive". Those keep the long window.
+#
+# Measured 2026-08-17, after board discovery finished: 67,851 rows (97.7%) come from harvested
+# sources, 1,606 (2.3%) from the live lane only. Before discovery the harvested share was far
+# smaller, which is why one window was the right call then and is not now.
 EVICT_UNSEEN_DAYS = int(os.environ.get("JOBFITR_EVICT_UNSEEN_DAYS", "14"))
+EVICT_UNSEEN_POLLED_DAYS = int(os.environ.get("JOBFITR_EVICT_UNSEEN_POLLED_DAYS", "3"))
 EVICT_POSTED_DAYS = int(os.environ.get("JOBFITR_EVICT_POSTED_DAYS", "60"))
 # LRU cap — the pool's saturation point, enforced by `evict()` after the age rules.
 #
@@ -1722,18 +1738,146 @@ def newest_posted(path: str | None = None) -> str:
     return (row[0] or "") if row else ""
 
 
+# ── liveness: ask the URL directly, for the rows nothing else can verify ─────
+# Bounded per run. The nightly harvest confirms 97.7% of the pool by re-fetching it; this is
+# for the other 2.3% (adzuna, usajobs, google_jobs), which the per-search live lane only
+# revisits when a user's search happens to match. For those, `last_seen` means "someone
+# searched something like this recently", not "this job is alive", so the only way to know is
+# to ask.
+VERIFY_BATCH = int(os.environ.get("JOBFITR_VERIFY_BATCH", "400"))
+VERIFY_TIMEOUT = float(os.environ.get("JOBFITR_VERIFY_TIMEOUT", "8"))
+VERIFY_WORKERS = int(os.environ.get("JOBFITR_VERIFY_WORKERS", "8"))
+
+# ONLY these mean "the posting is gone". Deliberately narrow, because the cost of being wrong
+# is deleting a live job the user could have applied to:
+#   404 Gone / 410 Gone     — the posting was removed.
+#   Everything else survives — 403 and 429 are the site declining to answer US, not the job
+#   being closed; 5xx is their outage; a 405 means the host dislikes HEAD; and a 200 on a
+#   "this role has closed" PAGE is indistinguishable from a live one without parsing, which
+#   is a guess this function refuses to make.
+_DEAD_STATUSES = frozenset({404, 410})
+
+
+def verify_unpolled(
+    limit: int | None = None, path: str | None = None, now: float | None = None
+) -> dict:
+    """HEAD the least-recently-seen live-lane rows; delete the dead, refresh the living.
+
+    Returns {'checked', 'dead', 'alive', 'unknown'}.
+
+    WHY BOTH HALVES MATTER. Deleting 404s is the obvious half — a user clicking a withdrawn
+    posting is the worst experience this product can deliver. The other half is that a 200
+    REFRESHES `last_seen`, which is what stops the 14-day unseen rule from evicting live
+    aggregator jobs merely because nobody searched for them lately. Without that, the patient
+    window is really "delete unverifiable rows on a timer".
+
+    Ordered by `last_seen` ascending, so each run spends its budget on the rows whose liveness
+    is least certain, and the pool converges instead of re-checking the same fresh rows.
+    """
+    import urllib.error
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    now = now if now is not None else time.time()
+    limit = VERIFY_BATCH if limit is None else limit
+
+    polled: set[str] = set()
+    try:
+        polled = {
+            str(s) for s in (snapshot_meta(Path(JOBS_JSON_PATH)).get("sources") or [])
+        }
+    except (OSError, ValueError):
+        pass
+    if not polled:
+        # Without the harvest's own record of what it fetches we cannot tell which rows lack a
+        # heartbeat, and checking ALL of them would mean HEADing the whole pool. Do nothing and
+        # say so, rather than pick a subset by guesswork.
+        return {"checked": 0, "dead": 0, "alive": 0, "unknown": 0, "skipped": "no snapshot"}
+
+    marks = ",".join("?" * len(polled))
+    with _conn(path) as c:
+        rows = c.execute(
+            f"SELECT url FROM jobs WHERE source NOT IN ({marks}) "
+            f"ORDER BY last_seen ASC LIMIT ?",
+            (*polled, limit),
+        ).fetchall()
+    urls = [r["url"] for r in rows]
+    if not urls:
+        return {"checked": 0, "dead": 0, "alive": 0, "unknown": 0}
+
+    def check(url: str) -> tuple[str, int | None]:
+        req = urllib.request.Request(
+            url, method="HEAD", headers={"User-Agent": "jobfitr-liveness/1.0"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=VERIFY_TIMEOUT) as r:
+                return url, r.status
+        except urllib.error.HTTPError as e:
+            return url, e.code
+        except Exception:  # noqa: BLE001 — a network fault is not evidence about the posting
+            return url, None
+
+    with ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as pool:
+        results = list(pool.map(check, urls))
+
+    dead = [u for u, s in results if s in _DEAD_STATUSES]
+    alive = [u for u, s in results if s is not None and 200 <= s < 400]
+    with _conn(path) as c:
+        for u in dead:
+            c.execute("DELETE FROM jobs WHERE url=?", (u,))
+        for u in alive:
+            c.execute("UPDATE jobs SET last_seen=? WHERE url=?", (now, u))
+    return {
+        "checked": len(results),
+        "dead": len(dead),
+        "alive": len(alive),
+        "unknown": len(results) - len(dead) - len(alive),
+    }
+
+
 # ── the eviction outflow (nightly; the maintenance-as-normal-path) ────────────
 def evict(now: float | None = None, path: str | None = None) -> int:
-    """Garbage-collect: drop jobs unseen for EVICT_UNSEEN_DAYS or posted older than
-    EVICT_POSTED_DAYS, then enforce the MAX_ROWS LRU cap. Returns rows deleted."""
+    """Garbage-collect, then enforce the MAX_ROWS LRU cap. Returns rows deleted.
+
+    Three rules, and they answer different questions:
+      * unseen  — the SOURCE stopped listing it, so it is gone. Window depends on whether the
+                  nightly harvest re-fetches that source (EVICT_UNSEEN_POLLED_DAYS) or only a
+                  user search does (EVICT_UNSEEN_DAYS).
+      * posted  — the listing is simply old (EVICT_POSTED_DAYS).
+      * LRU cap — the pool is at saturation (MAX_ROWS).
+    """
     now = now if now is not None else time.time()
     unseen_cut = now - EVICT_UNSEEN_DAYS * 86400
+    polled_cut = now - EVICT_UNSEEN_POLLED_DAYS * 86400
     posted_cut = date.fromtimestamp(now).toordinal() - EVICT_POSTED_DAYS
     deleted = 0
+
+    # WHICH SOURCES HAVE A HEARTBEAT — read from the harvest's OWN record of what it fetched
+    # rather than a list maintained here. `meta.sources` is written by the harvest that just
+    # ran, so a source joining or leaving the nightly harvest moves its window automatically;
+    # a hardcoded set would rot silently and this project has spent a day fixing exactly that
+    # class of drift. If the snapshot cannot be read, `polled` is empty and EVERY row gets the
+    # long window — the conservative direction, since the failure deletes nothing early.
+    polled: set[str] = set()
+    try:
+        polled = {
+            str(s) for s in (snapshot_meta(Path(JOBS_JSON_PATH)).get("sources") or [])
+        }
+    except (OSError, ValueError):
+        pass
+
     with _conn(path) as c:
-        deleted += c.execute(
-            "DELETE FROM jobs WHERE last_seen < ?", (unseen_cut,)
-        ).rowcount
+        if polled:
+            marks = ",".join("?" * len(polled))
+            deleted += c.execute(
+                f"DELETE FROM jobs WHERE (source IN ({marks}) AND last_seen < ?) "
+                f"OR (source NOT IN ({marks}) AND last_seen < ?)",
+                (*polled, polled_cut, *polled, unseen_cut),
+            ).rowcount
+        else:
+            deleted += c.execute(
+                "DELETE FROM jobs WHERE last_seen < ?", (unseen_cut,)
+            ).rowcount
         # posted is an ISO date string; compare ordinals via a python filter for safety
         stale = []
         for r in c.execute("SELECT url, posted FROM jobs").fetchall():
@@ -1760,8 +1904,42 @@ def evict(now: float | None = None, path: str | None = None) -> int:
 
 
 def main(argv=None) -> int:  # pragma: no cover — exercised via jobfitr-evict
-    """CLI entry for the nightly eviction timer."""
+    """CLI entry for the nightly eviction timer.
+
+    Runs the liveness check FIRST, then eviction. The order matters: verifying refreshes
+    `last_seen` on rows that answer 200, so a live aggregator job is proven alive before the
+    unseen rule looks at it. Reversed, eviction could delete a row this pass was about to
+    confirm.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="jobfitr-evict")
+    ap.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="skip the liveness HEAD check (eviction only)",
+    )
+    ap.add_argument(
+        "--verify-batch",
+        type=int,
+        default=None,
+        help=f"how many live-lane rows to HEAD this run (default {VERIFY_BATCH}). Bounded "
+        f"because the harvest already confirms 97.7%% of the pool by re-fetching it; this is "
+        f"only for the ~2.3%% the per-search live lane touches.",
+    )
+    args = ap.parse_args(argv)
+
     init()
+    if not args.no_verify:
+        v = verify_unpolled(limit=args.verify_batch)
+        if v.get("skipped"):
+            print(f"jobfitr-verify: skipped ({v['skipped']})")
+        elif v["checked"]:
+            print(
+                f"jobfitr-verify: HEADed {v['checked']:,} live-lane rows -> "
+                f"{v['dead']:,} dead (removed), {v['alive']:,} confirmed alive, "
+                f"{v['unknown']:,} no answer (kept)"
+            )
     n = evict()
     stamp = datetime.now(_ET).isoformat(timespec="seconds")
     print(f"jobfitr-evict: removed {n} stale jobs; pool now {pool_size()} @ {stamp}")

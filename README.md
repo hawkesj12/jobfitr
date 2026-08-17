@@ -48,7 +48,7 @@ Watson, New Albany and Shepherdsville. Judge coverage by running a search, never
 ```
 nightly:      resolve companies → harvest → jobs.json ──▶ the SQLite/FTS5 store
 per request:  your 4 answers ──▶ fresh cache OR one live fetch ──▶ rank the store ──▶ ranked links
-nightly:      evict what's gone stale
+nightly:      verify the unverifiable, then evict what's gone
 ```
 
 **The assistant also suggests five adjacent titles**, once your own list is final, and those join the
@@ -152,7 +152,20 @@ cp .env.example .env
 | `jobfitr-serve`    | run the API + front end                                                          |
 | `jobfitr-snapshot` | the baseline harvest → `jobs.json`, and into the store                           |
 | `jobfitr-resolve`  | turn company names into pollable ATS boards (`--stats`, `--audit`, `--discover`) |
-| `jobfitr-evict`    | garbage-collect the stale pool                                                   |
+| `jobfitr-evict`    | verify liveness, then garbage-collect (`--no-verify`, `--verify-batch`)          |
+
+**A posting disappears when the employer takes it down, not just when it gets old.** `last_seen`
+is a heartbeat: the nightly harvest re-fetches every resolved board and refreshes it, so a
+withdrawn listing simply stops being returned and is dropped. Two windows, because the
+heartbeat is not equally trustworthy everywhere — **3 days** for the 11 sources the harvest
+re-fetches (97.7% of the pool: absence is confirmed every night), **14 days** for the
+per-search live lane (adzuna, usajobs, google_jobs), whose `last_seen` only means "someone
+searched something like this recently". For that 2.3%, `jobfitr-evict` HEADs the
+least-recently-seen rows and removes anything answering 404/410 — and a 200 refreshes the
+heartbeat, so a live job is not evicted for want of a search. Ambiguous answers (403, 429, 5xx,
+a network fault) never delete anything: the cost of guessing wrong is removing a job somebody
+could have applied to. Separately, `posted` older than **60 days** goes regardless, and a
+**120,000-row** LRU cap bounds the pool.
 
 ## API
 

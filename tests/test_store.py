@@ -1975,3 +1975,159 @@ def test_meta_errors_are_capped_so_the_prefix_cannot_overflow(tmp_path):
     capped = snap._capped_errors([f"e{i}" for i in range(snap.META_ERROR_CAP + 500)])
     assert len(capped) == snap.META_ERROR_CAP + 1
     assert "500 more" in capped[-1], f"the remainder must be counted: {capped[-1]!r}"
+
+
+# ── the unseen window is source-aware ────────────────────────────────────────
+# `last_seen` is a HEARTBEAT, not an age: upsert_jobs refreshes it on every re-harvest, so a
+# posting the employer takes down stops being returned and its heartbeat stops advancing. But
+# the heartbeat is only trustworthy for sources the NIGHTLY HARVEST re-fetches. The per-search
+# live lane (adzuna, usajobs, google_jobs) is re-fetched only when a user's search matches, so
+# its last_seen means "someone searched something like this recently", not "this job is alive".
+# Measured 2026-08-17: 67,851 rows (97.7%) harvested, 1,606 (2.3%) live-lane only.
+
+
+def _aged(url, src, days_ago, **kw):
+    import time as _t
+
+    return {**_job(url, "Engineer", company="Acme", source=src, **kw),
+            "_last_seen_override": _t.time() - days_ago * 86400}
+
+
+def _seed_aged(db, rows):
+    """upsert then backdate last_seen, since upsert always stamps 'now'."""
+    store.upsert_jobs([{k: v for k, v in r.items() if k != "_last_seen_override"} for r in rows], path=db)
+    with store._conn(db) as c:
+        for r in rows:
+            c.execute("UPDATE jobs SET last_seen=? WHERE url=?",
+                      (r["_last_seen_override"], r["url"]))
+
+
+def test_a_harvested_source_is_evicted_on_the_SHORT_unseen_window(db, tmp_path, monkeypatch):
+    """A greenhouse job unseen for 5 days is gone: the harvest re-polls greenhouse every night,
+    so 5 days of absence is 5 nights of confirmation, not ambiguity."""
+    snap = tmp_path / "jobs.json"
+    snap.write_text(json.dumps({"meta": {"sources": ["greenhouse", "himalayas"]}, "jobs": []}))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(snap))
+    _seed_aged(db, [_aged("https://x/gone", "greenhouse", 5)])
+    store.evict(path=db)
+    with store._conn(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_a_live_lane_source_keeps_the_LONG_unseen_window(db, tmp_path, monkeypatch):
+    """The same 5-day absence for an adzuna row proves nothing — nobody ran a matching search.
+    Deleting it would remove live jobs for lack of a search, not lack of a listing."""
+    snap = tmp_path / "jobs.json"
+    snap.write_text(json.dumps({"meta": {"sources": ["greenhouse", "himalayas"]}, "jobs": []}))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(snap))
+    _seed_aged(db, [_aged("https://x/adz", "adzuna", 5)])
+    store.evict(path=db)
+    with store._conn(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+    # ...but 20 days of absence is past even the patient window
+    _seed_aged(db, [_aged("https://x/adz", "adzuna", 20)])
+    store.evict(path=db)
+    with store._conn(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_an_unreadable_snapshot_makes_every_source_patient(db, tmp_path, monkeypatch):
+    """THE CONSERVATIVE DIRECTION. The polled set is read from the harvest's own meta.sources;
+    if that cannot be read we must not guess, and the safe guess is 'no heartbeat anywhere' —
+    which deletes nothing early rather than deleting a harvested row on 3 days of silence."""
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "absent.json"))
+    _seed_aged(db, [_aged("https://x/gh", "greenhouse", 5)])
+    store.evict(path=db)
+    with store._conn(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1, (
+            "with no snapshot to read, a 5-day-old harvested row must survive"
+        )
+
+
+# ── the liveness check: ask the URL, for the rows nothing else verifies ──────
+
+
+def _verify_snap(tmp_path, monkeypatch, sources=("greenhouse",)):
+    snap = tmp_path / "jobs.json"
+    snap.write_text(json.dumps({"meta": {"sources": list(sources)}, "jobs": []}))
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(snap))
+
+
+def test_a_404_posting_is_removed_and_a_200_refreshes_its_heartbeat(
+    db, tmp_path, monkeypatch
+):
+    """Both halves matter. Deleting 404s stops a user clicking a withdrawn posting — the worst
+    experience this product can deliver. Refreshing 200s is what stops the patient 14-day rule
+    evicting LIVE aggregator jobs merely because nobody searched for them."""
+    _verify_snap(tmp_path, monkeypatch)
+    _seed_aged(db, [
+        _aged("https://x/dead", "adzuna", 10),
+        _aged("https://x/live", "adzuna", 10),
+    ])
+    import urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        import urllib.error
+        url = req.full_url
+        code = {"https://x/dead": 404, "https://x/live": 200}[url]
+        if code >= 400:
+            raise urllib.error.HTTPError(url, code, "gone", {}, None)
+
+        class R:
+            status = code
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return R()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    out = store.verify_unpolled(path=db)
+    assert (out["checked"], out["dead"], out["alive"]) == (2, 1, 1)
+    with store._conn(db) as c:
+        urls = [r[0] for r in c.execute("SELECT url FROM jobs")]
+    assert urls == ["https://x/live"]
+
+
+@pytest.mark.parametrize("code", [403, 429, 500, 405, None])
+def test_an_ambiguous_answer_never_deletes_a_posting(db, tmp_path, monkeypatch, code):
+    """403/429 is the site declining to answer US; 5xx is their outage; 405 means it dislikes
+    HEAD; None is a network fault. None of those is evidence the JOB closed, and the cost of
+    guessing wrong is deleting a job someone could have applied to."""
+    _verify_snap(tmp_path, monkeypatch)
+    _seed_aged(db, [_aged("https://x/maybe", "adzuna", 10)])
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        if code is None:
+            raise OSError("network down")
+        raise urllib.error.HTTPError(req.full_url, code, "nope", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    out = store.verify_unpolled(path=db)
+    assert out["dead"] == 0
+    with store._conn(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_harvested_rows_are_never_HEADed(db, tmp_path, monkeypatch):
+    """The harvest already confirms them by re-fetching. Checking them would waste the budget
+    on the 97.7% that needs it least, and put thousands of needless requests on ATS hosts."""
+    _verify_snap(tmp_path, monkeypatch, sources=("greenhouse",))
+    _seed_aged(db, [_aged("https://x/gh", "greenhouse", 30)])
+    import urllib.request
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *a, **k: pytest.fail("a harvested row was HEADed"),
+    )
+    assert store.verify_unpolled(path=db)["checked"] == 0
+
+
+def test_with_no_snapshot_it_checks_nothing_rather_than_guessing(db, tmp_path, monkeypatch):
+    """Without the harvest's record of what it fetches we cannot tell which rows lack a
+    heartbeat, and HEADing the whole pool is not an acceptable fallback."""
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "gone.json"))
+    _seed_aged(db, [_aged("https://x/a", "adzuna", 30)])
+    out = store.verify_unpolled(path=db)
+    assert out["checked"] == 0 and out.get("skipped")
