@@ -23,7 +23,7 @@ The posted JSON contract (every key optional):
 
 from __future__ import annotations
 
-from .match import has_term
+from .match import has_term, norm_key
 from job_radar.config import Config
 
 # How heavily each kind of user signal weighs in the fit score. A title match is
@@ -153,7 +153,17 @@ def config_from_dict(doc: dict, notes: list[str] | None = None) -> Config:
     cancelled: list[str] = []
     kept: list[str] = []
     for term in exclude:
-        if any(has_term(term, title) for title in titles):
+        # `norm_key(title)`, not the raw title — and this was a real hole, found in review.
+        # `norm_key` collapses punctuation; `has_term`'s pattern joins words with `[\s-]+`,
+        # which accepts a space or a hyphen but NOT a slash or a comma. So for
+        # `titles=["AI/ML Engineer"]` and `exclude=["ai ml engineer"]` the guard saw no match
+        # and kept the term, while a job titled "AI ML Engineer" scored a **tier-100 exact
+        # match** (tier 100 compares on `norm_key`, which erases the slash) and was then
+        # deleted by `_eligible`. Verified: score (100, False), `has_term` against the raw
+        # title False, against the normalised title True.
+        # Normalising here makes the guard read the title the way the SCORER does, which is
+        # the surface that decides whether a job is the user's role.
+        if any(has_term(term, norm_key(title)) for title in titles):
             cancelled.append(term)
         else:
             kept.append(term)

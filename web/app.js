@@ -256,10 +256,15 @@ function renderNotice(data) {
   // put "ai engineer" in both the wanted and the avoided list, and the hard filter removed
   // every AI Engineer posting before scoring. Telling someone their board is stale matters
   // less than telling them we overrode half of what they asked for.
-  if (Array.isArray(data.notes) && data.notes.length) {
-    el.notice.textContent = "Heads up — " + data.notes.join("; ") + ".";
-    return;
-  }
+  // A CORRECTION AND A DEGRADATION CAN BOTH BE TRUE, and in the one real instance they were:
+  // the 20:18:41 search that put "ai engineer" in both lists ALSO carried `degraded: true`.
+  // An early return here would have swallowed the staleness banner on precisely the search
+  // that triggered the correction — the failure mode of "this message is more important" is
+  // that it silences the other one exactly when both matter. So prepend and fall through.
+  const correction =
+    Array.isArray(data.notes) && data.notes.length
+      ? "Heads up — " + data.notes.join("; ") + ". "
+      : "";
   if (data.degraded === "live_search_limit") {
     msg =
       "🌅 We've hit today's live-search limit. jobfitr is a free tool running on free APIs — no paid services — so there's a daily ceiling to stay in budget. These are the freshest saved matches; check back a bit later and the live search opens back up.";
@@ -279,7 +284,7 @@ function renderNotice(data) {
     msg =
       "Thin results — try a broader title or drop a filter, and jobfitr will pull wider next time.";
   }
-  el.notice.textContent = msg;
+  el.notice.textContent = correction + msg;
   show(el.notice, !!msg);
 }
 

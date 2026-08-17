@@ -49,6 +49,23 @@ load_dotenv()
 
 log = logging.getLogger("jobfitr")
 
+# MAKE THE DETECTORS THIS REPO ALREADY WROTE ACTUALLY EMIT.
+#
+# Nothing in this app configured logging, so the root logger sat at WARNING and every
+# `log.info` was a no-op — including `chat._needs_related`'s, whose own comment says "logging
+# it is what makes the miss countable; silently backfilling would hide how often the model
+# ignores the instruction". Review checked: 0 matches for that line in the journal across 17
+# /api/chat requests, while the search log independently proves `related_titles` was empty on
+# 20 of 20 real searches. A 100% failure rate was invisible because the instrument built to
+# count it could not speak.
+#
+# Deliberately narrow: `basicConfig` at WARNING only guarantees a handler EXISTS (it is a
+# no-op when uvicorn has already installed one), and only the `jobfitr` tree is raised to
+# INFO. Raising root would turn on INFO for httpx, urllib3 and friends and bury the signal
+# in the noise, which is its own way of making a detector useless.
+logging.basicConfig(level=logging.WARNING)
+log.setLevel(os.environ.get("JOBFITR_LOG_LEVEL", "INFO").upper())
+
 # Build the SQLite store schema + pull in the current harvest snapshot.
 store.init()
 

@@ -99,6 +99,15 @@ TURN_SYSTEM_PROMPT = (
     "ask this, make the difference explicit: anything they name to HIDE removes a "
     "listing from the results entirely, so it should be real dealbreakers only, while "
     "rank-down just pushes a listing lower. Never put the same term in both.\n"
+    # THE OBSERVED FAILURE, 2026-08-17: this prompt forbade exclude/rank_down overlap
+    # and said nothing about exclude/titles, so a turn put "ai engineer" in BOTH the
+    # wanted and the avoided list. Exclusions are a hard filter, so every AI Engineer
+    # posting was deleted and the board came back entirely DevOps Engineer. There is a
+    # guard in config_builder now, which makes the symptom harmless; this attacks the
+    # cause, costs nothing at runtime, and means the guard should stop firing.
+    "NEVER put a term in `exclude` that also appears in `titles`, or is a word from one "
+    "of them. An exclusion deletes listings outright, so excluding a word of the role "
+    "they asked for would remove the very jobs they came for.\n"
     "REQUIRED before searching = titles AND location. After BOTH are answered, ask "
     "exactly two more questions, ONE per turn, in this order: first what should rank "
     "HIGHER (boosts), then what to AVOID or push down (exclude / rank_down). Ask the "

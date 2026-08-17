@@ -15,6 +15,8 @@ import httpx
 from fastapi.testclient import TestClient
 
 from jobfitr import chat, server
+import pytest
+
 from jobfitr.config_builder import config_from_dict
 
 
@@ -476,3 +478,61 @@ def test_the_override_is_reported_not_silent():
 def test_notes_is_optional_so_every_existing_caller_still_works():
     cfg = config_from_dict({"titles": ["Nurse"], "exclude": ["nurse"]})
     assert cfg.exclude_titles == []
+
+
+def test_the_guard_reads_the_title_the_way_the_SCORER_does(tmp_path):
+    """THE PUNCTUATION HOLE, found in review and not by reasoning.
+
+    `norm_key` collapses punctuation; `has_term`'s pattern joins words with `[\\s-]+`, which
+    accepts a space or hyphen but NOT a slash. So for titles=["AI/ML Engineer"] and
+    exclude=["ai ml engineer"] the guard saw no match and kept the term — while a job titled
+    "AI ML Engineer" scores a **tier-100 exact match** (tier 100 compares on `norm_key`) and
+    was then deleted by `_eligible`. Verified before the fix: score (100, False), guard kept
+    the term.
+
+    The guard therefore normalises its haystack, so it reads a title the way the scorer does.
+    """
+    from jobfitr.match import title_score
+
+    assert title_score(["AI/ML Engineer"], [], "AI ML Engineer") == (100, False)
+    cfg = config_from_dict({"titles": ["AI/ML Engineer"], "exclude": ["ai ml engineer"]}, [])
+    assert cfg.exclude_titles == [], "a tier-100 match would be deleted by this exclusion"
+
+
+@pytest.mark.parametrize(
+    "typed,term",
+    [
+        ("AI/ML Engineer", "ai ml engineer"),
+        ("Engineer, Platform", "engineer platform"),
+        ("Data/Analytics Lead", "data analytics lead"),
+        ("Site Reliability Engineer (SRE)", "site reliability engineer sre"),
+    ],
+)
+def test_punctuation_in_a_typed_title_cannot_hide_the_collision(typed, term):
+    """2,035 of 39,597 corpus titles carry a slash, and `AI/ML Engineer` is about the most
+    likely thing a real person types."""
+    assert config_from_dict({"titles": [typed], "exclude": [term]}, []).exclude_titles == []
+
+
+def test_the_prompt_forbids_the_collision_at_the_source():
+    """The guard makes the symptom harmless; this attacks the cause. The prompt previously
+    forbade exclude/rank_down overlap and said nothing about exclude/titles, which is exactly
+    the mistake the model made."""
+    from jobfitr.chat import TURN_SYSTEM_PROMPT
+
+    low = TURN_SYSTEM_PROMPT.lower()
+    assert "never put a term in `exclude` that also appears in `titles`" in low
+
+
+def test_the_jobfitr_logger_can_actually_emit_info():
+    """The repo is full of `log.info` calls whose comments say the logging IS the instrument —
+    `chat._needs_related`'s says "logging it is what makes the miss countable". Nothing
+    configured logging, so root sat at WARNING and all of them were no-ops: 0 journal matches
+    across 17 /api/chat requests while the search log proved the miss was 20/20."""
+    import logging
+
+    from jobfitr import server  # noqa: F401 — importing is what configures it
+
+    assert logging.getLogger("jobfitr").isEnabledFor(logging.INFO)
+    assert logging.getLogger("jobfitr.chat").isEnabledFor(logging.INFO)
+    assert logging.getLogger().handlers, "no handler means records go nowhere"
