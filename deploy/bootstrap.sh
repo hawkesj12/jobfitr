@@ -98,8 +98,18 @@ if [[ ! -f "$ENV_FILE" ]]; then
 		# never in the repo. Fill in the keys you have, then:
 		#   systemctl restart jobfitr-web && systemctl start jobfitr-harvest
 		JOBFITR_JOBS_PATH=$DATA_DIR/jobs.json
-		JOBFITR_DB_PATH=$DATA_DIR/jobs.db
+		# A DIRECTORY, not a file: the store is named jobs-v<SCHEMA_VERSION>.db so a
+		# schema bump builds beside the serving file instead of over it. One store,
+		# shared by both blue-green slots — see deploy/slots/README.md.
+		JOBFITR_DB_DIR=$DATA_DIR
 		JOBFITR_WEB_DIR=$APP_DIR/web
+
+		# US/USD only, stated explicitly rather than relied on as a code default.
+		# store.US_ONLY already defaults to on, so this changes no behaviour — but the
+		# README promises a US-only board on every page, and a policy that load-bearing
+		# should be visible in the deployment rather than implied by a default nobody
+		# reading /etc/jobfitr/jobfitr.env can see. Set to 0 to keep everything.
+		JOBFITR_US_ONLY=1
 
 		# Live-fetch load-shed: max Adzuna/USAJOBS fetches per day before a search
 		# degrades to the cache (protects the free daily quota). Adzuna free = ~250/day.
