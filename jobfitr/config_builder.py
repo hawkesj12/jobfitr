@@ -194,8 +194,36 @@ def config_from_dict(doc: dict, notes: list[str] | None = None) -> Config:
         else:  # a real place
             cfg.location = loc
             cfg.remote_only = False
-    if isinstance(remote_only, bool):  # explicit flag always wins
-        cfg.remote_only = remote_only
+    # A NAMED PLACE BEATS A STRAY `remote_only`. Same shape as the exclusion bug, same
+    # resolution: when the assistant writes two fields that disagree and one of them DELETES,
+    # honour the other and say so.
+    #
+    # This used to read "explicit flag always wins", and the flag is a hard filter in
+    # `_eligible`. So `location="Louisville, KY"` + `remote_only=true` deleted every job in
+    # Louisville — the exact local coverage this project spent a day protecting, gone to a
+    # boolean nobody typed. `chat.py`'s prompt says "if they say remote, set remote_only=true"
+    # with no rule against combining it with a city, and one real search already carried
+    # `location='anywhere' + remote_only=true`, so the shape is reachable and observed.
+    #
+    # Only a REAL PLACE overrides the flag. `remote`/`anywhere` do not:
+    #   * `remote` + the flag AGREE — nothing to resolve.
+    #   * `anywhere` + the flag is not a contradiction. "Anywhere" is a statement about
+    #     GEOGRAPHY and remote-only is one about ARRANGEMENT; wanting remote work from
+    #     anywhere is coherent, so the flag stands.
+    #
+    # The asymmetry is what decides it. Honouring the city when the user did want remote-only
+    # shows some extra onsite jobs they can filter with one chip; honouring the flag when they
+    # named a city empties the board and offers no way back.
+    if isinstance(remote_only, bool):
+        named_place = bool(cfg.location) and cfg.location != "remote"
+        if remote_only and named_place:
+            if notes is not None:
+                notes.append(
+                    f"kept your location ({cfg.location}) and ignored a remote-only flag — "
+                    f"remote-only would have removed every job there"
+                )
+        else:
+            cfg.remote_only = remote_only
 
     # Freshness.
     max_age = doc.get("max_age_days")

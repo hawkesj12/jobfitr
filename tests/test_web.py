@@ -96,12 +96,27 @@ def test_config_from_dict_no_location_shows_all():
 
 
 def test_config_from_dict_remote_and_anywhere():
+    """BEHAVIOUR CHANGED 2026-08-17, and this test used to encode the defect.
+
+    Its last assertion was `{"location": "Denver", "remote_only": True} -> remote_only is
+    True`, i.e. "the explicit flag always wins". `remote_only` is a HARD FILTER in
+    `server._eligible`, so that combination deleted every job in Denver — and the assistant
+    writes both fields, with a prompt that says "if they say remote, set remote_only=true" and
+    no rule against combining it with a city. One real search already carried
+    `location='anywhere' + remote_only=true`.
+
+    A named place now beats the flag, for the same reason an exclusion no longer beats a title:
+    when two fields disagree and one of them DELETES, honour the other and say so. "anywhere"
+    and "remote" are NOT contradictions and still let the flag stand.
+    """
     assert config_from_dict({"location": "remote"}).remote_only is True
     assert config_from_dict({"location": "anywhere"}).remote_only is False
-    assert (
-        config_from_dict({"location": "Denver", "remote_only": True}).remote_only
-        is True
-    )
+
+    notes = []
+    cfg = config_from_dict({"location": "Denver", "remote_only": True}, notes)
+    assert cfg.location == "Denver"
+    assert cfg.remote_only is False, "the flag would have emptied a Denver board"
+    assert notes and "Denver" in notes[0]
 
 
 def test_config_from_dict_does_not_inherit_tech_exclude_defaults():
