@@ -1088,7 +1088,12 @@ def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
 # the block is a handful of scalars plus one error string per failing board (16 today, ~80
 # even at 5,400 boards, so ~5 KB). 1 MB is therefore enormous headroom for the real layout
 # while keeping the read O(1) instead of O(file).
-_META_PREFIX_BYTES = 1 << 20
+# Two attempts before giving up. 1 MB covers the real layout with ~2.7x headroom over the
+# worst realistic meta (~0.392 MB at one error per board across a fully-resolved universe);
+# 16 MB pushes the overflow point from ~14,000 error lines to ~220,000, past anything
+# plausible. Both are bounded by the PREFIX rather than by the file, which is the property
+# that matters — the fallback below is bounded by the file.
+_META_PREFIX_TRIES = (1 << 20, 1 << 24)
 
 
 def snapshot_meta(p: Path) -> dict:
@@ -1111,22 +1116,35 @@ def snapshot_meta(p: Path) -> dict:
     # every harvest (later calls hit the mtime cache). An earlier version was worse still —
     # `decode()` re-parses from a value's start on every refill, which made skipping the jobs
     # array super-quadratic: 2,447 ms at 7.4 MB, hours projected. Review caught it.
-    with p.open("r", encoding="utf-8") as fp:
-        head = fp.read(_META_PREFIX_BYTES)
-    try:
-        st = _JsonStream(io.StringIO(head), str(p))
-        if _walk_to(st, "meta"):
-            meta = st.decode()
-            if isinstance(meta, dict):
-                return meta
-    except (SnapshotTruncated, SnapshotKeyless, ValueError):
-        pass  # meta is not in the prefix — fall through
+    for limit in _META_PREFIX_TRIES:
+        with p.open("r", encoding="utf-8") as fp:
+            head = fp.read(limit)
+        try:
+            st = _JsonStream(io.StringIO(head), str(p))
+            if _walk_to(st, "meta"):
+                meta = st.decode()
+                if isinstance(meta, dict):
+                    return meta
+        except (SnapshotTruncated, SnapshotKeyless, ValueError):
+            pass  # not in this prefix — try a bigger one, then fall through
+        if len(head) < limit:
+            break  # we already read the whole file; a bigger prefix cannot help
 
     # SLOW PATH, for a layout the writer does not produce: `meta` after `jobs`, or an older
     # rollback artifact. Correctness over speed, once, then the caller's mtime cache holds it.
     # Deliberately a plain parse rather than the streaming walk: at this point we already know
     # we have to cross the whole document, and json's C parser does it ~75x faster than a
-    # character loop. It costs ~2.6x the file in peak memory for one call.
+    # character loop.
+    #
+    # BUT IT IS LOUD, because it costs ~3x the file in peak memory — on a 380 MB snapshot,
+    # ~1.15 GB, which is the exact shape the streaming work removed. Reaching here quietly
+    # would be the failure form this module raises `SnapshotKeyless` to avoid: a plausible
+    # answer that silently costs a gigabyte while /api/health stays green. If this line ever
+    # appears, either the key order changed or `meta` outgrew a 16 MB prefix.
+    print(
+        f"  store: snapshot_meta fell back to a FULL parse of {p} "
+        f"(meta not within {_META_PREFIX_TRIES[-1] >> 20} MB) — peak will be ~3x the file"
+    )
     try:
         with p.open("r", encoding="utf-8") as fp:
             doc = json.load(fp)

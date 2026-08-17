@@ -121,9 +121,14 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
         "count": len(jobs),
         "servable_count": servable,
         "sources": source_ids,
-        "errors": errors,
+        "errors": _capped_errors(errors),
     }
     snapshot = {"meta": meta, "jobs": jobs}
+
+    # EVERY error, in full, to stdout — systemd captures it, so the journal is the durable
+    # record and `meta.errors` can stay bounded (see _capped_errors).
+    for e in errors:
+        print(f"  harvest error: {e}")
 
     # Feed the SQLite store — this is the demoted baseline inflow to the pool (the
     # per-search live fetch owns freshness now). upsert_jobs dedups by url and
@@ -155,6 +160,27 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
         fp.write("\n")
     os.replace(tmp, out)  # atomic on POSIX — an interrupted write leaves the old file
     return meta
+
+
+# `meta.errors` is the ONE unbounded field in the snapshot's meta block, and it grows on
+# exactly the night you least want trouble: one line per failing board. That matters because
+# `store.snapshot_meta` reads meta from a BOUNDED PREFIX to keep /api/health O(1) — overflow
+# the prefix and it falls back to parsing the whole document, which is the ~1 GB shape the
+# streaming work removed. Measured: 16 errors today (0.001 MB), ~5,400 at a fully-resolved
+# universe (0.392 MB), and overflow at ~14,000.
+#
+# So the list is capped HERE, at the writer, which makes the overflow structurally impossible
+# rather than merely unlikely. Nothing is lost: every error is printed in full below, so the
+# journal keeps the complete record while the snapshot carries a bounded sample plus a count.
+META_ERROR_CAP = 200
+
+
+def _capped_errors(errors: list) -> list:
+    """A bounded sample of the harvest's errors, plus a marker for the remainder."""
+    if len(errors) <= META_ERROR_CAP:
+        return list(errors)
+    extra = len(errors) - META_ERROR_CAP
+    return [*errors[:META_ERROR_CAP], f"... and {extra:,} more (see the journal)"]
 
 
 def _harvest_universe(watchlist_path) -> list[dict]:

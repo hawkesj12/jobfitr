@@ -1935,3 +1935,43 @@ def test_skipping_a_value_larger_than_the_read_chunk(tmp_path):
     assert [j["url"] for j in store._iter_snapshot_jobs(p)] == [
         f"https://x/{i}" for i in range(3)
     ]
+
+
+def test_the_full_parse_fallback_announces_itself(tmp_path, capsys, monkeypatch):
+    """QUIET IS THE FAILURE MODE THIS MODULE EXISTS TO AVOID.
+
+    The fallback costs ~3x the file in peak memory — ~1.15 GB on a 380 MB snapshot, the exact
+    shape the streaming work removed. Reaching it silently would be a plausible answer that
+    quietly costs a gigabyte while /api/health stays green, which is precisely why
+    SnapshotKeyless raises rather than returning. So the fallback must say so.
+    """
+    # Shrink the prefix rather than build a >16 MB fixture. Note the path is genuinely hard to
+    # reach: a small meta-last file fits ENTIRELY inside the prefix, so the fast path answers it
+    # and never falls back — which is why this forces the threshold instead of assuming it.
+    monkeypatch.setattr(store, "_META_PREFIX_TRIES", (32, 64))
+    p = _metafile(tmp_path, 200, meta_last=True)
+    assert store.snapshot_meta(p)["count"] == 200, "the fallback must still be CORRECT"
+    out = capsys.readouterr().out
+    assert "FULL parse" in out, f"the slow path was silent: {out!r}"
+
+
+def test_a_small_meta_last_file_never_needs_the_full_parse(tmp_path, capsys):
+    """The prefix holds the whole document, so the fast path answers it. Worth pinning: it is
+    why the test above has to force the threshold, and it means the loud fallback stays rare."""
+    p = _metafile(tmp_path, 200, meta_last=True)
+    assert store.snapshot_meta(p)["count"] == 200
+    assert "FULL parse" not in capsys.readouterr().out
+
+
+def test_meta_errors_are_capped_so_the_prefix_cannot_overflow(tmp_path):
+    """`errors` is the only unbounded field in meta, and it grows on a bad night — one line per
+    failing board. Overflow the read prefix and snapshot_meta falls back to a whole-document
+    parse. Measured: 16 errors today, ~5,400 at a fully-resolved universe, overflow ~14,000.
+    Capping at the WRITER makes that structurally impossible; the journal keeps every line.
+    """
+    from jobfitr import snapshot as snap
+
+    assert snap._capped_errors(["e"] * 10) == ["e"] * 10, "under the cap, nothing changes"
+    capped = snap._capped_errors([f"e{i}" for i in range(snap.META_ERROR_CAP + 500)])
+    assert len(capped) == snap.META_ERROR_CAP + 1
+    assert "500 more" in capped[-1], f"the remainder must be counted: {capped[-1]!r}"
