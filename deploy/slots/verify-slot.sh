@@ -37,6 +37,8 @@ jqv() { printf '%s' "$health" | python3 -c "import json,sys;print(json.load(sys.
 
 pool=$(jqv pool_size)
 snapcount=$(jqv snapshot_count)
+# THE SERVABLE count, not the raw one — see the ratio test below.
+snapservable=$(jqv snapshot_servable)
 imported=$(jqv snapshot_imported_at)
 adz=$(jqv adzuna_ok)
 
@@ -73,15 +75,32 @@ fi
 # 2. the pool is not just NON-EMPTY but the right SIZE. A fixed >1000 floor let a
 #    harvest that silently dropped 90% of the depth lane pass (the pool is ~34k). Gate
 #    on the ratio to what the slot should be serving: the pool is the snapshot plus
-#    live-fetch accumulation, so it should meet or exceed snapshot_count; below 70% of
+#    live-fetch accumulation, so it should meet or exceed the snapshot; below 70% of
 #    it means the slot under-ingested. Keep a small absolute floor for a cold snapshot.
+#
+#    COMPARE AGAINST snapshot_SERVABLE, NOT snapshot_count. `count` is every harvested
+#    row; the pool can only ever hold the rows that survive US-only intake. Those were
+#    the same number while nothing was filtered, and stopped being the same the moment
+#    the intake filter started dropping ~18% — at which point this gate reported
+#    DO NOT FLIP for a perfectly healthy slot, because on a freshly rebuilt one (which
+#    is exactly when the gate runs) the ratio lands near 0.67 against a 0.70 floor.
+#    A gate that fails for its own reasons is worse than no gate: it trains you to
+#    override it. Falls back to snapshot_count for a snapshot written before the field.
 if ! [[ "$pool" =~ ^[0-9]+$ ]] || [[ "$pool" -lt 500 ]]; then
 	bad "pool size" "only ${pool} jobs — the slot has not ingested a snapshot"
-elif [[ "$snapcount" =~ ^[0-9]+$ ]] && [[ "$snapcount" -gt 0 ]] &&
-	[[ $((pool * 10)) -lt $((snapcount * 7)) ]]; then
-	bad "pool size" "${pool} jobs is <70% of the ${snapcount}-job snapshot — under-ingested"
 else
-	ok "pool size" "$(printf "%'d" "$pool") jobs (snapshot ${snapcount})"
+	basis="$snapservable"
+	label="servable"
+	if ! [[ "$basis" =~ ^[0-9]+$ ]] || [[ "$basis" -eq 0 ]]; then
+		basis="$snapcount"
+		label="total (pre-filter — old snapshot)"
+	fi
+	if [[ "$basis" =~ ^[0-9]+$ ]] && [[ "$basis" -gt 0 ]] &&
+		[[ $((pool * 10)) -lt $((basis * 7)) ]]; then
+		bad "pool size" "${pool} jobs is <70% of the ${basis} ${label} — under-ingested"
+	else
+		ok "pool size" "$(printf "%'d" "$pool") jobs (${basis} ${label}, ${snapcount} harvested)"
+	fi
 fi
 
 # 3. THE ONE THAT BIT US: is the slot serving a CURRENT snapshot, or a frozen one?

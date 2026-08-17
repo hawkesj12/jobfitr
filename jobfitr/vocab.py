@@ -504,6 +504,21 @@ guadalajara monterrey queretaro
 # ═══════════════════════════════════════════════════════════════
 _AMBIGUOUS_CODES = frozenset("AR CA CO DE ID IL IN".split())
 
+# ISO 3166-1 alpha-2, for reading a country code off the TAIL of a location. Closed-world
+# and ~250 entries that change roughly once a decade — the opposite maintenance profile
+# from a city list. Seeded from the engine's own map and completed here, because
+# job_radar's `_COUNTRY_CODES` is a curated 62 covering the names its sources SEND, not
+# the full standard.
+_ISO_COUNTRY_CODES = frozenset("""
+AD AE AF AG AL AM AO AR AT AU AZ BA BB BD BE BF BG BH BI BJ BN BO BR BS BT BW BY BZ
+CA CD CF CG CH CI CL CM CN CO CR CU CV CY CZ DE DJ DK DM DO DZ EC EE EG ER ES ET
+FI FJ FM FR GA GB GD GE GH GM GN GQ GR GT GW GY HK HN HR HT HU ID IE IL IN IQ IR IS IT
+JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY
+MA MC MD ME MG MH MK ML MM MN MO MR MT MU MV MW MX MY MZ NA NE NG NI NL NO NP NR NZ
+OM PA PE PG PH PK PL PT PW PY QA RO RS RU RW SA SB SC SD SE SG SI SK SL SM SN SO SR SS SV SY SZ
+TD TG TH TJ TL TM TN TO TR TT TV TW TZ UA UG UK UY UZ VC VE VN VU WS YE ZA ZM ZW
+""".split())
+
 
 def _comma_segments(text) -> list[str]:
     """The comma/semicolon/slash-delimited pieces of a location, accent-folded.
@@ -657,10 +672,16 @@ def place_evidence(location) -> str | None:
                 and us_state(head)
                 and re.search(rf"\b{head.upper()}\b", str(location or ""))
             )
-            if us_state(seg) or code_ok or (len(head) > 2 and us_state(head)):
-                # WEAK when the token is one of the seven USPS codes that are also
-                # country codes (AR CA CO DE ID IL IN) — `DE` is Delaware and Germany,
-                # and the string alone cannot always say which.
+            # THE WHOLE-SEGMENT TEST MUST OBEY THE SAME CASE RULE. It did not, and that
+            # bypass was worth 116 rows: `bangalore, in` segments to `in`, `us_state("in")`
+            # returns Indiana, and the row read AMERICAN. Same for `Dresden, SN, de` and
+            # `Toronto, ON, CA`. A two-letter segment is only a state when the raw string
+            # spelled it in capitals; a longer one (`new mexico`, `ohio`) is unambiguous
+            # and needs no such guard.
+            seg_ok = us_state(seg) and (
+                len(seg) > 2 or re.search(rf"\b{seg.upper()}\b", str(location or ""))
+            )
+            if seg_ok or code_ok or (len(head) > 2 and us_state(head)):
                 strong_us = True
                 break
     if strong_us:
@@ -677,6 +698,26 @@ def place_evidence(location) -> str | None:
         strong_us = True
     if strong_us:
         return "us"
+
+    # ── an ISO COUNTRY CODE in the tail — the single highest-yield foreign rule ──
+    # `bangalore, in` x39 · `Dresden, SN, de` · `Toronto, ON, CA` · `Changzhou, cn` ·
+    # `Braga, pt` · `Campinas, SP, br`. Measured on 8,558 engine-labelled rows, 303 of
+    # 342 foreign jobs that leaked through everything else (89%) end in `, <2-letter>`.
+    # The code rule existed already — it just only ever knew about US STATES.
+    #
+    # CASE IS THE DISCRIMINATOR, the same way it is on the US side. Lowercase `in` is
+    # India; uppercase `IN` is Indiana. So:
+    #   lowercase  -> a country, unless it is `us` (61 US rows end in `, us`)
+    #   uppercase  -> a country ONLY if it is not also a USPS code, which leaves `, CA`
+    #                 ambiguous between California and Canada and therefore untouched.
+    raw = str(location or "").strip()
+    m = re.search(r",\s*([A-Za-z]{2})\s*$", raw)
+    if m:
+        code = m.group(1)
+        up = code.upper()
+        if up != "US" and up in _ISO_COUNTRY_CODES:
+            if code.islower() or up not in US_STATES:
+                return "foreign"
 
     # ── foreign evidence, also graded ────────────────────────────────────────
     toks = set(t.split())

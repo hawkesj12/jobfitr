@@ -11,7 +11,7 @@ The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger
 | App (uvicorn)  | `jobfitr-web.service` → `127.0.0.1:8000`, non-root `jobfitr` user; reads/writes the store |
 | Job store      | SQLite/FTS5 at `/opt/jobfitr/data/jobs.db` (`JOBFITR_DB_PATH`) — the pool the app ranks   |
 | Baseline floor | `jobfitr-harvest.timer` → `jobfitr-snapshot` **daily** → jobs.json + upserts the store    |
-| Pool eviction  | `jobfitr-evict.timer` → `jobfitr-evict` nightly 03:30 — deletes unseen>14d / posted>60d   |
+| Pool eviction  | `jobfitr-evict.timer` → `jobfitr-evict` nightly 04:45, **after** the harvest — deletes unseen>14d / posted>60d |
 | Load-shed      | `ADZUNA_DAILY_CEILING` (env, default 200) → past it, a search degrades to the cache       |
 | TLS + routing  | Caddy: serves `web/`, proxies `/api/*`, auto-HTTPS                                        |
 | Secrets        | `/etc/jobfitr/jobfitr.env` (`chmod 640`, root:jobfitr) — **never in git**                 |

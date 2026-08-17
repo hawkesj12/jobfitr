@@ -98,9 +98,23 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
     jobs = [_clean_row(r) for r in rows]
 
     source_ids = sorted({s for r in jobs for s in _as_list(r.get("sources"))})
+    # `count` is EVERY harvested row; `servable_count` is how many survive US-only
+    # intake. Both are needed because they answer different questions, and conflating
+    # them broke the deploy gate: `verify-slot.sh` compared a POST-filter pool_size
+    # against this PRE-filter count at a 70% floor, so the two numbers had never
+    # measured the same thing. Today's slack hid it — but on a freshly rebuilt slot,
+    # which is exactly when the gate runs, an 18% intake drop lands the ratio near 0.67
+    # and reports DO NOT FLIP for a slot that is fine.
+    #
+    # A gate that fails for its own reasons is worse than no gate: it trains you to
+    # override it. See the same lesson recorded in verify-slot.sh about ARG_MAX.
+    from . import store as _store  # local, like the resolution import above — avoids a cycle
+
+    servable = sum(1 for r in jobs if _store.servable_in_us(r))
     meta = {
         "harvested_at": datetime.now(_ET).isoformat(timespec="seconds"),
         "count": len(jobs),
+        "servable_count": servable,
         "sources": source_ids,
         "errors": errors,
     }

@@ -1012,6 +1012,14 @@ def meta() -> dict:
     }
 
 
+def _snap_meta() -> dict:
+    """The current snapshot's meta block, or an empty one."""
+    try:
+        return snapshot.load_snapshot(store.JOBS_JSON_PATH)["meta"] or {}
+    except Exception:  # noqa: BLE001 — health must answer even with no snapshot
+        return {}
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Status for you + an uptime monitor: which feeds are live, budget used, freshness."""
@@ -1028,8 +1036,19 @@ def health() -> dict:
         # that snapshot plus live-fetch accumulation, so pool_size < snapshot_count
         # means the slot UNDER-ingested — the exact regression verify-slot.sh gates on
         # with a ratio, instead of a fixed floor that a 90%-smaller harvest slips past.
-        "snapshot_count": snapshot.load_snapshot(store.JOBS_JSON_PATH)["meta"].get(
-            "count", 0
+        #
+        # BOTH counts are published because the gate needs the SERVABLE one. `count` is
+        # every harvested row; `servable_count` is how many survive US-only intake, and
+        # the pool can only ever contain the latter. Comparing pool_size against `count`
+        # measured two different populations, which was fine while the filter dropped
+        # ~18% and fatal the moment it did: on a freshly rebuilt slot the ratio lands
+        # near 0.67 against a 0.70 floor and the gate blocks a healthy deploy.
+        #
+        # Falls back to `count` when a snapshot predates this field, so an older
+        # jobs.json still gates on something rather than on zero.
+        "snapshot_count": _snap_meta().get("count", 0),
+        "snapshot_servable": _snap_meta().get(
+            "servable_count", _snap_meta().get("count", 0)
         ),
         "last_successful_fetch": _last_fetch_ok["at"],
         # The harvest snapshot this slot has actually ingested. Stale here means the
