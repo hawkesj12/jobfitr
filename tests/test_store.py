@@ -1685,3 +1685,142 @@ def test_with_neither_set_it_stays_a_bare_local_file(monkeypatch):
     monkeypatch.delenv("JOBFITR_DB_PATH", raising=False)
     monkeypatch.delenv("JOBFITR_DB_DIR", raising=False)
     assert store._default_db_path() == "jobs.db"
+
+
+# ── the snapshot import streams, and a truncated file is never accepted ──────
+# `json.loads(p.read_text())` held the file three ways at once — bytes, str, objects — and
+# measured 2,876 MB peak on a 363 MB jobs.json, roughly 8x the file. The same read runs
+# inside the LIVE web process (server.py calls sync_snapshot when the snapshot is newer),
+# and the ceiling is what capped board discovery: ~4,900 more boards projected a ~777 MB
+# file and a ~6.1 GB peak against 7.9 GB of RAM.
+
+
+def _snapfile(tmp_path, jobs, *, indent=None, meta_last=False, truncate=0):
+    doc = {"jobs": jobs, "meta": {"count": len(jobs)}} if meta_last else {
+        "meta": {"count": len(jobs)},
+        "jobs": jobs,
+    }
+    text = json.dumps(doc, indent=indent)
+    if truncate:
+        text = text[:-truncate]
+    p = tmp_path / "jobs.json"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def _jobrows(n):
+    return [{"url": f"https://x/{i}", "title": f"T{i}", "company": "Acme"} for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [{}, {"indent": 1}, {"indent": 4}, {"meta_last": True}],
+    ids=["compact", "indent1", "indent4", "meta-after-jobs"],
+)
+def test_the_streaming_reader_handles_any_layout(tmp_path, kw):
+    """Deliberately NOT line-based: older harvests wrote the whole document on one line, and
+    a reader that assumed one-job-per-line would silently read ZERO from those."""
+    p = _snapfile(tmp_path, _jobrows(5), **kw)
+    assert [j["url"] for j in store._iter_snapshot_jobs(p)] == [
+        f"https://x/{i}" for i in range(5)
+    ]
+
+
+def test_a_truncated_snapshot_raises_instead_of_importing_a_prefix(tmp_path):
+    """THE LOAD-BEARING ONE. A truncated file yields SOME rows before it fails, and
+    importing a prefix looks exactly like a successful small harvest."""
+    p = _snapfile(tmp_path, _jobrows(20), truncate=40)
+    with pytest.raises(store.SnapshotTruncated):
+        list(store._iter_snapshot_jobs(p))
+
+
+def test_a_truncated_snapshot_does_not_record_the_mtime(db, tmp_path, monkeypatch):
+    """So the next call RETRIES rather than accepting the prefix forever. Recording the
+    mtime on a partial import would freeze the pool at whatever it managed to read."""
+    p = _snapfile(tmp_path, _jobrows(20), truncate=40)
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(p))
+    assert store.sync_snapshot(path=db) == 0
+    assert store._meta_get(store.SNAPSHOT_MTIME_KEY, db) is None, (
+        "a truncated import must stay retryable"
+    )
+
+
+def test_an_empty_or_keyless_snapshot_reads_as_no_rows_not_an_error(tmp_path):
+    """`[]` written on purpose is a real answer; only a TRUNCATED file is a failure."""
+    assert list(store._iter_snapshot_jobs(_snapfile(tmp_path, []))) == []
+    p = tmp_path / "nokey.json"
+    p.write_text(json.dumps({"meta": {}}), encoding="utf-8")
+    assert list(store._iter_snapshot_jobs(p)) == []
+
+
+def test_sync_snapshot_reports_rows_KEPT_not_rows_read(db, tmp_path, monkeypatch):
+    """It used to return `len(rows)`, the count READ, so it over-reported by everything the
+    US-only filter dropped — 15,983 on the most recent real harvest."""
+    jobs = _jobrows(3) + [
+        {"url": "https://x/uk", "title": "T", "company": "Acme", "country": "GB"}
+    ]
+    p = _snapfile(tmp_path, jobs)
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(p))
+    assert store.sync_snapshot(path=db) == 3, "the GB row must not be counted as imported"
+
+
+def test_upsert_jobs_accepts_a_generator_and_does_not_re_iterate(db):
+    """The property that makes the streaming import work at all: one lazy pass. A `len()` or
+    a second loop over `jobs` would silently consume the generator and import nothing."""
+    consumed = []
+
+    def gen():
+        for j in _jobrows(4):
+            consumed.append(j["url"])
+            yield j
+
+    assert store.upsert_jobs(gen(), path=db) == 4
+    assert len(consumed) == 4
+
+
+@pytest.mark.slow
+def test_the_snapshot_reader_peak_is_independent_of_file_size(tmp_path):
+    """THE ASSERTION THAT PINS THE FIX ITSELF.
+
+    The truncation tests above pin the BEHAVIOUR (never accept a prefix) but not the
+    streaming: reverting to `json.loads(p.read_text())` still passes them, because a
+    JSONDecodeError is caught the same way. Verified by mutation. So this measures the thing
+    the change was actually for.
+
+    Measured: streaming peaks at 0.20x the file, `json.loads(read_text())` at ~2.6x — a 13x
+    reduction. (The box's 7.9x figure — 2,876 MB on a 363 MB snapshot — is the harvest's
+    WRITE path, a separate fix in snapshot.py. Do not conflate them.) This read also runs in
+    the live web process, so the spike lands on the process serving traffic.
+    """
+    import tracemalloc
+
+    # ~12 MB: big enough that an 8x load is unmistakable, small enough to stay a fast test.
+    jobs = [
+        {"url": f"https://x/{i}", "title": f"Engineer {i}", "text": "x" * 400}
+        for i in range(25_000)
+    ]
+    p = tmp_path / "jobs.json"
+    p.write_text(json.dumps({"meta": {"count": len(jobs)}, "jobs": jobs}), encoding="utf-8")
+    size = p.stat().st_size
+    del jobs
+
+    tracemalloc.start()
+    n = sum(1 for _ in store._iter_snapshot_jobs(p))
+    _, stream_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    tracemalloc.start()
+    doc = json.loads(p.read_text())
+    _, load_peak = tracemalloc.get_traced_memory()
+    del doc
+    tracemalloc.stop()
+
+    assert n == 25_000
+    assert stream_peak < size, (
+        f"streaming peaked at {stream_peak / 1e6:.1f} MB on a {size / 1e6:.1f} MB file — "
+        f"it is not streaming"
+    )
+    assert stream_peak * 4 < load_peak, (
+        f"streaming {stream_peak / 1e6:.1f} MB vs json.loads {load_peak / 1e6:.1f} MB — "
+        f"expected a large margin; is the reader still buffering the whole file?"
+    )

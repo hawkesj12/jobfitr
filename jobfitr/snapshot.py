@@ -96,6 +96,11 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
             )
 
     jobs = [_clean_row(r) for r in rows]
+    # DROP the engine's copy. `rows` and `jobs` hold the same ~47,000 records — bodies and
+    # all — and `rows` is dead from here on, so keeping the name alive costs a full second
+    # copy at exactly the moment the write below needs the headroom. Measured: the harvest
+    # peaked at 2,876 MB on a 363 MB snapshot.
+    rows = None
 
     source_ids = sorted({s for r in jobs for s in _as_list(r.get("sources"))})
     # `count` is EVERY harvested row; `servable_count` is how many survive US-only
@@ -136,7 +141,18 @@ def build_snapshot(cfg, watchlist_path, out_path) -> dict:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out) + ".tmp")
-    tmp.write_text(json.dumps(snapshot, default=_json_default) + "\n")
+    # STREAM the write. `json.dumps(...)` built the entire ~363 MB document as one Python
+    # string and then handed that string to write_text — a third full copy of the data, on
+    # top of `jobs`, at the peak of the run. `json.dump(fp)` iterates and writes in chunks
+    # instead, so the document is never resident.
+    #
+    # This is what capped board discovery: ~4,900 more boards projected a ~777 MB snapshot
+    # and a ~6.1 GB peak against 7.9 GB of RAM. An OOM-kill here is quiet, too — the atomic
+    # replace below means the store keeps the OLD file, so the pool freezes while
+    # /api/health reads fine.
+    with tmp.open("w", encoding="utf-8") as fp:
+        json.dump(snapshot, fp, default=_json_default)
+        fp.write("\n")
     os.replace(tmp, out)  # atomic on POSIX — an interrupted write leaves the old file
     return meta
 

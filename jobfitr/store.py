@@ -24,6 +24,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -855,6 +856,99 @@ def note_live_fetch(path: str | None = None) -> int:
 SNAPSHOT_MTIME_KEY = "jobs_json_mtime"
 
 
+class SnapshotTruncated(RuntimeError):
+    """jobs.json ended mid-object. Distinct from "unparseable" on purpose.
+
+    A truncated file yields SOME rows before it fails, and importing a prefix would look
+    exactly like a successful small harvest — the silent-zero shape this codebase keeps
+    getting bitten by. So the streamer raises and `sync_snapshot` declines to record the
+    mtime, which means the next call retries instead of accepting the prefix forever.
+    """
+
+
+def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
+    """Yield each job from a jobs.json WITHOUT holding the file in memory.
+
+    ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
+    This used to be `json.loads(p.read_text())`, which holds the whole file three ways at
+    once: raw bytes, then a decoded str, then the Python objects. Measured with tracemalloc,
+    that parse peaks at **~2.6x the file size**, against **0.20x** for this streamer — a 13x
+    reduction. And the read runs inside the LIVE WEB PROCESS (`server.py` calls sync_snapshot
+    whenever the snapshot is newer), so on a 777 MB file the spike would be ~2 GB landing on
+    the process that is serving traffic.
+
+    Do not confuse this with the harvest's own 2,876 MB peak on a 363 MB snapshot (7.9x).
+    That was the WRITE side — the engine's rows, a full copy in `jobs`, and one giant
+    `json.dumps` string, all resident together — and it is fixed separately in
+    `snapshot.py`. Two different multipliers for two different paths; both had to go, because
+    together they capped board discovery at ~4,900 boards short of the full universe.
+
+    ── HOW, WITHOUT A DEPENDENCY ────────────────────────────────────────────────
+    `raw_decode` over a sliding buffer. It parses one object at a time from wherever it is
+    told to start, so we locate the `"jobs"` array once and then pull elements, refilling
+    the buffer only when a decode runs short. Deliberately NOT line-based: the file's
+    layout is not guaranteed (older harvests wrote it all on one line), and a reader that
+    assumed one-job-per-line would silently read zero from those.
+
+    Consumed prefix is trimmed as we go, so peak memory is the buffer plus one job, not the
+    file. `upsert_jobs` already iterates lazily, so handing it this generator keeps the
+    whole import flat without any batching logic.
+    """
+    dec = json.JSONDecoder()
+    read = 1 << 16
+    with p.open("r", encoding="utf-8") as fp:
+        buf = ""
+        # locate `"jobs"` — meta may come before or after it
+        while '"jobs"' not in buf:
+            chunk = fp.read(read)
+            if not chunk:
+                return  # no jobs key at all: an empty answer, not a truncated one
+            buf += chunk
+        i = buf.index('"jobs"') + len('"jobs"')
+        # then the ':' and the opening '['
+        while True:
+            while i < len(buf) and buf[i] in " \t\r\n:":
+                i += 1
+            if i < len(buf):
+                break
+            chunk = fp.read(read)
+            if not chunk:
+                return
+            buf += chunk
+        if buf[i] != "[":
+            return  # "jobs" is not an array — treat as no rows rather than guessing
+        i += 1
+        while True:
+            # skip whitespace and element commas, refilling as needed
+            while True:
+                while i < len(buf) and buf[i] in " \t\r\n,":
+                    i += 1
+                if i < len(buf):
+                    break
+                chunk = fp.read(read)
+                if not chunk:
+                    raise SnapshotTruncated(f"{p} ended inside the jobs array")
+                buf, i = buf[i:] + chunk, 0
+            if buf[i] == "]":
+                return  # clean end of the array
+            # decode exactly one element, growing the buffer until it fits
+            while True:
+                try:
+                    obj, end = dec.raw_decode(buf, i)
+                    break
+                except ValueError:
+                    chunk = fp.read(read)
+                    if not chunk:
+                        raise SnapshotTruncated(
+                            f"{p} ended mid-object at offset ~{i}"
+                        ) from None
+                    buf += chunk
+            yield obj
+            i = end
+            if i > (1 << 20):  # trim the consumed prefix so the buffer cannot grow
+                buf, i = buf[i:], 0
+
+
 def sync_snapshot(path: str | None = None) -> int:
     """Import jobs.json if it's newer than the copy this store last ingested.
 
@@ -871,14 +965,23 @@ def sync_snapshot(path: str | None = None) -> int:
     if seen is not None and float(seen) >= mtime:
         return 0
     try:
-        snap = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+        # A GENERATOR, not a list — see _iter_snapshot_jobs. upsert_jobs consumes it
+        # lazily inside one transaction, so neither side ever holds the whole file.
+        # Its return value is the KEPT count, which is what this function should report:
+        # the old `len(rows)` counted rows READ, so it over-reported by everything the
+        # US-only filter dropped (15,983 on the most recent harvest).
+        imported = upsert_jobs(_iter_snapshot_jobs(p), path=path)
+    except SnapshotTruncated as e:
+        # Do NOT record the mtime: a partial import must be retried, not accepted. And say
+        # so — this used to be swallowed into `return 0`, which reads identically to
+        # "already current".
+        print(f"  store: snapshot import ABORTED — {e}; will retry")
         return 0
-    rows = snap.get("jobs", []) if isinstance(snap, dict) else []
-    if rows:
-        upsert_jobs(rows, path=path)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  store: snapshot unreadable ({type(e).__name__}: {e}); will retry")
+        return 0
     _meta_set(SNAPSHOT_MTIME_KEY, repr(mtime), path)
-    return len(rows)
+    return imported
 
 
 # ── the company -> ATS resolution ledger ──────────────────────────────────────
@@ -1198,8 +1301,12 @@ def snapshot_imported_at(path: str | None = None) -> str | None:
 
 
 # ── writes ────────────────────────────────────────────────────────────────────
-def upsert_jobs(jobs: list[dict], path: str | None = None) -> int:
+def upsert_jobs(jobs: Iterable[dict], path: str | None = None) -> int:
     """Insert or refresh rows, deduped by url. Normalizes raw rows first.
+
+    Takes any ITERABLE, not just a list, and the loop below consumes it lazily — that is
+    what lets `sync_snapshot` hand it a streaming reader so a 363 MB snapshot never lands
+    in memory at once. Do not add a `len()` or a second pass over `jobs`.
 
     An existing url has its last_seen/posted/salary (and derived tags) refreshed —
     so an actively-re-fetched job's last_seen keeps resetting and it never evicts.
