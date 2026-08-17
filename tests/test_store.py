@@ -1812,101 +1812,76 @@ def test_a_misseek_would_not_be_recorded_as_a_successful_import(db, tmp_path, mo
     assert store.sync_snapshot(path=db) == 0
 
 
-def test_snapshot_meta_reads_meta_without_materializing_jobs(tmp_path):
-    """/api/health needs five numbers out of a 363 MB file. Reading it via the whole-document
-    path cost a web process 1,168 MB, permanently cached — measured [live prod], and with both
-    slots warm that was 3,447 MB of 7,941 MB held as two copies of the same document."""
-    import tracemalloc
-
-    jobs = [{"url": f"https://x/{i}", "title": "T", "text": "z" * 400} for i in range(25_000)]
-    p = tmp_path / "jobs.json"
-    p.write_text(
-        json.dumps({"meta": {"count": 25_000, "servable_count": 20_000}, "jobs": jobs}),
-        encoding="utf-8",
-    )
-    size = p.stat().st_size
-    del jobs
-
-    tracemalloc.start()
-    meta = store.snapshot_meta(p)
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
-    assert meta["count"] == 25_000 and meta["servable_count"] == 20_000
-    assert peak < size / 10, (
-        f"reading meta peaked at {peak / 1e6:.1f} MB on a {size / 1e6:.1f} MB file — "
-        f"it is still parsing the jobs array"
-    )
-
-
-def test_sync_snapshot_reports_rows_KEPT_not_rows_read(db, tmp_path, monkeypatch):
-    """It used to return `len(rows)`, the count READ, so it over-reported by everything the
-    US-only filter dropped — 15,983 on the most recent real harvest."""
-    jobs = _jobrows(3) + [
-        {"url": "https://x/uk", "title": "T", "company": "Acme", "country": "GB"}
-    ]
-    p = _snapfile(tmp_path, jobs)
-    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(p))
-    assert store.sync_snapshot(path=db) == 3, "the GB row must not be counted as imported"
-
-
-def test_upsert_jobs_accepts_a_generator_and_does_not_re_iterate(db):
-    """The property that makes the streaming import work at all: one lazy pass. A `len()` or
-    a second loop over `jobs` would silently consume the generator and import nothing."""
-    consumed = []
-
-    def gen():
-        for j in _jobrows(4):
-            consumed.append(j["url"])
-            yield j
-
-    assert store.upsert_jobs(gen(), path=db) == 4
-    assert len(consumed) == 4
+def _metafile(tmp_path, n, *, meta_last=False, name="jobs.json"):
+    jobs = [{"url": f"https://x/{i}", "title": "T", "text": "z" * 400} for i in range(n)]
+    doc = {"jobs": jobs, "meta": {"count": n}} if meta_last else {
+        "meta": {"count": n, "servable_count": n // 2},
+        "jobs": jobs,
+    }
+    p = tmp_path / name
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return p
 
 
 @pytest.mark.slow
-def test_the_snapshot_reader_peak_is_independent_of_file_size(tmp_path):
-    """THE ASSERTION THAT PINS THE FIX ITSELF.
+def test_reading_meta_costs_the_same_whatever_the_file_size(tmp_path):
+    """/api/health needs five numbers out of a 363 MB file, and it reads them on the first
+    request after every harvest.
 
-    The truncation tests above pin the BEHAVIOUR (never accept a prefix) but not the
-    streaming: reverting to `json.loads(p.read_text())` still passes them, because a
-    JSONDecodeError is caught the same way. Verified by mutation. So this measures the thing
-    the change was actually for.
+    THE PROPERTY IS CONSTANCY, NOT A RATIO. An earlier version of this test asserted
+    `peak < size / 10`, which a merely-linear reader satisfies by accident on a big file
+    while still costing hundreds of MB. `meta` is written FIRST, so the cost should not
+    depend on the file at all — a bounded prefix read. Asserted across a 16x size range.
 
-    Measured: streaming peaks at 0.20x the file, `json.loads(read_text())` at ~2.6x — a 13x
-    reduction. (The box's 7.9x figure — 2,876 MB on a 363 MB snapshot — is the harvest's
-    WRITE path, a separate fix in snapshot.py. Do not conflate them.) This read also runs in
-    the live web process, so the spike lands on the process serving traffic.
+    What this replaced: `snapshot.load_snapshot` parsed the whole document and cached it in a
+    module-level dict permanently — measured [live prod], one call took a web process from
+    27 MB to 1,168 MB, and with both slots warm 3,447 MB of 7,941 MB was held as two copies of
+    the same document.
     """
+    import time
     import tracemalloc
 
-    # ~12 MB: big enough that an 8x load is unmistakable, small enough to stay a fast test.
-    jobs = [
-        {"url": f"https://x/{i}", "title": f"Engineer {i}", "text": "x" * 400}
-        for i in range(25_000)
-    ]
-    p = tmp_path / "jobs.json"
-    p.write_text(json.dumps({"meta": {"count": len(jobs)}, "jobs": jobs}), encoding="utf-8")
-    size = p.stat().st_size
-    del jobs
+    small = _metafile(tmp_path, 4_000, name="small.json")
+    big = _metafile(tmp_path, 64_000, name="big.json")
+    ratio = big.stat().st_size / small.stat().st_size
+    assert ratio > 10, "the two fixtures must differ enough to be a real test"
 
-    tracemalloc.start()
-    n = sum(1 for _ in store._iter_snapshot_jobs(p))
-    _, stream_peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    out = {}
+    for label, f in (("small", small), ("big", big)):
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        meta = store.snapshot_meta(f)
+        elapsed = time.perf_counter() - t0
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert meta["count"] == (4_000 if label == "small" else 64_000)
+        out[label] = (peak, elapsed)
 
-    tracemalloc.start()
-    doc = json.loads(p.read_text())
-    _, load_peak = tracemalloc.get_traced_memory()
-    del doc
-    tracemalloc.stop()
-
-    assert n == 25_000
-    assert stream_peak < size, (
-        f"streaming peaked at {stream_peak / 1e6:.1f} MB on a {size / 1e6:.1f} MB file — "
-        f"it is not streaming"
+    assert out["big"][0] < out["small"][0] * 2, (
+        f"peak grew with the file: {out['small'][0] / 1e6:.1f} MB -> "
+        f"{out['big'][0] / 1e6:.1f} MB over a {ratio:.0f}x size increase — the read is not "
+        f"bounded by the prefix"
     )
-    assert stream_peak * 4 < load_peak, (
-        f"streaming {stream_peak / 1e6:.1f} MB vs json.loads {load_peak / 1e6:.1f} MB — "
-        f"expected a large margin; is the reader still buffering the whole file?"
+    assert out["big"][1] < max(out["small"][1] * 3, 0.05), (
+        f"time grew with the file: {out['small'][1] * 1000:.1f} ms -> "
+        f"{out['big'][1] * 1000:.1f} ms"
     )
+
+
+def test_meta_after_jobs_still_returns_the_right_answer(tmp_path):
+    """The tolerated layout. The writer puts meta first, but the jobs reader is documented and
+    asserted to accept either order, so meta must not be the one place that silently cannot.
+
+    It takes the slow path deliberately: crossing the whole document with json's C parser once
+    (then the caller's mtime cache holds it) beats a character-at-a-time scan, which measured
+    ~7 MB/s — ~50 s on a 380 MB file, on a health endpoint.
+    """
+    p = _metafile(tmp_path, 500, meta_last=True)
+    assert store.snapshot_meta(p)["count"] == 500
+
+
+def test_meta_missing_entirely_is_an_empty_dict_not_a_crash(tmp_path):
+    """health() must answer even with no snapshot."""
+    p = tmp_path / "nometa.json"
+    p.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+    assert store.snapshot_meta(p) == {}

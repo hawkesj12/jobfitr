@@ -19,6 +19,7 @@ never block and writers serialize safely.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -932,6 +933,80 @@ class _JsonStream:
         if self.pos > (1 << 20):
             self.buf, self.pos = self.buf[self.pos :], 0
 
+    def _need(self) -> None:
+        """Ensure one more character is available, trimming what is behind the cursor."""
+        if self.pos < len(self.buf):
+            return
+        self.buf, self.pos = self.buf[self.pos :], 0
+        if not self._more():
+            raise SnapshotTruncated(f"{self.name} ended mid-value")
+
+    def skip_value(self) -> None:
+        """Advance past one JSON value WITHOUT parsing it.
+
+        Why this is not `decode()`: `raw_decode` re-parses a value from its START on every
+        buffer refill, and `self.buf += chunk` reallocates alongside — so skipping a large
+        value that way is super-quadratic. Measured on a meta-LAST file, where the value to
+        skip IS the whole jobs array: 20 ms at 0.9 MB, 84 ms at 1.9 MB, 427 ms at 3.7 MB,
+        **2,447 ms at 7.4 MB** — 5.7x per doubling where linear is 2.0x, and peaking at 2.60x
+        the file, i.e. exactly the `json.loads` cost the streamer was written to remove.
+        Projected to a 380 MB snapshot that is hours, on `/api/health`, which is strictly
+        worse than the 1,168 MB spike it replaced.
+
+        Not currently reachable — today's writer emits `meta` first, 990 bytes ahead of the
+        jobs key, verified on the live file. It is fixed anyway because the meta-last layout
+        is DOCUMENTED as supported and asserted in the test suite, so the tolerance has to be
+        real rather than nominal: one key-order change or one older rollback artifact and
+        health hangs.
+
+        A depth counter over braces and brackets, string- and escape-aware so a `}` inside a
+        string cannot close a level. Scalars go through `decode()` — they are small by
+        construction and the retry cost does not bite.
+        """
+        if not self.skip(" \t\r\n"):
+            raise SnapshotTruncated(f"{self.name} ended where a value was expected")
+        ch = self.buf[self.pos]
+        if ch not in "{[\"":
+            self.decode()  # number, true, false, null — tiny
+            return
+        if ch == '"':
+            self.pos += 1
+            esc = False
+            while True:
+                self._need()
+                c = self.buf[self.pos]
+                self.pos += 1
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    return
+                self.trim()
+        depth = 0
+        in_str = False
+        esc = False
+        while True:
+            self._need()
+            c = self.buf[self.pos]
+            self.pos += 1
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+                if depth == 0:
+                    return
+            self.trim()
+
     def enter_object(self) -> bool:
         """Consume the opening `{`. False if the document is empty."""
         if not self.skip(" \t\r\n\ufeff"):
@@ -972,7 +1047,9 @@ def _walk_to(st: _JsonStream, want: str) -> bool:
             return False
         if key == want:
             return True
-        st.decode()  # not the key we want — consume its value and continue
+        # SKIP, do not decode. `decode()` here was super-quadratic on a large skipped value
+        # (the meta-last case, where the value is the whole jobs array) — see skip_value.
+        st.skip_value()
 
 
 def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
@@ -1005,6 +1082,14 @@ def _iter_snapshot_jobs(p: Path) -> Iterator[dict]:
             st.trim()
 
 
+# How much of the file `snapshot_meta` will read before giving up on the fast path. The
+# writer puts `meta` first — verified on the live file, 990 bytes ahead of the jobs key — and
+# the block is a handful of scalars plus one error string per failing board (16 today, ~80
+# even at 5,400 boards, so ~5 KB). 1 MB is therefore enormous headroom for the real layout
+# while keeping the read O(1) instead of O(file).
+_META_PREFIX_BYTES = 1 << 20
+
+
 def snapshot_meta(p: Path) -> dict:
     """The snapshot's `meta` block alone, without materializing `jobs`.
 
@@ -1016,11 +1101,37 @@ def snapshot_meta(p: Path) -> dict:
 
     That cache, not the harvest, was the real ceiling on board discovery.
     """
+    # FAST PATH: `meta` is written first, so it lives in the first few KB. Read a bounded
+    # prefix and parse it there — O(1) in the file size, and it cannot hang.
+    #
+    # This exists because the general "walk past whatever precedes meta" path is only as fast
+    # as a Python loop over characters: ~7 MB/s, so ~50 s on a 380 MB snapshot. That is fine
+    # for a one-off but not for `/api/health`, which calls this on the first request after
+    # every harvest (later calls hit the mtime cache). An earlier version was worse still —
+    # `decode()` re-parses from a value's start on every refill, which made skipping the jobs
+    # array super-quadratic: 2,447 ms at 7.4 MB, hours projected. Review caught it.
     with p.open("r", encoding="utf-8") as fp:
-        st = _JsonStream(fp, str(p))
-        if not _walk_to(st, "meta"):
-            return {}
-        meta = st.decode()
+        head = fp.read(_META_PREFIX_BYTES)
+    try:
+        st = _JsonStream(io.StringIO(head), str(p))
+        if _walk_to(st, "meta"):
+            meta = st.decode()
+            if isinstance(meta, dict):
+                return meta
+    except (SnapshotTruncated, SnapshotKeyless, ValueError):
+        pass  # meta is not in the prefix — fall through
+
+    # SLOW PATH, for a layout the writer does not produce: `meta` after `jobs`, or an older
+    # rollback artifact. Correctness over speed, once, then the caller's mtime cache holds it.
+    # Deliberately a plain parse rather than the streaming walk: at this point we already know
+    # we have to cross the whole document, and json's C parser does it ~75x faster than a
+    # character loop. It costs ~2.6x the file in peak memory for one call.
+    try:
+        with p.open("r", encoding="utf-8") as fp:
+            doc = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    meta = doc.get("meta") if isinstance(doc, dict) else None
     return meta if isinstance(meta, dict) else {}
 
 
