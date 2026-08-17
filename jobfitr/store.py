@@ -90,7 +90,22 @@ JOBS_JSON_PATH = os.environ.get("JOBFITR_JOBS_PATH", "jobs.json")
 SEARCH_TTL_SECONDS = int(os.environ.get("JOBFITR_SEARCH_TTL", str(24 * 3600)))  # 24h
 EVICT_UNSEEN_DAYS = int(os.environ.get("JOBFITR_EVICT_UNSEEN_DAYS", "14"))
 EVICT_POSTED_DAYS = int(os.environ.get("JOBFITR_EVICT_POSTED_DAYS", "60"))
-MAX_ROWS = int(os.environ.get("JOBFITR_MAX_ROWS", "50000"))  # LRU cap (saturation)
+# LRU cap — the pool's saturation point, enforced by `evict()` after the age rules.
+#
+# RAISED 50,000 -> 120,000 on 2026-08-17, because the number was chosen when the harvest
+# resolved ~1,400 ATS boards and finishing board discovery took that to 6,095. The harvest now
+# offers **66,494 US-servable rows** of 100,993 harvested, and the pool reached 68,512 — 37%
+# over the old cap. That is not saturation, it is a ceiling set against a third of the current
+# supply, and honouring it would LRU-evict real US jobs for being slightly older rather than
+# stale (the 14-day unseen and 60-day posted rules already handle stale).
+#
+# What the headroom costs, stated: ~1.2 GB of SQLite against 96 GB of disk at 7% used, so
+# space is not the constraint. The real trade is that a wider pool means more BM25 candidates
+# per search and therefore more scoring work — retrieval is FTS5-indexed so the fetch barely
+# moves, but the scoreboard runs over every candidate by design (a candidate cannot be
+# discarded before it is scored). Measured before/after when this was raised; see the release
+# notes in _private.
+MAX_ROWS = int(os.environ.get("JOBFITR_MAX_ROWS", "120000"))
 
 # How much of a job description the scorer gets to read. Raised 2,000 -> 8,000 on
 # 2026-08-10. The metric is not characters, it is SHARE OF BOOST POINTS CAPTURED —
