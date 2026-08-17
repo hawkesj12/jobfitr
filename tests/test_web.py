@@ -1444,6 +1444,58 @@ def test_a_real_search_writes_a_log_line(client, monkeypatch, tmp_path):
     assert line["ms"] >= 0
 
 
+def test_the_log_records_the_exclusion_the_guard_cancelled(
+    client, monkeypatch, tmp_path
+):
+    """THE EXACT CONFIG THAT BROKE THE BOARD on 2026-08-17, asserted end to end at the
+    endpoint rather than at `record()`. The unit test proves the field serializes; only
+    this proves the DIFF is computed against what actually ran, which is the part that
+    can silently become `[]` if `cfg.exclude_titles` is ever read before the guard.
+
+    Before the field existed, this search and one where the model never wrote the
+    exclusion produced byte-identical log lines — so step 8's digest could not tell a
+    repaired contradiction from a clean search."""
+    from jobfitr import searchlog
+
+    p = tmp_path / "searches.jsonl"
+    monkeypatch.setattr(searchlog, "LOG_PATH", str(p))
+    _seed([_job("AI Engineer", url="https://x/1")])
+    _mark_fresh(["ai engineer"])
+    _no_fetch(monkeypatch)
+
+    d = client.post(
+        "/api/score",
+        json={
+            "titles": ["ai engineer"],
+            # The model wrote the user's own target role into the avoid list.
+            "exclude": ["ai engineer", "senior"],
+        },
+    ).json()
+
+    line = json.loads(p.read_text().strip())
+    assert line["overrides"] == ["exclude:ai engineer"], (
+        "only the self-deleting term is an override"
+    )
+    assert line["exclude"] == ["senior"], "the log's `exclude` stays POST-guard"
+    assert d["count"] == 1, "and the job the exclusion would have deleted survived"
+
+
+def test_an_ordinary_search_logs_no_overrides_key(client, monkeypatch, tmp_path):
+    """The counterpart, and the one that makes the field countable: a search whose
+    exclusions are all honoured must not carry the key at all, so a reviewer can grep
+    for its presence to count contradictions."""
+    from jobfitr import searchlog
+
+    p = tmp_path / "searches.jsonl"
+    monkeypatch.setattr(searchlog, "LOG_PATH", str(p))
+    _seed([_job("AI Engineer", url="https://x/1")])
+    _mark_fresh(["ai engineer"])
+    _no_fetch(monkeypatch)
+
+    client.post("/api/score", json={"titles": ["ai engineer"], "exclude": ["intern"]})
+    assert "overrides" not in json.loads(p.read_text().strip())
+
+
 def test_the_log_never_costs_a_user_their_search(client, monkeypatch, tmp_path):
     """A search must succeed even when the log cannot be written — the production case
     is a systemd ReadWritePaths that was not updated, which fails every write with

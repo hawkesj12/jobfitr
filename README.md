@@ -109,7 +109,7 @@ points = title tier + Σ boost points − penalties
 
 Three properties this design guarantees, and all three are tested over every listing in the corpus:
 
-- **The number means the same thing every day.** 92 is 92 whether it's alone on the board or one of fifty, and whether you search today or next month. Only the card's *bar* is relative — it's a fraction of the best match in front of you.
+- **The number means the same thing every day.** 92 is 92 whether it's alone on the board or one of fifty, and whether you search today or next month. Only the card's _bar_ is relative — it's a fraction of the best match in front of you.
 - **Naming another skill can never lower your score.** Evidence only ever adds.
 - **The chips on the card sum to the number beside them.** A breakdown that doesn't reconcile is worse than showing none, because it invites you to trust a wrong explanation.
 
@@ -198,9 +198,10 @@ analytics script, and nothing that follows a person between visits or between se
 A self-hosted instance can optionally keep a **search-quality log** — set
 `JOBFITR_SEARCH_LOG` to a file path, and each search appends one JSON line: the query
 shape (titles, boosts, exclusions, location), how the funnel went (candidates retrieved,
-jobs delivered, latency), and the top five results with their scores. It exists because
+jobs delivered, latency), the top ten results with their scores, and — when it happened —
+which part of the request the app had to override to answer it at all. It exists because
 every ranking number in this repo is measured against synthetic, author-written profiles,
-which cannot tell you whether a *real* search returned something a real person wanted.
+which cannot tell you whether a _real_ search returned something a real person wanted.
 
 What that log deliberately does not contain: no IP address, no user agent, no referer,
 no session or request id, and no text from the chat interview. Two identical searches an

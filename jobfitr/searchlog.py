@@ -120,6 +120,7 @@ def record(
     degraded,
     elapsed_ms,
     sources=None,
+    overrides=None,
     probe=False,
 ) -> None:
     if not LOG_PATH:
@@ -158,6 +159,25 @@ def record(
             # "google_jobs": {"n": 0, "why": "quota"}}. Absent when the search served a
             # fresh cache and called nobody.
             **({"sources": sources} if sources else {}),
+            # WHAT THE CONTRACT HAD TO OVERRIDE in the posted answers, absent when it
+            # overrode nothing — which is the overwhelming majority of searches.
+            #
+            # Every other field on this line is a POST-override value, and that made the
+            # one thing worth counting invisible. On 2026-08-17 an interview emitted
+            # `titles` and `exclude` both containing "ai engineer"; exclusions are a hard
+            # filter, so the board came back entirely DevOps for an AI Engineer search.
+            # The guard shipped that afternoon now cancels the exclusion — and the logged
+            # line became indistinguishable from a search where the model never wrote it.
+            # A defect that repairs itself invisibly still HAPPENED, and step 8's seven
+            # mornings are measured from this file, so an unobservable defect reads as
+            # seven clean mornings.
+            #
+            # Not a new privacy category: `titles`, `boosts` and the surviving `exclude`
+            # terms are already model-written words from the same interview, so a
+            # CANCELLED exclusion term is the same class of data as the kept ones beside
+            # it. The docstring's "no free text from the chat interview" means the user's
+            # prose, not the structured fields the interview produces.
+            **({"overrides": overrides} if overrides else {}),
             # Only present when true. verify-slot.sh POSTs three real searches at a slot
             # before every flip, and without this flag those land in the log as genuine
             # user demand — "engineer", "nurse", "driver", three per deploy, which is

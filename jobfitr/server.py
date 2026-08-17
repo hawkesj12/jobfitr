@@ -963,6 +963,24 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         # Empty when the search served a fresh cache and called nobody — which is itself
         # worth being able to tell apart from "every source returned nothing".
         sources=live.last_source_report() or None,
+        # WHAT THE CONTRACT CHANGED, as a DIFF of the posted ask against what actually ran
+        # rather than as something the guard reports about itself. Two reasons it is built
+        # this way: it needs no out-parameter threaded through `config_from_dict`, and it
+        # cannot drift out of sync with the guard, because it observes the guard's RESULT
+        # instead of trusting its self-report. Both sides go through `_clean_list`, so a
+        # difference here is a real cancellation and never a normalization artifact.
+        #
+        # `remote_only` is deliberately NOT diffed. After the 15(e) revert nothing
+        # overrides it — the posted boolean wins, as `config_builder` documents at length —
+        # so a clause for it would be dead code implying a guard that does not exist.
+        # `max_age_days` is unreachable from the chat. Exclusion cancellation is the only
+        # override the system performs today, and this records exactly that one.
+        overrides=[
+            f"exclude:{term}"
+            for term in _clean_list(payload.get("exclude"))
+            if term not in set(cfg.exclude_titles)
+        ]
+        or None,
         # verify-slot.sh sets this so its pre-flip searches do not read as user demand.
         probe=payload.get("probe") is True,
     )

@@ -114,6 +114,23 @@ def test_a_search_that_returned_nothing_is_still_recorded(logfile):
     assert d["score_max"] is None and d["score_p50"] is None
 
 
+def test_an_override_is_absent_unless_one_happened(logfile):
+    """The common case, asserted so `overrides` cannot become a key on every line. A
+    reviewer greps for its PRESENCE to count contradictions; a field that is always
+    there, sometimes empty, makes that grep useless."""
+    _record()
+    assert "overrides" not in json.loads(logfile.read_text())
+
+
+def test_a_cancelled_exclusion_is_recorded(logfile):
+    """The whole reason this field exists. Before it, the guard cancelling a
+    self-deleting exclusion left a line identical to one where the model never wrote
+    it — so the defect the guard exists to catch was uncountable in the only real-user
+    signal this project has."""
+    _record(overrides=["exclude:ai engineer"])
+    assert json.loads(logfile.read_text())["overrides"] == ["exclude:ai engineer"]
+
+
 # ── what it must never record ────────────────────────────────────────────────
 
 
