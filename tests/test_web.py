@@ -1228,7 +1228,14 @@ def test_filter_fields_reach_the_card_and_the_drawer(client, monkeypatch):
     """The filters are the product surface these columns exist for. `state` is a closed
     set of USPS codes, `apply_via` is a word rather than the stored 0/1 (facet_counts
     skips falsy values, so an integer 0 meaning "we checked, it's an aggregator" would
-    vanish), and `salary_min` is annualised USD."""
+    vanish), and `salary_min` is annualised USD.
+
+    DIRECT_ONLY is switched off so an aggregator row can exist to be labelled. In production
+    it is dropped at intake (2026-08-17), which means the Apply drawer now renders a single
+    chip and `web/app.js` hides one-chip groups because they provably cannot narrow anything —
+    so this asserts the MAPPING (0 -> "aggregator") that keeps the column expressible, not a
+    drawer users still see."""
+    monkeypatch.setattr(store, "DIRECT_ONLY", False)
     _seed(
         [
             _job(

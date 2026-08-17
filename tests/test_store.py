@@ -1098,14 +1098,60 @@ def test_absent_containers_store_null_not_the_string_null(db):
     assert row == (None, None, None, None)
 
 
-def test_direct_apply_false_is_zero_not_null(db):
-    """False and absent are different answers — 0 means the engine checked."""
+def test_direct_apply_false_is_zero_not_null(db, monkeypatch):
+    """False and absent are different answers — 0 means the engine checked.
+
+    The DIRECT_ONLY policy is switched off here on purpose. It drops `direct_apply == 0` rows
+    at intake (2026-08-17), so they no longer reach storage in production — but the storage
+    distinction still matters and is still asserted, because it is what makes the policy
+    expressible at all: collapsing 0 and NULL would either drop rows nobody labelled or keep
+    rows labelled as aggregator links."""
+    monkeypatch.setattr(store, "DIRECT_ONLY", False)
     store.upsert_jobs([_job("d1", "Analyst", direct_apply=False)], path=db)
     store.upsert_jobs([_job("d2", "Analyst")], path=db)
     with sqlite3.connect(db) as c:
         vals = dict(c.execute("SELECT url, direct_apply FROM jobs").fetchall())
     assert vals["d1"] == 0
     assert vals["d2"] is None
+
+
+# ── the aggregator-link policy ───────────────────────────────────────────────
+# Measured [live prod] before the change: 3,499 of 69,457 rows (5.04%) were aggregator links —
+# himalayas 1,667, adzuna 1,510, hn 175, plus a tail. The front page promises "links you direct
+# to the employer's own posting" in three places, so the data was honest and the copy was not.
+# Dropping costs 5% and makes the claim true; it also removes the rows where dead postings hide,
+# since adzuna's redirects answer 403 to both HEAD and GET and cannot be verified at all.
+
+
+def test_an_aggregator_link_is_dropped_at_intake(db):
+    store.upsert_jobs(
+        [_job("agg", "Analyst", direct_apply=False), _job("emp", "Analyst", direct_apply=True)],
+        path=db,
+    )
+    with sqlite3.connect(db) as c:
+        assert [r[0] for r in c.execute("SELECT url FROM jobs")] == ["emp"]
+
+
+def test_an_unstated_direct_apply_is_kept_and_that_is_deliberate(db):
+    """UNKNOWN STAYS UNKNOWN, the same rule geography follows: refuse to assert what nobody
+    told us. Safe by construction today because a NULL arrives from the ATS adapters, whose URL
+    IS the employer's own board — and measured, there are zero NULLs in the live pool.
+
+    This test exists to NAME that assumption. If a future non-ATS source starts emitting NULL on
+    a redirect, the promise breaks silently, and whoever changes this should have to change a
+    test that says so out loud."""
+    store.upsert_jobs([_job("unstated", "Analyst")], path=db)
+    with sqlite3.connect(db) as c:
+        got = c.execute("SELECT url, direct_apply FROM jobs").fetchone()
+    assert got[0] == "unstated" and got[1] is None
+
+
+def test_the_policy_can_be_turned_off(db, monkeypatch):
+    """A self-hoster who would rather have the coverage than the promise."""
+    monkeypatch.setattr(store, "DIRECT_ONLY", False)
+    store.upsert_jobs([_job("agg", "Analyst", direct_apply=False)], path=db)
+    with sqlite3.connect(db) as c:
+        assert c.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
 
 
 def test_reupsert_refreshes_new_columns_but_keeps_fetched_at(db):
@@ -2131,3 +2177,27 @@ def test_with_no_snapshot_it_checks_nothing_rather_than_guessing(db, tmp_path, m
     _seed_aged(db, [_aged("https://x/a", "adzuna", 30)])
     out = store.verify_unpolled(path=db)
     assert out["checked"] == 0 and out.get("skipped")
+
+
+def test_the_snapshot_servable_count_matches_what_intake_actually_keeps(tmp_path, monkeypatch):
+    """THE GATE'S ARITHMETIC. `verify-slot.sh` fails a slot when pool_size < 70% of
+    snapshot_servable, so the two must measure the same thing. That gate was already broken once
+    by comparing a POST-filter pool against a PRE-filter count; adding a second intake policy
+    without teaching the count about it would re-open it."""
+    from jobfitr import snapshot as snap
+
+    rows = [
+        {"url": "https://x/1", "title": "T", "country": "US", "direct_apply": True},
+        {"url": "https://x/2", "title": "T", "country": "US", "direct_apply": False},
+        {"url": "https://x/3", "title": "T", "country": "GB", "direct_apply": True},
+        {"url": "https://x/4", "title": "T", "country": "US"},  # unstated → kept
+    ]
+    counted = sum(
+        1 for r in rows if store.servable_in_us(r) and store.direct_to_employer(r)
+    )
+    db = str(tmp_path / "t.db")
+    monkeypatch.setattr(store, "JOBS_JSON_PATH", str(tmp_path / "none.json"))
+    store.init(db)
+    kept = store.upsert_jobs(rows, path=db)
+    assert counted == kept == 2, f"snapshot counted {counted}, intake kept {kept}"
+    assert snap is not None

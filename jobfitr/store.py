@@ -177,6 +177,43 @@ BODY_CAP = 8000
 # job-radar fix.
 US_ONLY = os.environ.get("JOBFITR_US_ONLY", "1") != "0"
 
+# Whether a posting must link to the EMPLOYER'S OWN board, not an aggregator's redirect.
+DIRECT_ONLY = os.environ.get("JOBFITR_DIRECT_ONLY", "1") != "0"
+
+
+def direct_to_employer(job: dict) -> bool:
+    """True when the apply link goes to the employer, not through an aggregator.
+
+    ── WHY THIS IS A POLICY AND NOT A FACET ─────────────────────────────────────
+    The front page makes this a promise, in three places: "straight from the company",
+    "links you direct to the employer's own posting", "jobfitr never sits between you and the
+    application, and never takes a fee for it". Measured `[live prod]` on a 69,457-row pool,
+    **3,499 rows (5.04%) were aggregator links** — himalayas 1,667, adzuna 1,510, hn 175, and a
+    tail of jobicy/remoteok/arbeitnow/remotive. The `apply_via` facet labelled them honestly,
+    so the DATA never lied; the COPY did.
+    Dropping them costs 5% of the pool and makes the claim literally true. Justin's call,
+    2026-08-17, taken with that cost on the table.
+
+    It also collapses two other problems rather than just one. Those rows are where dead
+    postings hide: `www.adzuna.com/land/ad/...` is a redirect we cannot even verify, since
+    Adzuna answers **403 to both HEAD and GET** from the box. The rows with no nightly liveness
+    heartbeat were a subset of these, so dead-posting coverage goes from 97.7% to ~100%.
+
+    ── UNSTATED PASSES, deliberately ────────────────────────────────────────────
+    Only an explicit `0` is dropped. A NULL means the source never said, and this project's
+    standing rule is that unknown stays unknown — geography does exactly the same thing, and
+    for the same reason: refusing to assert what nobody told us. It is also safe by
+    construction here, because a NULL arrives from the ATS adapters, whose URL *is* the
+    employer's own board. Measured today: **zero NULLs in the pool**, so this changes nothing
+    now and stays honest if that changes.
+    If a future non-ATS source starts emitting NULL on a redirect, this becomes a silent hole —
+    which is why `test_an_unstated_direct_apply_is_kept_and_that_is_deliberate` names the
+    assumption instead of leaving it implicit.
+    """
+    if not DIRECT_ONLY:
+        return True
+    return job.get("direct_apply") != 0
+
 
 def servable_in_us(job: dict) -> bool:
     """True when a posting belongs on a US board. Two signals, both from the engine row.
@@ -1548,15 +1585,16 @@ def upsert_jobs(jobs: Iterable[dict], path: str | None = None) -> int:
     An existing url has its last_seen/posted/salary (and derived tags) refreshed —
     so an actively-re-fetched job's last_seen keeps resetting and it never evicts.
 
-    Non-US postings are dropped here (see `servable_in_us`). This is the ONE funnel
-    both the nightly harvest and the per-search live fetch pass through, so filtering
-    here covers both without either caller knowing about it. The count is printed
-    rather than dropped silently — a filter that quietly eats rows is how you spend a
-    week wondering where the jobs went.
+    Two policies are enforced here: non-US postings (`servable_in_us`) and aggregator links
+    (`direct_to_employer`). This is the ONE funnel both the nightly harvest and the per-search
+    live fetch pass through, so filtering here covers both without either caller knowing about
+    it. Each count is printed rather than dropped silently — a filter that quietly eats rows is
+    how you spend a week wondering where the jobs went.
     """
     now = time.time()
     n = 0
     skipped_non_us = 0
+    skipped_indirect = 0
     with _conn(path) as c:
         for raw in jobs:
             r = normalize_job(raw)
@@ -1565,8 +1603,16 @@ def upsert_jobs(jobs: Iterable[dict], path: str | None = None) -> int:
             if not servable_in_us(raw):
                 skipped_non_us += 1
                 continue
+            if not direct_to_employer(raw):
+                skipped_indirect += 1
+                continue
             c.execute(_UPSERT_SQL, {**r, "now": now})
             n += 1
+    if skipped_indirect:
+        print(
+            f"  store: dropped {skipped_indirect:,} aggregator-link postings "
+            f"(JOBFITR_DIRECT_ONLY)"
+        )
     if skipped_non_us:
         print(f"  store: dropped {skipped_non_us:,} non-US postings (JOBFITR_US_ONLY)")
     return n
