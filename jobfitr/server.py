@@ -53,8 +53,11 @@ log = logging.getLogger("jobfitr")
 store.init()
 
 # How often a running slot re-checks the shared jobs.json for a newer harvest.
-# The harvest is nightly, so this is a cheap stat() ~96x/day; the import itself only
-# runs when the mtime actually moved. 0 disables the poller (tests, one-off runs).
+# The harvest is nightly, so this is a cheap stat() ~96x/day; the import itself only runs
+# when the mtime actually moved — EXCEPT for a misshapen snapshot, which never records an
+# mtime on purpose and so is re-read on every tick until a good harvest replaces it. That is
+# the intended trade: 96 loud retries a day beats one silent permanent freeze.
+# 0 disables the poller (tests, one-off runs).
 SNAPSHOT_SYNC_SECONDS = int(os.environ.get("JOBFITR_SNAPSHOT_SYNC_SECONDS", "900"))
 _sync_stop = threading.Event()
 
@@ -62,10 +65,19 @@ _sync_stop = threading.Event()
 def _snapshot_sync_loop() -> None:
     """Re-import the harvest snapshot on an interval, off the request path.
 
-    Without this a slot only picked up new jobs on restart: the nightly harvest
-    rewrites the SHARED jobs.json, but each slot serves its OWN SQLite store. Doing
-    it on a background thread (not lazily in a request) means no user ever eats the
-    multi-second import.
+    Without this a slot only picked up new jobs on restart: the nightly harvest rewrites the
+    shared jobs.json, and the store has to be told. Doing it on a background thread (not
+    lazily in a request) means no user ever eats the multi-second import.
+
+    OFF THE REQUEST PATH IS LOAD-BEARING, and more so since 2026-08-17. A misshapen snapshot
+    now raises rather than returning zero, and the mtime is deliberately NOT recorded, so a
+    bad file is retried indefinitely — correct, because recording it would freeze the pool
+    permanently while /api/health stayed green. Being on a 900s timer is what makes
+    "retry indefinitely" cheap: one streamed parse every 15 minutes with a loud log, not a
+    per-request CPU pin. Do not move this onto a request.
+
+    (The old note here said "each slot serves its OWN SQLite store". That stopped being true
+    on 2026-08-17 — there is one shared store, jobs-v<schema>.db, and both slots read it.)
     """
     while not _sync_stop.wait(SNAPSHOT_SYNC_SECONDS):
         try:

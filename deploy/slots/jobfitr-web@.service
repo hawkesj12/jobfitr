@@ -13,23 +13,37 @@ After=network.target
 User=jobfitr
 Group=jobfitr
 WorkingDirectory=/opt/jobfitr/%i/jobfitr
-# jobfitr.env  = shared secrets (OpenRouter/Adzuna keys) + JOBFITR_JOBS_PATH (the
-#                shared harvest snapshot both slots seed from) + ADZUNA_DAILY_CEILING.
-# slot-%i.env  = the PER-SLOT values: SLOT_PORT (blue=8000, green=8001) AND
-#                JOBFITR_DB_PATH=/opt/jobfitr/%i/data/jobs.db — each slot gets its OWN
-#                SQLite store so a schema-changing flip/rollback can't corrupt the
-#                other slot's data. slot-%i.env is read LAST so it wins on overlap.
+# jobfitr.env  = shared secrets (OpenRouter/Adzuna keys) + JOBFITR_JOBS_PATH (the shared
+#                harvest snapshot) + JOBFITR_DB_DIR (the ONE store, see below) +
+#                JOBFITR_US_ONLY + ADZUNA_DAILY_CEILING.
+# slot-%i.env  = the only genuinely per-slot value left: SLOT_PORT (blue=8000, green=8001).
+#                Read LAST so it wins on overlap.
+#
+# ONE STORE, BOTH SLOTS (changed 2026-08-17). slot-%i.env used to carry
+# JOBFITR_DB_PATH=/opt/jobfitr/%i/data/jobs.db, on the reasoning that a per-slot store kept a
+# schema-changing flip or rollback from corrupting the other slot's data. That concern was
+# real; aiming it at the SLOT was not. The thing needing isolation is the SCHEMA, a property
+# of the code — so the filename now carries it (jobs-v<SCHEMA_VERSION>.db, derived from
+# JOBFITR_DB_DIR) and a bump builds beside the serving file instead of over it.
+# What the old split cost: 4.5 GB of disk for one ~300 MB cache, two eviction passes, and
+# divergence — 29,432 jobs in one slot against 24,652 in the other, so a flip changed the
+# DATASET, not just the code. It also failed at its own goal: on 2026-08-17 blue sat on
+# schema v2 while green was on v3, because a rebuild had only touched the active slot.
 EnvironmentFile=/etc/jobfitr/jobfitr.env
 EnvironmentFile=/etc/jobfitr/slot-%i.env
 ExecStart=/opt/jobfitr/%i/jobfitr/.venv/bin/jobfitr-serve --host 127.0.0.1 --port ${SLOT_PORT}
 Restart=always
 RestartSec=3
 
-# Hardening — the web process reads/writes its OWN per-slot store dir (the live-fetch
-# hybrid upserts fetched jobs into /opt/jobfitr/%i/data/jobs.db) plus the SHARED data
-# dir, and nothing else.
+# Hardening — the web process reads/writes the SHARED data dir and nothing else. That dir is
+# now load-bearing rather than incidental: it holds the store the live-fetch hybrid upserts
+# into (jobs-v<schema>.db), the harvest snapshot it imports, and searches.jsonl. Drop it from
+# ReadWritePaths and every store write is EROFS under ProtectSystem=strict — silently, since
+# searchlog.record() swallows its exceptions by design.
 #
-# The shared dir is here for ONE file: searches.jsonl, the search-quality log. It is
+# The per-slot dir stays listed only for the retired files; it can go once those are removed.
+#
+# searches.jsonl is shared for its own reason, which predates the store consolidation. It is
 # shared rather than per-slot on purpose — a blue-green flip changes which process
 # serves traffic, so a per-slot log would split the history at every deploy and the
 # whole point is reviewing weeks of it at once. failures.log already lives there for
