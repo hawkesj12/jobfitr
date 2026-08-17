@@ -413,3 +413,66 @@ def test_the_gate_closes_again_once_the_model_has_filled_it():
         "related_titles": ["Business Analyst"],
     }
     assert chat._needs_related(cfg) is False
+
+
+# ── an exclusion may not delete the user's own target role ───────────────────
+# Observed live 2026-08-17: an interview produced titles containing "ai engineer" AND exclude
+# containing "ai engineer". Exclusions are a HARD FILTER in server._eligible, not a rank
+# penalty, so every genuine AI Engineer posting was removed before scoring and the board came
+# back entirely "DevOps Engineer" ranking on `docker x3` — for a search whose words were "AI
+# operations and automation engineering". Nothing on the board said why.
+
+
+def test_the_observed_failure_cannot_recur():
+    """The exact config that produced a DevOps board for an AI Engineer search."""
+    notes = []
+    cfg = config_from_dict(
+        {
+            "titles": ["ai operations", "automation engineering", "ai engineer", "devops engineer"],
+            "exclude": ["ai engineer", "ai operations lead"],
+        },
+        notes,
+    )
+    assert "ai engineer" not in cfg.exclude_titles
+    assert notes and "ai engineer" in notes[0]
+
+
+def test_a_single_shared_word_cancels_the_exclusion():
+    """The guard uses `match.has_term` — the same function the filter uses — so whole-word
+    matching means one shared word is enough. Excluding "engineer" would delete "AI Engineer"
+    just as thoroughly as excluding the full phrase, and a string-equality guard would miss
+    it."""
+    cfg = config_from_dict({"titles": ["AI Engineer"], "exclude": ["engineer"]}, [])
+    assert cfg.exclude_titles == []
+
+
+def test_a_legitimate_exclusion_is_untouched():
+    """The guard must not become a blunt instrument — these are the dealbreakers the question
+    actually asks for."""
+    cfg = config_from_dict(
+        {"titles": ["AI Engineer"], "exclude": ["staffing", "intern", "clearance"]}, []
+    )
+    assert cfg.exclude_titles == ["staffing", "intern", "clearance"]
+
+
+def test_a_narrower_variant_of_a_wanted_title_survives():
+    """Wanting "AI Operations" while excluding "AI Operations Lead" is coherent and specific:
+    the exclusion is longer than the title, so it cannot match it. Precision matters here —
+    over-cancelling would quietly re-admit roles the user ruled out."""
+    cfg = config_from_dict(
+        {"titles": ["ai operations"], "exclude": ["ai operations lead"]}, []
+    )
+    assert cfg.exclude_titles == ["ai operations lead"]
+
+
+def test_the_override_is_reported_not_silent():
+    """A silent correction is only marginally better than the silent deletion it prevents."""
+    notes = []
+    config_from_dict({"titles": ["Nurse"], "exclude": ["nurse"]}, notes)
+    assert len(notes) == 1
+    assert "nurse" in notes[0] and "target role" in notes[0]
+
+
+def test_notes_is_optional_so_every_existing_caller_still_works():
+    cfg = config_from_dict({"titles": ["Nurse"], "exclude": ["nurse"]})
+    assert cfg.exclude_titles == []

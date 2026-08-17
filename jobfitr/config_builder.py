@@ -23,6 +23,7 @@ The posted JSON contract (every key optional):
 
 from __future__ import annotations
 
+from .match import has_term
 from job_radar.config import Config
 
 # How heavily each kind of user signal weighs in the fit score. A title match is
@@ -86,8 +87,13 @@ def _resolve_min_score(value, default: int = _DEFAULT_PICKINESS) -> int:
     return _PICKINESS.get(key, default)
 
 
-def config_from_dict(doc: dict) -> Config:
-    """Build a per-user Config from the posted 5-answer JSON. Pure, no I/O."""
+def config_from_dict(doc: dict, notes: list[str] | None = None) -> Config:
+    """Build a per-user Config from the posted 5-answer JSON. Pure, no I/O.
+
+    Pass a list as `notes` to receive human-readable descriptions of anything this had to
+    OVERRIDE in the posted answers. The purity matters — this is the one contract every
+    entry path shares — so nothing is printed or logged here; the caller decides.
+    """
     doc = doc or {}
     cfg = Config()
 
@@ -124,7 +130,39 @@ def config_from_dict(doc: dict) -> Config:
     # inherit job_radar's tech-recruiting default exclude list — it contains
     # "sales", "marketing", "customer success", "accountant", "recruiter", etc.,
     # which would silently hide those non-tech roles from jobfitr's general audience.
-    cfg.exclude_titles = exclude
+    #
+    # AN EXCLUSION MAY NOT DELETE THE USER'S OWN TARGET ROLE.
+    #
+    # Observed live, 2026-08-17: an interview produced `titles` containing "ai engineer"
+    # AND `exclude` containing "ai engineer". Exclusions are a HARD FILTER in
+    # `server._eligible` — not a rank penalty — so every genuine AI Engineer posting was
+    # removed before scoring, and the board came back entirely "DevOps Engineer" ranking on
+    # `docker x3`, for a search whose words were "AI operations and automation engineering".
+    # Nothing on the board said why. A rank bug leaves the right jobs present in the wrong
+    # order; this deleted them.
+    #
+    # The assistant writing both lists is the proximate cause and it will misfire again —
+    # so the guard lives HERE, at the contract, where every path (chat, the form fallback,
+    # a hand-posted body, a saved config replayed tomorrow) passes through.
+    #
+    # THE TEST USES `match.has_term`, the same function `_eligible` filters with, rather
+    # than a string comparison. That is the point: a guard that decided membership
+    # differently from the filter it protects against could disagree with it, and then
+    # "engineer" would still silently delete "AI Engineer" — whole-word matching means a
+    # single shared word is enough to cancel the whole target role.
+    cancelled: list[str] = []
+    kept: list[str] = []
+    for term in exclude:
+        if any(has_term(term, title) for title in titles):
+            cancelled.append(term)
+        else:
+            kept.append(term)
+    cfg.exclude_titles = kept
+    if cancelled and notes is not None:
+        notes.append(
+            "dropped exclusion(s) that would have deleted your own target role: "
+            + ", ".join(cancelled)
+        )
     # Likewise clear the tech-specific title penalty (research-scientist / member-of-
     # technical-staff) — meaningless for a general audience and unfair to those roles.
     cfg.title_penalty = {}

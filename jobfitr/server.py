@@ -839,7 +839,13 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     concurrent identical searches. Degrades to the cache when the daily ceiling trips.
     """
     started = time.perf_counter()
-    cfg = config_from_dict(payload)
+    # `notes` collects anything the contract had to OVERRIDE in the posted answers. Today
+    # that is one thing — an exclusion that would have deleted the user's own target role —
+    # and it MUST reach the board. A silent correction is only marginally better than the
+    # silent deletion it prevents: the user asked for something contradictory and deserves to
+    # know which half was honoured.
+    notes: list[str] = []
+    cfg = config_from_dict(payload, notes)
     titles, location = search_inputs(payload)
     boosts = _clean_list(payload.get("boosts"))
     # The user's own rank_down terms, or job-radar's twelve generic staffing defaults.
@@ -946,6 +952,7 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
     return {
         "count": len(results),
         "degraded": degraded,
+        "notes": notes,
         "facets": facets,
         "pool": pool,
         "jobs": results,

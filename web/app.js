@@ -250,6 +250,16 @@ async function run(cfg) {
 // ── the degradation / thin-results banner (warm, honest, never alarming) ──────
 function renderNotice(data) {
   let msg = "";
+  // A CORRECTION TO THE SEARCH ITSELF outranks every degradation message below, because it
+  // changes what the board CONTAINS rather than how fresh it is. Today it fires when an
+  // exclusion would have deleted the user's own target role — observed live, an interview
+  // put "ai engineer" in both the wanted and the avoided list, and the hard filter removed
+  // every AI Engineer posting before scoring. Telling someone their board is stale matters
+  // less than telling them we overrode half of what they asked for.
+  if (Array.isArray(data.notes) && data.notes.length) {
+    el.notice.textContent = "Heads up — " + data.notes.join("; ") + ".";
+    return;
+  }
   if (data.degraded === "live_search_limit") {
     msg =
       "🌅 We've hit today's live-search limit. jobfitr is a free tool running on free APIs — no paid services — so there's a daily ceiling to stay in budget. These are the freshest saved matches; check back a bit later and the live search opens back up.";
