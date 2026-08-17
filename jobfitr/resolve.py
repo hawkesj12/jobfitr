@@ -462,6 +462,15 @@ def main(argv=None) -> int:
         help="add NEW companies from Common Crawl that the store has never seen "
         "(the only route to the Workday/enterprise tier)",
     )
+    ap.add_argument(
+        "--discover-budget",
+        type=int,
+        default=500,
+        help="boards to PROBE per --discover run (default 500). The ceiling is NOT the probe — "
+        "measured 150 MB and 97 s per 500 — it is what the nightly HARVEST then has to poll, "
+        "since every resolved board is polled every night forever. Raise it deliberately and "
+        "measure the harvest's MemoryPeak afterwards.",
+    )
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stats", action="store_true", help="print ledger state and exit")
     ap.add_argument(
@@ -517,7 +526,7 @@ def main(argv=None) -> int:
             print(f"  {universe_file.describe()}")
         except universe_file.UniverseUnavailable as e:
             print(f"  ⚠ {e}")
-        d = discover_new(workers=args.workers)
+        d = discover_new(workers=args.workers, budget=args.discover_budget)
         print(
             f"jobfitr-discover: mined {d['mined']:,} unknown boards -> "
             f"{d['added']:,} added ({d['roles']:,} roles), {d['dead']:,} refused, "
