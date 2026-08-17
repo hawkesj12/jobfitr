@@ -22,7 +22,11 @@ OUT=/opt/jobfitr/data/jobs.json
 # minutes, so this should never fire — which is the point: it costs nothing and removes the
 # assumption.
 waited=0
-while systemctl is-active --quiet jobfitr-resolve.service; do
+# `is-active --quiet` is NOT enough: a Type=oneshot service reports **activating**
+# for its whole run, and `--quiet` only succeeds on "active". The first version of
+# this guard used it and was a silent no-op — proved by firing both at once and
+# watching this one sail straight through while the other was still running.
+while case "$(systemctl is-active jobfitr-resolve.service)" in active|activating|reloading) true ;; *) false ;; esac; do
 	if [ "$waited" -ge 1800 ]; then
 		echo "harvest: resolve still running after 30m — proceeding with the existing ledger" >&2
 		break

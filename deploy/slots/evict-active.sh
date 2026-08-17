@@ -36,7 +36,11 @@ STATE=/etc/jobfitr/active-slot
 # at 03:30 removed ~5,400 rows and the 04:07 harvest put them straight back — so the ordering
 # is load-bearing and now enforced rather than assumed.
 waited=0
-while systemctl is-active --quiet jobfitr-harvest.service; do
+# `is-active --quiet` is NOT enough: a Type=oneshot service reports **activating**
+# for its whole run, and `--quiet` only succeeds on "active". The first version of
+# this guard used it and was a silent no-op — proved by firing both at once and
+# watching this one sail straight through while the other was still running.
+while case "$(systemctl is-active jobfitr-harvest.service)" in active|activating|reloading) true ;; *) false ;; esac; do
 	if [ "$waited" -ge 3600 ]; then
 		echo "evict: harvest still running after 60m — skipping tonight rather than racing it" >&2
 		exit 0
