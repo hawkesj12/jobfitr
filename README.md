@@ -195,7 +195,8 @@ python scripts/review_searches.py /path/to/searches.jsonl --days 7
 ```
 jobfitr/
   server.py           FastAPI: /api/chat + /api/score + /api/meta + /api/health; the scoreboard; serves web/
-  store.py            SQLite + FTS5 — the job pool, BM25 retrieval, eviction, the company→ATS ledger
+  store.py            SQLite + FTS5 — the job pool, BM25 retrieval, eviction, the company→ATS
+                      ledger. ONE store, shared by both deploy slots, named jobs-v<schema>.db
   searchlog.py        optional append-only record of searches + what they returned (off unless configured)
   match.py            term matching (whole-word + plural) and the title tiers
   live.py             the per-search live fetch, single-flighted

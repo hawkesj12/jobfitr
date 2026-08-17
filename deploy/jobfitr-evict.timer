@@ -1,13 +1,22 @@
-# Fire the jobfitr eviction nightly at 03:30 (with a small randomized delay so it
-# never lands exactly on another job). Persistent=true runs a missed eviction after
+# Fire the jobfitr eviction nightly, AFTER the harvest (with a small randomized delay so
+# it never lands exactly on another job). Persistent=true runs a missed eviction after
 # downtime instead of skipping it. This is the outflow side of the pool control loop.
 # Install: /etc/systemd/system/jobfitr-evict.timer (done by bootstrap.sh).
+#
+# 04:45 UTC = 00:45 ET, and the ORDER is the whole point rather than a preference. This
+# was 03:30, which is BEFORE the 04:07 harvest: eviction removed ~5,400 stale rows and the
+# harvest put them straight back, because intake has no age filter. The result was 14% of
+# the live pool older than the 60-day rule while every log read clean. The eviction was
+# never broken; the order was.
+#
+# OnCalendar, not a relative timer, also deliberately: the relative form re-anchored on
+# every manual `systemctl start` and drifted into the middle of the day.
 
 [Unit]
 Description=Run the jobfitr pool eviction nightly
 
 [Timer]
-OnCalendar=*-*-* 03:30:00
+OnCalendar=*-*-* 04:45:00
 RandomizedDelaySec=15min
 Persistent=true
 

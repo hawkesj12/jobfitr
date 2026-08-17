@@ -9,7 +9,7 @@ The runbook for putting jobfitr live at **https://jobfitr.app** on the Hostinger
 | Piece          | Where                                                                                     |
 | -------------- | ----------------------------------------------------------------------------------------- |
 | App (uvicorn)  | `jobfitr-web.service` → `127.0.0.1:8000`, non-root `jobfitr` user; reads/writes the store |
-| Job store      | SQLite/FTS5 at `/opt/jobfitr/data/jobs.db` (`JOBFITR_DB_PATH`) — the pool the app ranks   |
+| Job store      | SQLite/FTS5 at `/opt/jobfitr/data/jobs-v<N>.db` (`JOBFITR_DB_DIR`) — ONE store, shared by both slots, named for its schema so a bump builds beside it rather than over it |
 | Baseline floor | `jobfitr-harvest.timer` → `jobfitr-snapshot` **daily** → jobs.json + upserts the store    |
 | Pool eviction  | `jobfitr-evict.timer` → `jobfitr-evict` nightly 04:45, **after** the harvest — deletes unseen>14d / posted>60d |
 | Load-shed      | `ADZUNA_DAILY_CEILING` (env, default 200) → past it, a search degrades to the cache       |
@@ -102,7 +102,7 @@ For a box already running the old pure-cache build:
 ```bash
 # 1. add the new env vars (JOBFITR_DB_PATH already defaulted by a fresh bootstrap;
 #    on an existing box add them by hand)
-sudo nano /etc/jobfitr/jobfitr.env        # + JOBFITR_DB_PATH=/opt/jobfitr/data/jobs.db
+sudo nano /etc/jobfitr/jobfitr.env        # + JOBFITR_DB_DIR=/opt/jobfitr/data
                                           # + ADZUNA_DAILY_CEILING=200
 # 2. pull the new code + reinstall (sqlite3+fts5 are stdlib — no new deps)
 sudo -u jobfitr sh -c "cd /opt/jobfitr/jobfitr && git pull && .venv/bin/uv sync --frozen --extra web"

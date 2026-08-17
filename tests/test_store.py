@@ -1642,3 +1642,46 @@ def test_the_budget_spends_across_every_ats_not_one_alphabetical_head(db, monkey
     assert by.get("ashby", 0) >= 40, (
         f"ashby got {by.get('ashby', 0)} of 100 — the budget parked in one ATS: {by}"
     )
+
+
+# ── one shared store, named for its schema ───────────────────────────────────
+# Until 2026-08-17 each blue-green slot owned its own jobs.db and the harvest a third:
+# 4.5 GB of disk for one ~300 MB cache, eviction running twice, and — the reason it had to
+# go — the copies DIVERGED (29,432 jobs in one slot against 24,652 in the other), so under
+# active development every deploy ended in a flip onto an unknown dataset.
+
+
+def test_the_store_path_derives_from_the_schema_version(monkeypatch):
+    """The filename carries the version so a schema bump cannot collide with the file
+    production is serving. `_check_schema_version` raises in BOTH directions, so a single
+    fixed name would make every bump an outage: rebuild in place and the still-running old
+    process dies with it."""
+    monkeypatch.delenv("JOBFITR_DB_PATH", raising=False)
+    monkeypatch.setenv("JOBFITR_DB_DIR", "/opt/jobfitr/data")
+    assert store._default_db_path() == f"/opt/jobfitr/data/jobs-v{store.SCHEMA_VERSION}.db"
+
+
+def test_bumping_the_schema_version_moves_the_file(monkeypatch):
+    """The property that makes a zero-downtime schema change possible: the new build writes
+    a DIFFERENT file, so the old build keeps serving the old one until the flip."""
+    monkeypatch.delenv("JOBFITR_DB_PATH", raising=False)
+    monkeypatch.setenv("JOBFITR_DB_DIR", "/d")
+    before = store._default_db_path()
+    monkeypatch.setattr(store, "SCHEMA_VERSION", store.SCHEMA_VERSION + 1)
+    after = store._default_db_path()
+    assert before != after, "a schema bump must not reuse the serving file"
+    assert after.endswith(f"jobs-v{store.SCHEMA_VERSION}.db")
+
+
+def test_an_explicit_db_path_still_wins(monkeypatch):
+    """Tests and one-off surgery need to name a file directly."""
+    monkeypatch.setenv("JOBFITR_DB_DIR", "/opt/jobfitr/data")
+    monkeypatch.setenv("JOBFITR_DB_PATH", "/tmp/mine.db")
+    assert store._default_db_path() == "/tmp/mine.db"
+
+
+def test_with_neither_set_it_stays_a_bare_local_file(monkeypatch):
+    """A fresh clone running `jobfitr-serve` in a checkout must not reach for /opt."""
+    monkeypatch.delenv("JOBFITR_DB_PATH", raising=False)
+    monkeypatch.delenv("JOBFITR_DB_DIR", raising=False)
+    assert store._default_db_path() == "jobs.db"

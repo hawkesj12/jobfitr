@@ -6,22 +6,29 @@
 # Oneshot; fired nightly by jobfitr-evict.timer.
 # Install: /etc/systemd/system/jobfitr-evict.service (done by bootstrap.sh).
 #
-# SINGLE-SLOT ONLY. Under blue-green each slot owns its own jobs.db, so this unit
-# would prune a store no slot serves — use jobfitr-evict@.service (+ @.timer) instead,
-# enabled once per slot. bootstrap.sh installs this one; the slots setup replaces it.
+# ONE COLLECTOR, ONE STORE — and this unit is the blue-green one now.
+# It used to say "SINGLE-SLOT ONLY … use jobfitr-evict@.service instead, enabled once per
+# slot", which was true while each slot owned its own jobs.db. That layout was retired
+# 2026-08-17: three copies of one ~300 MB cache (4.5 GB on disk), two eviction passes, and
+# the copies DIVERGED — 29,432 jobs in one slot against 24,652 in the other, so a flip
+# changed the dataset rather than the code. There is now one shared store, so a second
+# collector would be two processes running the same deletes over one file.
+# `evict-active.sh` resolves whichever slot is production and runs its binary; the store
+# path comes from JOBFITR_DB_DIR, so a SCHEMA_VERSION bump moves the collector to the new
+# file with no unit edit.
 
 [Unit]
 Description=jobfitr evict (garbage-collect the stale job pool)
+OnFailure=jobfitr-notify@%n.service
 
 [Service]
 Type=oneshot
 User=jobfitr
 Group=jobfitr
-WorkingDirectory=/opt/jobfitr/jobfitr
 EnvironmentFile=/etc/jobfitr/jobfitr.env
-ExecStart=/opt/jobfitr/jobfitr/.venv/bin/jobfitr-evict
+ExecStart=/opt/jobfitr/bin/evict-active.sh
 
-# Hardening — may write only the SQLite store directory.
+# Hardening — may write only the shared SQLite store directory.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

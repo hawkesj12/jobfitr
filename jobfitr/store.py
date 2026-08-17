@@ -38,10 +38,51 @@ from jobfitr import vocab
 _ET = ZoneInfo("America/New_York")
 
 # ── config (env-overridable) ──────────────────────────────────────────────────
-DB_PATH = os.environ.get("JOBFITR_DB_PATH", "jobs.db")
-# Where the shared harvest snapshot lives. Re-imported whenever the harvest rewrites
-# it (see sync_snapshot) — this is how a per-slot store stays current, and it's also
-# the rollback artifact old code reads.
+
+# The store's schema. Declared up here rather than beside the DDL because THE FILENAME
+# DERIVES FROM IT (see DB_PATH below) — bumping this number is what makes a schema change
+# write a new file rather than collide with the one production is serving.
+SCHEMA_VERSION = 3
+
+
+def _default_db_path() -> str:
+    """Where the store lives: ONE file, shared by every process, named for its schema.
+
+    ── WHY ONE STORE, SHARED BY BOTH SLOTS ──────────────────────────────────────
+    Until 2026-08-17 each blue-green slot owned its own `jobs.db` and the harvest/resolve
+    lane a third. Measured on the box, that was 4.5 GB of disk for one ~300 MB cache, the
+    job pool stored three times, eviction running twice on two copies — and, the reason it
+    had to go, the copies DIVERGED: blue held 29,432 jobs while green held 24,652, a 16%
+    gap. Under active development every deploy ends in a flip, so every deploy landed on a
+    slot whose pool was some unknown distance behind. A flip was not a rollback; it was a
+    change of dataset.
+
+    ── WHY THE VERSION IS IN THE FILENAME ───────────────────────────────────────
+    A schema change here is a REBUILD, not a migration, and `_check_schema_version` raises
+    in BOTH directions — new code will not read an old file, and old code will not read a
+    new one. So a single fixed filename would make every schema bump an outage: rebuild in
+    place and the still-running old process dies too.
+    Putting the version in the name removes that. Bumping SCHEMA_VERSION points the new
+    build at `jobs-v4.db`, which it can build and verify while the old build keeps serving
+    `jobs-v3.db`; after the flip, the old file is deleted. Same zero-downtime property
+    per-slot stores were bought for, without the divergence — because the thing that
+    genuinely needs two copies is the SCHEMA, which is a property of the code, not of the
+    slot. The 2026-08-17 deploy proved the distinction the hard way: blue sat on v2 while
+    green was on v3, because a rebuild had only touched the active slot.
+
+    `JOBFITR_DB_PATH` still wins when set, for tests and one-off surgery.
+    """
+    explicit = os.environ.get("JOBFITR_DB_PATH")
+    if explicit:
+        return explicit
+    d = os.environ.get("JOBFITR_DB_DIR")
+    return os.path.join(d, f"jobs-v{SCHEMA_VERSION}.db") if d else "jobs.db"
+
+
+DB_PATH = _default_db_path()
+# Where the shared harvest snapshot lives. Re-imported whenever the harvest rewrites it
+# (see sync_snapshot). With one shared store this is no longer how a slot "catches up" —
+# there is nothing to catch up to — but it remains the inflow and the rollback artifact.
 JOBS_JSON_PATH = os.environ.get("JOBFITR_JOBS_PATH", "jobs.json")
 
 SEARCH_TTL_SECONDS = int(os.environ.get("JOBFITR_SEARCH_TTL", str(24 * 3600)))  # 24h
@@ -686,7 +727,9 @@ CREATE INDEX IF NOT EXISTS idx_companies_status ON companies(status, checked_at)
 """
 
 
-SCHEMA_VERSION = 3
+# SCHEMA_VERSION is declared in the config block at the top of this file, because the store's
+# FILENAME derives from it — see DB_PATH. Bumping it there is what makes a schema change write
+# a new file instead of colliding with the one production is serving.
 _SCHEMA_VERSION_KEY = "schema_version"
 
 
