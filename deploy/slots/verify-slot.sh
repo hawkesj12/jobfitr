@@ -223,6 +223,68 @@ else
 	fi
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. the board universe reached the box, and is not stale.
+#
+# `deploy/board-universe.json` is the ENTIRE input to board discovery. Production cannot
+# mine Common Crawl — its CDX host refuses this box's IP (TCP 443 rejected in 53-87ms) — so
+# the file is generated off-box monthly and deployed like code. A unit test cannot know
+# whether it arrived; this script is the only thing that runs HERE.
+#
+# Same argument that put the search-log write-probe above: `discover_new` reports a missing
+# universe and carries on, by design, so the symptom is a nightly line nobody reads rather
+# than a failure. Gate it while there is still a gate to fail.
+# The slot's own checkout, so this verifies the file in the build being tested rather than
+# whatever the active slot happens to hold.
+universe="/opt/jobfitr/${slot}/jobfitr/deploy/board-universe.json"
+if [[ ! -f "$universe" ]]; then
+	bad "board universe" "MISSING at ${universe} — discovery is dark; regenerate OFF-box with 'python scripts/mine_universe.py' and redeploy"
+else
+	ustat=$(python3 - "$universe" <<'PY'
+import json, sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+ET = ZoneInfo("America/New_York")
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"BAD unreadable ({type(e).__name__})"); raise SystemExit
+boards = doc.get("boards") or []
+meta = doc.get("meta") or {}
+counts = meta.get("counts") or {}
+gh = counts.get("greenhouse", 0)
+stamp = meta.get("generated_at", "")
+try:
+    then = datetime.fromisoformat(stamp)
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=ET)
+    age = int((datetime.now(ET) - then).total_seconds() // 86400)
+except Exception:
+    age = -1
+# 500 greenhouse boards is a floor, not a target: the mined set is ~4,300 and the ledger
+# already held 916 before any of this, so anything under 500 means the file is truncated or
+# was generated against the wrong host — which is exactly the failure that started this work
+# (the retired boards.greenhouse.io).
+if gh < 500:
+    print(f"BAD only {gh} greenhouse boards (expected >500) — truncated or wrong host?")
+elif age < 0:
+    print(f"BAD {len(boards)} boards but generated_at is missing/unparseable — cannot judge staleness")
+elif age > 45:
+    print(f"STALE {len(boards)} boards, generated {age}d ago (>45) from {meta.get('crawl','?')}")
+else:
+    print(f"OK {len(boards)} boards ({gh} greenhouse), {age}d old, {meta.get('crawl','?')}")
+PY
+	)
+	case "$ustat" in
+	OK*) ok "board universe" "${ustat#OK }" ;;
+	# STALE does NOT block a flip. The file being a month old is a missed monthly refresh,
+	# not a broken deploy, and blocking production over it would train you to override the
+	# gate — the lesson this script already records about ARG_MAX.
+	STALE*) ok "board universe" "⚠ ${ustat#STALE }  — regenerate off-box when convenient" ;;
+	*) bad "board universe" "${ustat#BAD }" ;;
+	esac
+fi
+
 echo
 if [[ "$fail" -eq 0 ]]; then
 	echo "VERDICT: OK to flip  →  sudo bash flip.sh"

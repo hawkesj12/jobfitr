@@ -666,6 +666,13 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 --   dead       — the board answers but refuses us (e.g. a 403 Workday tenant).
 --                Distinct from unresolved so it is never retried on a schedule;
 --                retrying a deliberate refusal nightly is both futile and rude.
+--   covered    — name-guessing cannot help: every slug this company's name would
+--                generate is ALREADY held by a resolved board. Terminal, and it binds
+--                nothing — it records that the guess space is exhausted, not that we
+--                believe the company owns that board. Without it these names sat in the
+--                retry set forever (37 of every 176-name batch once the committed board
+--                universe landed) and, because the queue is ordered by job count, they
+--                crowded out never-checked employers permanently.
 CREATE TABLE IF NOT EXISTS companies(
   name_key TEXT PRIMARY KEY,      -- normalized: lowercased, depunctuated, suffix-free
   name TEXT NOT NULL,             -- the raw string as jobs.company holds it (display)
@@ -884,6 +891,46 @@ def unresolved_companies(limit: int = 500, path: str | None = None) -> list[str]
     return out
 
 
+def recently_probed_boards(path: str | None = None) -> set[tuple[str, str, str]]:
+    """Every `board:` key probed inside the retry window, as (ats, slug, site) triples.
+
+    The half of the non-answer cache that makes it DO anything. `discover_new` builds its
+    `known` set from `resolved_companies()`, which returns only status='resolved' — so a
+    board recorded as a 404 was invisible to the next run and got re-probed nightly forever.
+    A ~6,200-board universe against a 500/night budget therefore never converged: the same
+    tranche recycled indefinitely while the rest of the alphabet waited.
+
+    Scoped to `board:%` keys deliberately. Company rows live in the same table and are the
+    other lane's business; folding them in here would let a name-resolution outcome suppress
+    a board probe, which are different questions about different things.
+
+    Outside the window a board is offered again, which is the point — `empty` especially,
+    since a board with no open roles today may post tomorrow.
+    """
+    cutoff = time.time() - UNRESOLVED_RETRY_DAYS * 86400
+    out: set[tuple[str, str, str]] = set()
+    with _conn(path) as c:
+        rows = c.execute(
+            "SELECT name_key, ats, slug, site FROM companies "
+            "WHERE name_key LIKE 'board:%' AND COALESCE(checked_at, 0) > ?",
+            (cutoff,),
+        ).fetchall()
+    for r in rows:
+        ats, slug = (r["ats"] or ""), (r["slug"] or "")
+        if not ats or not slug:
+            # A non-answer row carries no ats/slug (nothing was found), so recover them from
+            # the key itself — `board:{ats}:{slug}` or `board:workday:{slug}/{site}`.
+            parts = r["name_key"].split(":", 2)
+            if len(parts) == 3:
+                ats, slug = parts[1], parts[2]
+        site = r["site"] or ""
+        if ats == "workday" and "/" in slug and not site:
+            slug, site = slug.split("/", 1)
+        if ats and slug:
+            out.add((ats, slug.lower(), site.lower()))
+    return out
+
+
 def record_resolution(
     name: str,
     entry: dict | None = None,
@@ -894,16 +941,29 @@ def record_resolution(
 ) -> None:
     """Write one company's outcome. `entry` None/empty = a cached NEGATIVE.
 
-    `status` overrides the derived value — pass 'dead' for a board that answers but
-    refuses us (a 403 Workday tenant), so the scheduler stops asking. `attempts`
-    increments across runs so a company that keeps failing stays visible.
+    `attempts` increments across runs so a company that keeps failing stays visible.
 
     `key` overrides the primary key. A COMPANY resolution keys on its normalized name
-    (the default); a BOARD discovered from Common Crawl must NOT, because a board slug
-    and a company name share this one namespace and collide by construction — a
-    company's slug IS its normalized name. A discovered board passes an explicit
-    `board:{ats}:{slug}` key so it can never take the identity of a name-resolved
-    company (see resolve.board_key).
+    (the default); a discovered BOARD passes an explicit `board:{ats}:{slug}` key so it can
+    never take the identity of a name-resolved company (see resolve.board_key).
+
+    THE REASON THIS DOCSTRING USED TO GIVE WAS FALSE, and it is corrected rather than
+    deleted because the wrong reason invites the wrong change. It claimed the two "collide by
+    construction — a company's slug IS its normalized name". They cannot collide: the two
+    normalizations differ. `norm_company('eClinical Solutions')` is `'eclinical solutions'` —
+    space PRESERVED — while `discover.name_variants` yields `'eclinicalsolutions'`. Measured
+    live, 397 resolved rows have `name_key != norm_company(name)`, which is the same
+    population as the 377 companies that read simultaneously resolved and unresolved.
+
+    The namespacing is still right, defensively: it costs nothing, it states intent at the
+    key, and it survives a future change to either normalizer that WOULD make them collide.
+    Keep it — just do not believe it is load-bearing today.
+
+    `status` overrides the derived value:
+      'dead'    — the board answers but refuses us (a 403 Workday tenant); never retried.
+      'covered' — a company whose guessable slug space is already held by a resolved board,
+                  so name-guessing cannot produce anything new. Terminal, and claims NO
+                  ownership of that board.
     """
     now = time.time()
     e = entry or {}

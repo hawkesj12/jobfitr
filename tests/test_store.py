@@ -627,16 +627,21 @@ def test_missing_or_corrupt_watchlist_seeds_nothing(db, tmp_path):
     assert store.seed_companies_from_watchlist(bad, path=db) == 0
 
 
-def test_cdx_failure_is_reported_not_swallowed(db, monkeypatch):
-    """A discovery run that mined nothing because Common Crawl REFUSED us is a
-    completely different event from one that found nothing new. Reporting a silent
-    zero for both is the same failure shape as the frozen pool."""
+def test_universe_failure_is_reported_not_swallowed(db, monkeypatch):
+    """A discovery run that read nothing because its input was MISSING is a completely
+    different event from one that found nothing new. Reporting a silent zero for both is
+    the same failure shape as the frozen pool.
+
+    Repointed 2026-08-17: discovery no longer mines Common Crawl at request time (its CDX
+    host refuses the VPS), so the failure this guards is now a missing committed universe
+    rather than a refused connection. The assertion is unchanged in substance — every dark
+    lane must be NAMED — because the bug being prevented is unchanged."""
     from jobfitr import resolve as _resolve
 
     def boom(ats, **kw):
-        raise OSError("connection refused")
+        raise _resolve.universe_file.UniverseUnavailable("no board universe at /nope")
 
-    monkeypatch.setattr(_resolve.discover, "mine", boom)
+    monkeypatch.setattr(_resolve.universe_file, "for_ats", boom)
     monkeypatch.setattr(_resolve.store, "DB_PATH", db)
     out = _resolve.discover_new(ats_list=["greenhouse", "workday"], path=db)
     assert out["mined"] == 0
@@ -742,16 +747,14 @@ def test_quarantine_retracts_but_keeps_the_evidence(db):
 
 # ── discover_new must not collide with name-resolved companies ───────────────
 # REGRESSION (panel blocker 1): board slugs and company names shared one name_key
-# namespace, so a CDX-discovered board silently overwrote a correct resolution, and a
-# refused board could mark a resolved company permanently `dead`. Both reproduced
-# against a temp store during the panel review; neither had any test coverage.
-def _mine_ashby(entry):
-    from jobfitr import resolve as _r
-
-    _r.discover.mine = lambda ats, **kw: [entry] if ats == entry["ats"] else []
-    return _r
-
-
+# namespace, so a discovered board silently overwrote a correct resolution, and a refused
+# board could mark a resolved company permanently `dead`. Both reproduced against a temp
+# store during the panel review; neither had any test coverage.
+#
+# 2026-08-17: both of these patched `discover.mine`, which `discover_new` stopped calling
+# when the universe moved to a committed file — so they went GREEN WHILE TESTING NOTHING
+# (the candidate list was empty, and every assertion held trivially). One of the two did
+# not even fail to announce it. Patch the seam the code actually reads.
 def test_discovered_board_does_not_clobber_a_name_resolution(db, monkeypatch):
     from jobfitr import resolve
 
@@ -759,8 +762,8 @@ def test_discovered_board_does_not_clobber_a_name_resolution(db, monkeypatch):
         "Ramp", {"ats": "lever", "slug": "ramp", "roles": 88}, variant="ramp", path=db
     )
     monkeypatch.setattr(
-        resolve.discover,
-        "mine",
+        resolve.universe_file,
+        "for_ats",
         lambda ats, **kw: [{"ats": "ashby", "slug": "ramp"}] if ats == "ashby" else [],
     )
     monkeypatch.setattr(
@@ -789,8 +792,8 @@ def test_a_refused_discovered_board_cannot_kill_a_resolved_company(db, monkeypat
         "Acme", {"ats": "lever", "slug": "acme", "roles": 42}, variant="acme", path=db
     )
     monkeypatch.setattr(
-        resolve.discover,
-        "mine",
+        resolve.universe_file,
+        "for_ats",
         lambda ats, **kw: (
             [{"ats": "greenhouse", "slug": "acme"}] if ats == "greenhouse" else []
         ),
@@ -1392,3 +1395,250 @@ def test_unknown_still_passes():
     country and must not be inferred foreign."""
     for loc in ("Remote", "Anywhere", "Global", "Distributed", ""):
         assert store.servable_in_us({"location": loc}) is True, loc
+
+
+# ── the negative-cache defect, and the budget ────────────────────────────────
+# Both were introduced-or-multiplied by moving discovery to a committed universe
+# (2026-08-17), so both are tested here rather than left as follow-ups.
+
+
+def test_a_name_whose_board_is_already_known_is_marked_covered_not_retried_forever(
+    db, monkeypatch
+):
+    """THE 377-DUPLICATE DEFECT. `discover.from_names` receives `known` and does
+    `if key in known: continue`, so a company whose guessed slug is ALREADY resolved (as
+    `board:{ats}:{slug}`, since a board slug is a normalized company name) generates no
+    candidate at all — the name never reaches `found` and falls through to
+    `record_resolution(name, None)`, a 90-DAY NEGATIVE against a company we have solved.
+    That is why `attempts` is 1 on 7,937 of 7,940 live ledger rows.
+
+    Committing the universe grows `known` from ~1,390 keys to ~7,600, multiplying this by
+    ~5.5x — which is why it is fixed in the same change that causes it.
+    """
+    from jobfitr import resolve
+
+    store.upsert_jobs(
+        [_job("https://x/1", "Engineer", company="Axon")], path=db
+    )
+    # the board is already resolved, under its own namespaced key
+    store.record_resolution(
+        "axon",
+        {"ats": "greenhouse", "slug": "axon", "roles": 483},
+        variant="cdx-discovery",
+        key="board:greenhouse:axon",
+        path=db,
+    )
+    # from_names finds nothing, exactly as it would when the candidate is skipped
+    monkeypatch.setattr(
+        resolve.discover, "from_names", lambda names, **kw: iter([])
+    )
+
+    out = resolve.resolve_batch(path=db)
+    assert out["covered"] >= 1, "the collision must be detected and reported"
+
+    with store._conn(db) as cx:
+        row = cx.execute("SELECT * FROM companies WHERE name_key='axon'").fetchone()
+
+    # NOT a negative, and NOT nothing either. An earlier fix wrote nothing at all, which
+    # left the name in the retry set forever — 37 of every 176-name batch once the committed
+    # universe landed, permanently occupying slots in a queue ordered by job count.
+    assert row is not None, "the outcome must be recorded, not skipped"
+    assert row["status"] == "covered", f"expected 'covered', got {row['status']!r}"
+    assert not row["ats"] and not row["slug"], (
+        "'covered' must claim NO board — binding the colliding slug would reintroduce the "
+        "Capital One -> capital false-binding class"
+    )
+
+    # The convergence property, which is the whole point of the status: the name stops
+    # coming back. 'covered' is terminal because unresolved_companies retries only
+    # status=='unresolved'.
+    assert "Axon" not in store.unresolved_companies(path=db), (
+        "a covered company must stop cycling through the nightly queue"
+    )
+
+
+def test_discover_new_respects_a_per_run_probe_budget(db, monkeypatch):
+    """`resolve_batch` has always had `limit=500`; `discover_new` had none, because until the
+    universe landed it had nothing to probe. With ~6,200 unknown boards and a 2-vCPU box at
+    3.2 GB available serving a 330 MB jobs.json, opening the tap at once risks an OOM-kill
+    mid-harvest — which freezes the pool while every dashboard reads healthy."""
+    from jobfitr import resolve
+
+    many = [{"ats": "greenhouse", "slug": f"co{i}"} for i in range(1200)]
+    monkeypatch.setattr(
+        resolve.universe_file,
+        "for_ats",
+        lambda ats, **kw: many if ats == "greenhouse" else [],
+    )
+    seen = {}
+
+    def probe(c, outcomes=None, **kw):
+        seen["n"] = len(c)
+        return []
+
+    monkeypatch.setattr(resolve.discover, "probe", probe)
+    out = resolve.discover_new(ats_list=["greenhouse"], path=db, budget=250)
+    assert seen["n"] == 250, f"probed {seen['n']} candidates against a budget of 250"
+    assert out["deferred_over_budget"] == 950, "what was skipped must be REPORTED"
+
+
+def test_an_unmined_ats_does_not_stop_the_others_being_read(db, monkeypatch):
+    """A live bug caught in review: the first draft `break`s on the first UniverseUnavailable,
+    and `for_ats` raises UniverseNotQueried for lever (CCBot is Disallowed on jobs.lever.co).
+    With CDX_ATS = [greenhouse, lever, ashby, workday], breaking on lever meant ASHBY WAS
+    NEVER READ — thousands of boards silently skipped by an error handler."""
+    from jobfitr import resolve
+    from jobfitr import universe as u
+
+    store.upsert_jobs(
+        [_job("https://x/1", "Engineer", company="Zzz Co")], path=db
+    )
+
+    def for_ats(ats, **kw):
+        if ats in ("lever", "workday"):
+            raise u.UniverseNotQueried(f"{ats} not mined")
+        return [{"ats": ats, "slug": "seen-" + ats}]
+
+    monkeypatch.setattr(resolve.universe_file, "for_ats", for_ats)
+    got = []
+    monkeypatch.setattr(
+        resolve.discover,
+        "match_known",
+        lambda names, universe, **kw: got.extend(universe) or iter([]),
+    )
+    monkeypatch.setattr(resolve.discover, "from_names", lambda names, **kw: iter([]))
+
+    out = resolve.resolve_batch(path=db, use_cdx=True)
+    assert {e["ats"] for e in got} == {"greenhouse", "ashby"}, (
+        f"ashby must survive lever raising; got {got}"
+    )
+    # AND the expected-dark lanes must NOT land in `universe_error`. lever and workday are
+    # absent by design on every healthy night, so reporting them as errors made a ⚠ fire
+    # every night — and a warning that always fires is unreadable, which means the night the
+    # FILE actually goes missing, the message that matters is buried in the one that always
+    # appears.
+    assert sorted(out["dark_lanes"]) == ["lever", "workday"]
+    assert out["universe_error"] == "", (
+        f"expected-dark lanes must not read as failures; got {out['universe_error']!r}"
+    )
+
+
+def test_a_throttled_candidate_does_not_erase_a_successful_resolution(db, monkeypatch):
+    """A company can be BOTH throttled and resolved — one candidate slug 429s while another
+    answers — and the successful answer must still be written.
+
+    HONEST NOTE ON WHAT THIS DOES AND DOES NOT PIN. It was written believing it caught an
+    operator-precedence bug in the `indeterminate` set (`|` vs `-`). It does not: mutation
+    showed the test passes either way, because the write loop guards with
+    `if not entry and name in indeterminate`, so a resolved company cannot reach the
+    `continue` however that set is built. The precedence quirk is cosmetic. What this test
+    DOES pin is the real behaviour above — that the throttled/resolved overlap resolves in
+    favour of the answer — and it is kept for that, not for the reason it was written.
+    """
+    from jobfitr import resolve
+
+    store.upsert_jobs([_job("https://x/1", "Engineer", company="Axon")], path=db)
+
+    def from_names(names, outcomes=None, **kw):
+        # throttled on one variant, resolved on another — the same company
+        if outcomes is not None:
+            outcomes.append({"name": "Axon", "outcome": "throttled"})
+        return iter([{"name": "Axon", "ats": "greenhouse", "slug": "axon", "roles": 483}])
+
+    monkeypatch.setattr(resolve.discover, "from_names", from_names)
+    resolve.resolve_batch(path=db)
+
+    assert [
+        (c["name"], c["ats"], c["roles"]) for c in store.resolved_companies(path=db)
+    ] == [("Axon", "greenhouse", 483)], "the successful resolution was swallowed"
+
+
+def test_a_404_board_is_cached_so_it_is_not_reprobed_every_night(db, monkeypatch):
+    """CONVERGENCE. `discover_new` used to write a ledger row only for verified and refused
+    boards, so a 404 was invisible to the next run and came back forever. With a ~6,200-board
+    universe and a 500/night budget that means discovery never converges — the same tranche
+    recycles while the rest of the alphabet waits."""
+    from jobfitr import resolve
+
+    boards = [{"ats": "greenhouse", "slug": "ghost"}]
+    monkeypatch.setattr(
+        resolve.universe_file,
+        "for_ats",
+        lambda ats, **kw: boards if ats == "greenhouse" else [],
+    )
+
+    def probe(c, outcomes=None, **kw):
+        if outcomes is not None:
+            outcomes.extend({**x, "outcome": "missing"} for x in c)
+        return []
+
+    monkeypatch.setattr(resolve.discover, "probe", probe)
+    out = resolve.discover_new(ats_list=["greenhouse"], path=db)
+    assert out["cached_non_answers"] == 1, "the 404 must be written down"
+
+    # the second run must not offer it again
+    seen = []
+    monkeypatch.setattr(
+        resolve.discover,
+        "probe",
+        lambda c, outcomes=None, **kw: seen.extend(c) or [],
+    )
+    resolve.discover_new(ats_list=["greenhouse"], path=db)
+    assert seen == [], f"a cached 404 was re-probed: {seen}"
+
+
+def test_a_throttled_board_is_NOT_cached(db, monkeypatch):
+    """A 429 is not an answer. Caching it would blacklist good boards over one bad night —
+    the same trap resolve_batch's own comments document for the name lane."""
+    from jobfitr import resolve
+
+    monkeypatch.setattr(
+        resolve.universe_file,
+        "for_ats",
+        lambda ats, **kw: [{"ats": "greenhouse", "slug": "busy"}] if ats == "greenhouse" else [],
+    )
+
+    def probe(c, outcomes=None, **kw):
+        if outcomes is not None:
+            outcomes.extend({**x, "outcome": "throttled"} for x in c)
+        return []
+
+    monkeypatch.setattr(resolve.discover, "probe", probe)
+    out = resolve.discover_new(ats_list=["greenhouse"], path=db)
+    assert out["cached_non_answers"] == 0
+
+    seen = []
+    monkeypatch.setattr(
+        resolve.discover, "probe", lambda c, outcomes=None, **kw: seen.extend(c) or []
+    )
+    resolve.discover_new(ats_list=["greenhouse"], path=db)
+    assert [x["slug"] for x in seen] == ["busy"], "a throttled board must be retried"
+
+
+def test_the_budget_spends_across_every_ats_not_one_alphabetical_head(db, monkeypatch):
+    """`candidates[:budget]` was the SAME first N greenhouse slugs every night — an
+    alphabetical truncation dressed as a RAM guard, which is precisely what `MINE_LIMIT` was
+    deleted for. The budget must be spent round-robin so every lane advances."""
+    from jobfitr import resolve
+
+    gh = [{"ats": "greenhouse", "slug": f"g{i:03d}"} for i in range(400)]
+    ash = [{"ats": "ashby", "slug": f"a{i:03d}"} for i in range(400)]
+    monkeypatch.setattr(
+        resolve.universe_file,
+        "for_ats",
+        lambda ats, **kw: gh if ats == "greenhouse" else (ash if ats == "ashby" else []),
+    )
+    seen = {}
+    monkeypatch.setattr(
+        resolve.discover,
+        "probe",
+        lambda c, outcomes=None, **kw: seen.update(c=list(c)) or [],
+    )
+    resolve.discover_new(ats_list=["greenhouse", "ashby"], path=db, budget=100)
+    by = {}
+    for x in seen["c"]:
+        by[x["ats"]] = by.get(x["ats"], 0) + 1
+    assert len(seen["c"]) == 100
+    assert by.get("ashby", 0) >= 40, (
+        f"ashby got {by.get('ashby', 0)} of 100 — the budget parked in one ATS: {by}"
+    )
