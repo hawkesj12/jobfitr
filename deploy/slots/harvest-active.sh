@@ -17,6 +17,21 @@ set -euo pipefail
 STATE=/etc/jobfitr/active-slot
 OUT=/opt/jobfitr/data/jobs.json
 
+# WAIT FOR RESOLVE. It decides which boards this harvest polls, so running before it finishes
+# means harvesting last night's universe. The clock gap is an hour and resolve takes ~2
+# minutes, so this should never fire — which is the point: it costs nothing and removes the
+# assumption.
+waited=0
+while systemctl is-active --quiet jobfitr-resolve.service; do
+	if [ "$waited" -ge 1800 ]; then
+		echo "harvest: resolve still running after 30m — proceeding with the existing ledger" >&2
+		break
+	fi
+	sleep 15
+	waited=$((waited + 15))
+done
+[ "$waited" -gt 0 ] && echo "harvest: waited ${waited}s for resolve to finish"
+
 slot=$(cat "$STATE" 2>/dev/null || echo blue)
 root="/opt/jobfitr/${slot}/jobfitr"
 bin="${root}/.venv/bin/jobfitr-snapshot"

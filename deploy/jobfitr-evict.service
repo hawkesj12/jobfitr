@@ -25,6 +25,12 @@ OnFailure=jobfitr-notify@%n.service
 Type=oneshot
 User=jobfitr
 Group=jobfitr
+# BOUNDED, because this unit stopped being pure SQL. Eviction used to be ~4 seconds of
+# DELETEs; since 2026-08-17 it first runs a liveness pass that issues up to
+# JOBFITR_VERIFY_BATCH (400) HTTP HEAD requests. Each has its own 8s timeout, so a normal run
+# is well under a minute — but an unbounded oneshot that does network I/O is a job that can
+# hang until someone notices, and nothing here would notice.
+TimeoutStartSec=30min
 EnvironmentFile=/etc/jobfitr/jobfitr.env
 ExecStart=/opt/jobfitr/bin/evict-active.sh
 
