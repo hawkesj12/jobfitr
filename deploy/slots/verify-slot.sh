@@ -53,7 +53,30 @@ adz=$(jqv adzuna_ok)
 # title_root is the tell: a 0.7.0 harvest fills it on 100% of rows, so anything near zero
 # means the snapshot predates the engine. `rebuild_store.py` now refuses that rebuild
 # outright — this is the second line of defence for a store that got there another way.
-db="/opt/jobfitr/${slot}/data/jobs.db"
+# ASK THE SLOT'S OWN CODE where its store is, rather than hardcoding a path.
+#
+# This line used to read `/opt/jobfitr/${slot}/data/jobs.db`, and on 2026-08-17 the store was
+# consolidated to ONE shared file whose name carries the schema version
+# (`/opt/jobfitr/data/jobs-v3.db`). The check did not fail — it fell through to the `skipped`
+# branch below and stopped verifying anything, silently, for the rest of the day. That is the
+# exact failure this file's own header warns about: a gate that stays green while asserting a
+# promise the system no longer makes.
+#
+# Deriving it from `store.DB_PATH` — with the same env file the units load — means a future
+# schema bump or env change moves the check automatically instead of quietly retiring it.
+db=$(
+	"/opt/jobfitr/${slot}/jobfitr/.venv/bin/python" - "$slot" <<-'PY' 2>/dev/null
+		import os, sys
+		sys.path.insert(0, f"/opt/jobfitr/{sys.argv[1]}/jobfitr")
+		for line in open("/etc/jobfitr/jobfitr.env"):
+		    line = line.strip()
+		    if line and not line.startswith("#") and "=" in line:
+		        k, v = line.split("=", 1)
+		        os.environ.setdefault(k, v.strip('"').strip("'"))
+		from jobfitr import store
+		print(store.DB_PATH)
+	PY
+)
 fillpy='import sqlite3,sys
 c=sqlite3.connect("file:%s?mode=ro"%sys.argv[1],uri=True)
 n=c.execute("SELECT count(*) FROM jobs").fetchone()[0]
@@ -69,7 +92,10 @@ if [[ -r "$db" ]]; then
 	*) bad "new-schema columns" "could not read ${db}" ;;
 	esac
 else
-	say "new-schema columns" "– skipped (${db} not readable from here)"
+	# A FAILURE, not a skip. "I could not check" is not "it is fine", and reporting it as a
+	# neutral dash is how this check spent a day asserting nothing. If the store genuinely
+	# cannot be read from here, the slot cannot serve from it either.
+	bad "new-schema columns" "cannot read the store at '${db:-<path not resolved>}' — the slot serves from it, so this must be readable; check JOBFITR_DB_DIR in /etc/jobfitr/jobfitr.env and the file's owner"
 fi
 
 # 2. the pool is not just NON-EMPTY but the right SIZE. A fixed >1000 floor let a
