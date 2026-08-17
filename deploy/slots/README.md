@@ -116,7 +116,7 @@ The harvest itself stays single (one snapshot, no doubled job-API traffic) but n
 ## One-time setup on the box (summary)
 
 1. Create `green` beside `blue` (clone + venv) and each slot's writable store dir: `install -d -o jobfitr -g jobfitr /opt/jobfitr/{blue,green}/data`.
-2. Write `slot-blue.env` / `slot-green.env` with BOTH the port and the per-slot store path: `SLOT_PORT=8000` + `JOBFITR_DB_PATH=/opt/jobfitr/blue/data/jobs.db` (green → `8001` + its own path). Make sure the shared `jobfitr.env` also carries `ADZUNA_DAILY_CEILING` (the Phase F load-shed) alongside the keys and `JOBFITR_JOBS_PATH`.
+2. Write `slot-blue.env` / `slot-green.env` with **only** the port: `SLOT_PORT=8000` (green → `8001`). They must NOT set a DB path — the store is shared, and a slot-level override would silently recreate the retired per-slot topology. Make sure the shared `jobfitr.env` carries `JOBFITR_DB_DIR=/opt/jobfitr/data` (the store's directory; the filename is derived from `SCHEMA_VERSION`), `JOBFITR_JOBS_PATH`, `JOBFITR_US_ONLY=1`, and `ADZUNA_DAILY_CEILING` alongside the keys.
 3. Install the template unit: `jobfitr-web@.service` → `/etc/systemd/system/`; `systemctl enable --now jobfitr-web@blue jobfitr-web@green`.
 4. Install `Caddyfile.blue-green` → `/etc/caddy/Caddyfile`; seed `active-slot` with `blue`; run `flip.sh` once to generate the snippet; `systemctl reload caddy`.
 5. Add the `staging.jobfitr.app` DNS record.
