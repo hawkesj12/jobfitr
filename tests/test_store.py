@@ -1885,3 +1885,53 @@ def test_meta_missing_entirely_is_an_empty_dict_not_a_crash(tmp_path):
     p = tmp_path / "nometa.json"
     p.write_text(json.dumps({"jobs": []}), encoding="utf-8")
     assert store.snapshot_meta(p) == {}
+
+
+# ── skip_value: correctness, since the prefix fast path took over its speed role ──
+# It was added to remove a super-quadratic skip, and it does. But `snapshot_meta` now answers
+# from a bounded prefix, so in practice skip_value only ever crosses SMALL values (the meta
+# block, ahead of the jobs array). Its performance justification is therefore largely
+# superseded; what still matters is that it lands the cursor in exactly the right place,
+# because a scan that miscounts depth would silently start reading jobs from the wrong offset.
+# Mutation-verified that the old `decode()` passes the perf tests, which is why these are
+# correctness assertions rather than timings.
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"a": 1},
+        {"s": "a } b ] c { d [ e"},                 # structural chars inside a string
+        {"s": 'he said \\"stop\\" then }'},           # escaped quotes then a brace
+        {"s": "trailing backslash \\\\"},             # a real backslash, not an escape
+        {"nested": {"deep": {"deeper": [1, [2, [3]]]}}},
+        {"arr": [{"x": "}"}, {"y": "]"}]},
+        {"empty_obj": {}, "empty_arr": []},
+        {"unicode": "日本語 \U0001F680 } ]"},
+        {"nums": [1, -2.5, 1e10, 0]},
+        {"nulls": [None, True, False]},
+    ],
+    ids=[
+        "plain", "brackets-in-string", "escaped-quotes", "trailing-backslash",
+        "deep-nesting", "structural-in-array", "empties", "unicode", "numbers", "literals",
+    ],
+)
+def test_skipping_a_value_lands_the_cursor_correctly(tmp_path, meta):
+    """If skip_value miscounts depth, the reader starts parsing jobs from the wrong offset —
+    so the proof is that the jobs AFTER the skipped meta come back intact."""
+    p = tmp_path / "jobs.json"
+    p.write_text(json.dumps({"meta": meta, "jobs": _jobrows(3)}), encoding="utf-8")
+    assert [j["url"] for j in store._iter_snapshot_jobs(p)] == [
+        f"https://x/{i}" for i in range(3)
+    ]
+
+
+def test_skipping_a_value_larger_than_the_read_chunk(tmp_path):
+    """The refill boundary is where a hand-rolled scanner breaks: skip_value must resume
+    mid-value across a chunk edge without losing its depth or its in-string state."""
+    p = tmp_path / "jobs.json"
+    big_meta = {"errors": ["}" * 50_000, "]" * 50_000, '\\"' * 20_000]}
+    p.write_text(json.dumps({"meta": big_meta, "jobs": _jobrows(3)}), encoding="utf-8")
+    assert [j["url"] for j in store._iter_snapshot_jobs(p)] == [
+        f"https://x/{i}" for i in range(3)
+    ]

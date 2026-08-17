@@ -953,11 +953,12 @@ class _JsonStream:
         Projected to a 380 MB snapshot that is hours, on `/api/health`, which is strictly
         worse than the 1,168 MB spike it replaced.
 
-        Not currently reachable — today's writer emits `meta` first, 990 bytes ahead of the
-        jobs key, verified on the live file. It is fixed anyway because the meta-last layout
-        is DOCUMENTED as supported and asserted in the test suite, so the tolerance has to be
-        real rather than nominal: one key-order change or one older rollback artifact and
-        health hangs.
+        HONEST SCOPE, after the fix that followed: `snapshot_meta` now answers from a bounded
+        prefix, so in practice this only ever crosses the SMALL meta block. The quadratic it
+        was written to remove is therefore no longer reachable by any caller, and mutation
+        confirms the old `decode()` still passes every performance test. What earns its keep is
+        correctness at the refill boundary — a scan that miscounts depth would start reading
+        jobs from the wrong offset — so that is what the tests assert.
 
         A depth counter over braces and brackets, string- and escape-aware so a `}` inside a
         string cannot close a level. Scalars go through `decode()` — they are small by
