@@ -3,11 +3,16 @@
 # downtime instead of skipping it. This is the outflow side of the pool control loop.
 # Install: /etc/systemd/system/jobfitr-evict.timer (done by bootstrap.sh).
 #
-# 04:45 UTC = 00:45 ET, and the ORDER is the whole point rather than a preference. This
-# was 03:30, which is BEFORE the 04:07 harvest: eviction removed ~5,400 stale rows and the
-# harvest put them straight back, because intake has no age filter. The result was 14% of
-# the live pool older than the 60-day rule while every log read clean. The eviction was
-# never broken; the order was.
+# 05:00 UTC = 01:00 ET. THE ORDER IS THE WHOLE POINT, not a preference: this once ran at
+# 03:30, BEFORE the harvest, so it removed ~5,400 stale rows and the harvest put them
+# straight back — 14% of the live pool past the 60-day rule while every log read clean. The
+# eviction was never broken; the order was.
+#
+# The three jobs are simply spaced AN HOUR APART — resolve 03:00, harvest 04:00, evict 05:00
+# — rather than chained or guarded. The harvest is the long one at ~10 minutes, so an hour is
+# roughly 6x headroom, and a plain clock gap is something anyone can read off three unit files
+# without tracing a wrapper. If the harvest ever approaches 40 minutes, widen the gap; do not
+# add coordination logic for a problem a number solves.
 #
 # OnCalendar, not a relative timer, also deliberately: the relative form re-anchored on
 # every manual `systemctl start` and drifted into the middle of the day.
@@ -16,7 +21,7 @@
 Description=Run the jobfitr pool eviction nightly
 
 [Timer]
-OnCalendar=*-*-* 04:45:00
+OnCalendar=*-*-* 05:00:00
 RandomizedDelaySec=15min
 Persistent=true
 

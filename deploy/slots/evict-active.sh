@@ -22,34 +22,6 @@ set -euo pipefail
 
 STATE=/etc/jobfitr/active-slot
 
-# WAIT FOR THE HARVEST, rather than trusting the clock gap.
-#
-# The schedule leaves 38 nominal minutes between them (04:07 vs 04:45 UTC), but both timers
-# carry a RandomizedDelaySec — 5 min on the harvest, 15 on this one — so the real worst-case
-# margin is 23 minutes against a harvest that already grew from ~6 to ~10 minutes today when
-# board discovery finished. That margin is fine and is exactly the kind of thing that stops
-# being fine without anyone editing a file.
-#
-# Running the collector while the harvest is still writing would mean two processes applying
-# opposite rules to one store: the harvest inserting rows the LRU cap and the age rules are
-# concurrently deleting. This project already shipped the reverse ordering bug once — eviction
-# at 03:30 removed ~5,400 rows and the 04:07 harvest put them straight back — so the ordering
-# is load-bearing and now enforced rather than assumed.
-waited=0
-# `is-active --quiet` is NOT enough: a Type=oneshot service reports **activating**
-# for its whole run, and `--quiet` only succeeds on "active". The first version of
-# this guard used it and was a silent no-op — proved by firing both at once and
-# watching this one sail straight through while the other was still running.
-while case "$(systemctl is-active jobfitr-harvest.service)" in active|activating|reloading) true ;; *) false ;; esac; do
-	if [ "$waited" -ge 3600 ]; then
-		echo "evict: harvest still running after 60m — skipping tonight rather than racing it" >&2
-		exit 0
-	fi
-	sleep 30
-	waited=$((waited + 30))
-done
-[ "$waited" -gt 0 ] && echo "evict: waited ${waited}s for the harvest to finish"
-
 slot=$(cat "$STATE" 2>/dev/null || echo blue)
 bin="/opt/jobfitr/${slot}/jobfitr/.venv/bin/jobfitr-evict"
 

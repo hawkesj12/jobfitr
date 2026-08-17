@@ -17,25 +17,6 @@ set -euo pipefail
 STATE=/etc/jobfitr/active-slot
 OUT=/opt/jobfitr/data/jobs.json
 
-# WAIT FOR RESOLVE. It decides which boards this harvest polls, so running before it finishes
-# means harvesting last night's universe. The clock gap is an hour and resolve takes ~2
-# minutes, so this should never fire — which is the point: it costs nothing and removes the
-# assumption.
-waited=0
-# `is-active --quiet` is NOT enough: a Type=oneshot service reports **activating**
-# for its whole run, and `--quiet` only succeeds on "active". The first version of
-# this guard used it and was a silent no-op — proved by firing both at once and
-# watching this one sail straight through while the other was still running.
-while case "$(systemctl is-active jobfitr-resolve.service)" in active|activating|reloading) true ;; *) false ;; esac; do
-	if [ "$waited" -ge 1800 ]; then
-		echo "harvest: resolve still running after 30m — proceeding with the existing ledger" >&2
-		break
-	fi
-	sleep 15
-	waited=$((waited + 15))
-done
-[ "$waited" -gt 0 ] && echo "harvest: waited ${waited}s for resolve to finish"
-
 slot=$(cat "$STATE" 2>/dev/null || echo blue)
 root="/opt/jobfitr/${slot}/jobfitr"
 bin="${root}/.venv/bin/jobfitr-snapshot"
