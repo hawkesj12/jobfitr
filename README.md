@@ -201,6 +201,7 @@ jobfitr/
   live.py             the per-search live fetch, single-flighted
   snapshot.py         the baseline harvest → atomic jobs.json; the cached reader
   resolve.py          company → ATS board discovery, with a negative cache and an audit path
+  universe.py         reads deploy/board-universe.json — the set of ATS boards known to exist
   chat.py             the structured-turn assistant behind /api/chat
   config_builder.py   the posted answers → a job_radar Config (the per-user lens)
 web/
@@ -209,8 +210,12 @@ web/
   app.js              config → API → board rows, criteria bar, filters, localStorage state
   atmosphere.js       the time-of-day sky the whole UI floats on
   style.css           the theme (time-of-day atmosphere, responsive)
-tests/                the store, the chat, the web API, and 234 golden cases whose expected
-                      score was computed by hand from the spec — not from the code
+scripts/
+  mine_universe.py    regenerate deploy/board-universe.json from Common Crawl (run OFF-box)
+  rebuild_store.py    back up, rebuild on the current schema, report per-column fill
+tests/                the store, the chat, the web API, the front-end facet logic, and 234
+                      golden cases whose expected score was computed by hand from the spec —
+                      not from the code
 bakeoff/              the model bake-off: which LLM should run the chat, and how we know
 deploy/               systemd units, Caddyfile, bootstrap.sh, and the blue-green slots
 web-harvest.example.yaml   the wide-harvest config

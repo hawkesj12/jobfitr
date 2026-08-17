@@ -284,18 +284,52 @@ function seenSet() {
 function jobHasFacet(job, group, value) {
   return group.own ? job[group.key] === value : (job.tags || []).includes(value);
 }
+// Does the job say ANYTHING about this facet? Distinct from "does it match" — the whole
+// point of the fix below. Own-field groups have a truthy field or they do not; tag groups
+// carry at most one value per group in job.tags.
+function jobLabeledFor(job, group) {
+  if (group.own) return !!job[group.key];
+  return (job.tags || []).some((tv) => tagGroup(tv) === group.key);
+}
 // A job passes a group if it matches ANY selected value in that group (OR-within).
 // It must pass EVERY group that has a selection (AND-across).
+//
+// AN UNLABELLED JOB PASSES. This is the fix for the most destructive behaviour in the
+// front end: clicking one Field chip hid 168 of 200 jobs, and ~136 of those were hidden
+// for having NO category rather than the wrong one. The facets are sparse by design and
+// by measurement — category is 18% filled, remote 45%, seniority 44% — because the three
+// of them obey one rule: NO FACET MAY ASSERT SOMETHING THE SOURCE DID NOT SAY (see
+// store.normalize_job). Having honoured that on the way in, the drawer then treated
+// "the posting did not say" as "the posting said no", which threw the honesty away at the
+// last step and deleted correct results.
+//
+// So a selection now means "narrow to these values, and keep what is unlabelled" rather
+// than "delete everything I cannot confirm". A user who wants only confirmed values still
+// has one: the counts on the chips are the labelled totals, and the count line reports how
+// many of the shown rows are unlabelled, so the ambiguity is visible instead of silent.
 function passesFacets(job) {
   for (const g of FACET_GROUPS) {
     const sel = state.filters.facets[g.key];
     if (sel && sel.size) {
+      if (!jobLabeledFor(job, g)) continue; // unlabelled — not judged, not deleted
       let hit = false;
       for (const v of sel) if (jobHasFacet(job, g, v)) { hit = true; break; }
       if (!hit) return false;
     }
   }
   return true;
+}
+// How many of `list` are riding on the unlabelled exemption, per narrowed group. Feeds the
+// count line — an exemption the user cannot see is just a filter that does not work.
+function unlabelledPasses(list) {
+  const out = [];
+  for (const g of FACET_GROUPS) {
+    const sel = state.filters.facets[g.key];
+    if (!sel || !sel.size) continue;
+    const n = list.reduce((a, j) => a + (jobLabeledFor(j, g) ? 0 : 1), 0);
+    if (n) out.push({ title: g.title, n });
+  }
+  return out;
 }
 // The min salary a posting states (its FIRST number, however small), or null when the
 // salary field is empty. A tiny "$10" is a real (low/hourly) value — NOT "unlisted" —
@@ -813,6 +847,12 @@ function buildFacets() {
     }
     if (!counts.size) continue;
     const values = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    // A ONE-CHIP GROUP IS A CONTROL THAT CONTROLS NOTHING, and under the unlabelled-passes
+    // rule that is now provable rather than merely likely: selecting the only value keeps
+    // every labelled row (they all carry it) AND every unlabelled row (exempt), so the
+    // board cannot change. A remote-only user's Work style drawer rendered exactly
+    // `Remote 200` — a chip that looked like a filter and did nothing when clicked.
+    if (values.length < 2) continue;
     const sel = selectedFacets(g.key);
 
     const group = document.createElement("div");
@@ -841,7 +881,16 @@ function buildFacets() {
   }
 }
 function updateFilterCount(n) {
-  el.fCount.innerHTML = `Showing <b>${n}</b> of ${state.all.length}`;
+  let s = `Showing <b>${n}</b> of ${state.all.length}`;
+  // Name the exemption. Without this the drawer silently shows jobs that do not carry the
+  // value the user picked, which is a different lie from the one it used to tell.
+  const un = unlabelledPasses(state.view || []);
+  if (un.length) {
+    s += ` · <span class="unlab">${un
+      .map((u) => `${u.n} not labelled on ${escapeHtml(u.title)}`)
+      .join(", ")}</span>`;
+  }
+  el.fCount.innerHTML = s;
 }
 
 // ── views ────────────────────────────────────────────────────────────────────
