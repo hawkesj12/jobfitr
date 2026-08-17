@@ -39,6 +39,13 @@ Which slot is live is one fact: `/etc/jobfitr/active-slot` (`blue`|`green`).
 
 > **Why the store is shared, and why its NAME carries the schema version** — see "The SQLite store under slots" below. In one line: one store means a flip changes the code and nothing else, and the version in the filename is what keeps a schema bump zero-downtime without needing a second copy per slot.
 
+> **A slot restarting after a fresh harvest takes ~75 s to answer, not ~2 s.** `store.init()` runs
+> `sync_snapshot()` before uvicorn binds, so the first process to see a new `jobs.json` imports it
+> synchronously — measured 74 s for a 397 MB / 52,691-row snapshot. `verify-slot.sh` will report a dead
+> slot for that whole window. Distinguish it from a real failure by checking whether the process is
+> burning CPU and whether anything is listening on the slot's port yet; idle-and-not-listening is a
+> genuine fault, busy-and-not-listening is an import in progress.
+
 ## The daily workflow
 
 ```bash
