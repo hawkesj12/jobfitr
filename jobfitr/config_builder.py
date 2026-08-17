@@ -194,36 +194,44 @@ def config_from_dict(doc: dict, notes: list[str] | None = None) -> Config:
         else:  # a real place
             cfg.location = loc
             cfg.remote_only = False
-    # A NAMED PLACE BEATS A STRAY `remote_only`. Same shape as the exclusion bug, same
-    # resolution: when the assistant writes two fields that disagree and one of them DELETES,
-    # honour the other and say so.
+    # KNOWN DEFECT, DELIBERATELY LEFT OPEN — do not "fix" this the obvious way.
     #
-    # This used to read "explicit flag always wins", and the flag is a hard filter in
-    # `_eligible`. So `location="Louisville, KY"` + `remote_only=true` deleted every job in
-    # Louisville — the exact local coverage this project spent a day protecting, gone to a
-    # boolean nobody typed. `chat.py`'s prompt says "if they say remote, set remote_only=true"
-    # with no rule against combining it with a city, and one real search already carried
-    # `location='anywhere' + remote_only=true`, so the shape is reachable and observed.
+    # `remote_only` is a HARD FILTER in `server._eligible`, so a real place plus
+    # `remote_only=true` shows only remote jobs and, for local non-tech verticals, an empty
+    # board: measured `[local dev db]` Warehouse Supervisor / Louisville 0, Industrial
+    # Electrician / Louisville 0, Occupational Therapist / Austin 0, HS Teacher / Denver 0.
+    # (It does NOT "empty the board" generally — `location` filters nothing, so a tech search
+    # just fills with nationwide remote jobs: Software Engineer / Louisville stays at 200.)
     #
-    # Only a REAL PLACE overrides the flag. `remote`/`anywhere` do not:
-    #   * `remote` + the flag AGREE — nothing to resolve.
-    #   * `anywhere` + the flag is not a contradiction. "Anywhere" is a statement about
-    #     GEOGRAPHY and remote-only is one about ARRANGEMENT; wanting remote work from
-    #     anywhere is coherent, so the flag stands.
+    # A guard here that made the PLACE win was written, reviewed and REVERTED on 2026-08-17,
+    # for three reasons that any future attempt has to answer:
     #
-    # The asymmetry is what decides it. Honouring the city when the user did want remote-only
-    # shows some extra onsite jobs they can filter with one chip; honouring the flag when they
-    # named a city empties the board and offers no way back.
-    if isinstance(remote_only, bool):
-        named_place = bool(cfg.location) and cfg.location != "remote"
-        if remote_only and named_place:
-            if notes is not None:
-                notes.append(
-                    f"kept your location ({cfg.location}) and ignored a remote-only flag — "
-                    f"remote-only would have removed every job there"
-                )
-        else:
-            cfg.remote_only = remote_only
+    #   1. THE SHAPE HAS NEVER OCCURRED. 0 of 32 real searches carried a real place with
+    #      `remote_only=true`. All 24 remote searches said "remote" or "anywhere"; all 8 place
+    #      searches carried no flag. The guard would have protected against a hypothetical.
+    #   2. ITS JUSTIFICATION WAS FALSE. The commit claimed the extra onsite jobs were
+    #      "removable with one chip". They are not: `web/app.js`'s `passesFacets` exempts
+    #      unlabelled rows ON PURPOSE (57-79% of such a board is NULL-`remote`), `buildFacets`
+    #      suppresses a one-value group so the control often does not render at all, and
+    #      `RESULT_CAP` truncation is server-side — remote listings displaced out of the top
+    #      200 never reach the browser to be filtered back in. Measured over 19 remote-only
+    #      profiles given a home city: 186 rows all-confirmed-remote became 200 rows with 62
+    #      confirmed remote.
+    #   3. `city + remote_only=true` IS COHERENT. "I live in Louisville, show me remote work"
+    #      is a real request, and `chat.py`'s location chips lead with Remote/Hybrid/On-site,
+    #      so a user produces this pair on purpose. Unlike `exclude` vs `titles` — which is
+    #      NEVER coherent, which is why that guard is right — the payload cannot tell which
+    #      reading is meant, so the contract would be guessing at intent it does not have.
+    #
+    # The fix that would dominate: keep both fields and stop making the flag a FILTER when a
+    # place is also named — pass the remote preference into `_rank` as a strong boost so
+    # confirmed-remote rows sort to the top of the 200 instead of displacing them. That needs
+    # its own before/after over those 19 profiles, and it is a `_rank` change, not this one.
+    # Also required first, whatever the direction: `searchlog.record` takes the POST-override
+    # `remote_only` and has no `overrides` field, so today the only real-user signal cannot
+    # observe this firing at all.
+    if isinstance(remote_only, bool):  # explicit flag always wins
+        cfg.remote_only = remote_only
 
     # Freshness.
     max_age = doc.get("max_age_days")

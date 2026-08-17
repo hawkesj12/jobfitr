@@ -96,27 +96,23 @@ def test_config_from_dict_no_location_shows_all():
 
 
 def test_config_from_dict_remote_and_anywhere():
-    """BEHAVIOUR CHANGED 2026-08-17, and this test used to encode the defect.
+    """The last assertion pins a KNOWN DEFECT, not desired behaviour.
 
-    Its last assertion was `{"location": "Denver", "remote_only": True} -> remote_only is
-    True`, i.e. "the explicit flag always wins". `remote_only` is a HARD FILTER in
-    `server._eligible`, so that combination deleted every job in Denver — and the assistant
-    writes both fields, with a prompt that says "if they say remote, set remote_only=true" and
-    no rule against combining it with a city. One real search already carried
-    `location='anywhere' + remote_only=true`.
+    `remote_only` is a hard filter, so a city plus the flag shows only remote jobs — and for
+    local non-tech verticals that is an empty board. A guard making the place win was written
+    and REVERTED on 2026-08-17: the shape has never occurred (0 of 32 real searches), its
+    "removable with one chip" justification was false (the drawer exempts unlabelled rows by
+    design and `RESULT_CAP` truncation is server-side), and `city + remote_only` is a coherent
+    request the payload cannot disambiguate. See the long comment in `config_builder`.
 
-    A named place now beats the flag, for the same reason an exclusion no longer beats a title:
-    when two fields disagree and one of them DELETES, honour the other and say so. "anywhere"
-    and "remote" are NOT contradictions and still let the flag stand.
+    Left asserting the current behaviour so a future change to it is deliberate and visible.
     """
     assert config_from_dict({"location": "remote"}).remote_only is True
     assert config_from_dict({"location": "anywhere"}).remote_only is False
-
-    notes = []
-    cfg = config_from_dict({"location": "Denver", "remote_only": True}, notes)
-    assert cfg.location == "Denver"
-    assert cfg.remote_only is False, "the flag would have emptied a Denver board"
-    assert notes and "Denver" in notes[0]
+    assert (
+        config_from_dict({"location": "Denver", "remote_only": True}).remote_only
+        is True
+    )
 
 
 def test_config_from_dict_does_not_inherit_tech_exclude_defaults():
