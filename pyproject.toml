@@ -73,7 +73,13 @@ Repository = "https://github.com/hawkesj12/jobfitr"
 Issues = "https://github.com/hawkesj12/jobfitr/issues"
 
 [tool.setuptools]
-packages = ["jobfitr"]
+packages = ["jobfitr", "jobfitr.prompts"]
+
+# The prompts are DATA, and they have to reach the box. Without this the wheel installs
+# the loader and none of the .md files, and every model call goes out with no system
+# prompt at all — which fails as plausible-looking output, not as an error.
+[tool.setuptools.package-data]
+"jobfitr.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]
 # `slow` is the full-corpus sweep — every one of the 123,015 (user x listing) pairs,
