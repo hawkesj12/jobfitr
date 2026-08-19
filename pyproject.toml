@@ -45,12 +45,27 @@ dev = [
 bakeoff = [
     "choix>=0.3.5",
 ]
+# The semantic retrieval arm. A Model2Vec STATIC embedder — the token vectors were
+# distilled offline from a real sentence-transformer, so encoding is a table lookup plus a
+# weighted mean and there is no neural forward pass at runtime. That is what makes this
+# affordable on a 2-vCPU box: measured 1,445 jobs/s end-to-end (including HTML stripping
+# and section parsing) against fastembed/bge-base's ~5/s, with indistinguishable retrieval
+# quality on the graded set (11 vs 12 top-rated jobs in the top 25, better recall@50).
+#
+# Deliberately NOT fastembed: it drags in onnxruntime, 69 MB on its own, for a model that
+# measured no better here. numpy is explicit because the KNN is a brute-force matmul —
+# 60,000 x 512 with 8 probes is ~7 ms, so no vector index is needed at this scale.
+semantic = [
+    "model2vec>=0.9",
+    "numpy>=1.24",
+]
 
 [project.scripts]
 jobfitr-snapshot = "jobfitr.snapshot:main"
 jobfitr-serve = "jobfitr.server:main"
 jobfitr-evict = "jobfitr.store:main"
 jobfitr-resolve = "jobfitr.resolve:main"
+jobfitr-vectors = "jobfitr.vectors:main"
 
 [project.urls]
 Homepage = "https://github.com/hawkesj12/jobfitr"

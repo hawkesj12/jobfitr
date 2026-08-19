@@ -1754,6 +1754,30 @@ def bm25_candidates(
     return out
 
 
+def rows_by_url(urls: list[str], path: str | None = None) -> list[dict]:
+    """Fetch full rows for a set of urls, preserving the CALLER's order.
+
+    The dense arm returns urls, and some of them were never in the lexical arm's candidate
+    set — those rows have to be fetched before anything can filter or render them. Order
+    is restored from the input because SQLite returns `IN (...)` in whatever order it
+    likes, and the input order IS the fusion's ranking.
+
+    Chunked at 400 to stay under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds); a
+    candidate set is only ~50 today but the depth this is called with is not capped.
+    """
+    if not urls:
+        return []
+    out: dict[str, dict] = {}
+    with _conn(path) as con:
+        con.row_factory = sqlite3.Row
+        for i in range(0, len(urls), 400):
+            batch = urls[i : i + 400]
+            q = ",".join("?" * len(batch))
+            for r in con.execute(f"SELECT * FROM jobs WHERE url IN ({q})", batch):
+                out[r["url"]] = dict(r)
+    return [out[u] for u in urls if u in out]
+
+
 def facet_counts(rows: list[dict]) -> dict:
     """Count the facet tags across a result set (for the filter drawer)."""
     facets: dict[str, dict] = {

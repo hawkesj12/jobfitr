@@ -34,7 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from . import chat as chatmod
-from . import live, searchlog, snapshot, store
+from . import live, searchlog, semantic, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
 from .match import has_term, norm_key, term_hits, title_score
 from .snapshot import load_dotenv
@@ -331,6 +331,17 @@ RELATED_IN_RETRIEVAL = os.environ.get("JOBFITR_RELATED_IN_RETRIEVAL", "1") != "0
 #                    rather than row count — the 6,012-row user scores FASTER — so a row
 #                    limit was never protecting the expensive thing anyway.
 RESULT_CAP = int(os.environ.get("JOBFITR_RESULT_CAP", "200"))
+# The AI path's delivery slice. Deliberately its own knob: /api/score's cap is what a
+# HUMAN scrolls, this is what a MODEL reads, and the two have no reason to move together.
+# 50 is the starting point rather than a settled answer — how many candidates a model
+# should read is the one question today's measurements could not resolve, because on a
+# 363-row test bed k=200 is 55% of the corpus and 0.33% in production.
+CANDIDATE_CAP = int(os.environ.get("JOBFITR_CANDIDATE_CAP", "50"))
+CANDIDATE_MAX = int(os.environ.get("JOBFITR_CANDIDATE_MAX", "200"))
+# Candidates carry MORE body than a card does. _shape truncates to DESC_CHARS=1200 for a
+# browser; a model that has to judge fit needs the responsibilities, which routinely sit
+# past that. Still capped — 50 rows x 4,000 chars is ~50k tokens, a cent on a cheap model.
+CANDIDATE_CHARS = int(os.environ.get("JOBFITR_CANDIDATE_CHARS", "4000"))
 
 CHAT_RATE_LIMIT = os.environ.get("CHAT_RATE_LIMIT", "20/minute")
 SCORE_RATE_LIMIT = os.environ.get("SCORE_RATE_LIMIT", "40/minute")
@@ -534,6 +545,30 @@ def _shape(c: dict, points: int, why: str, parts: list) -> dict:
         "why": why,
         "snippet": _snippet(body),
         "description": _description(body),
+    }
+
+
+def _shape_candidate(c: dict) -> dict:
+    """A candidate row for a MODEL to read — facts plus enough body to judge fit.
+
+    Not `_shape`: that builds a card (points, parts, tags, facets) and truncates the body
+    to 1,200 characters. Nothing here is scored, because on this path the model does the
+    judging and a number it did not compute would only mislead it.
+    """
+    body = c.get("body") or c.get("text") or ""
+    return {
+        "url": c.get("url", ""),
+        "title": c.get("title", ""),
+        "company": c.get("company", ""),
+        "location": c.get("location", ""),
+        "remote": c.get("remote") or "",
+        "salary": c.get("salary", ""),
+        "salary_min": store.annual_salary(c),
+        "posted": c.get("posted", ""),
+        "source": c.get("source", ""),
+        "seniority": c.get("seniority") or "",
+        "employment_type": _norm_employment_type(c.get("employment_type")),
+        "description": _plain_text(body)[:CANDIDATE_CHARS],
     }
 
 
@@ -991,6 +1026,84 @@ def score_jobs(request: Request, payload: dict = Body(...)) -> dict:
         "facets": facets,
         "pool": pool,
         "jobs": results,
+    }
+
+
+@app.post("/api/candidates")
+@limiter.limit(SCORE_RATE_LIMIT)
+def candidates_endpoint(request: Request, payload: dict = Body(...)) -> dict:
+    """The AI path's retrieval: two arms, fused, pre-filtered, handed to a model to read.
+
+    SEPARATE FROM /api/score ON PURPOSE. That endpoint is the free deterministic floor —
+    it works with no API key, its number is absolute and explainable, and the README
+    promises it. This one answers a different question ("give a model enough good rows to
+    pick five from") and so wants a different contract: wider, no scoreboard, no facets,
+    and bodies that are not truncated to DESC_CHARS.
+
+    THE ORDER IS THE POINT. The hard filters run BEFORE either arm, not after. A dense KNN
+    returns a fixed top-k, so filtering the result hands the model 18 rows where it asked
+    for 50; filtering the corpus first spends the whole budget on rows the user can
+    receive. Measured over a graded set, pre-filtering on stated dealbreakers keeps 91% of
+    rows and 97% of the relevant ones.
+
+    Both arms retrieve over the SAME filtered pool and are fused with RRF. Measured
+    2026-08-19 over 4,000 live postings: of 50 delivered candidates, 16 came from both
+    arms, 17 from lexical only and 17 from the dense arm only — two thirds of the set does
+    not exist under a single arm, which is the whole argument for running two.
+
+    Degrades to lexical-only whenever the dense arm is unavailable (no vector store, no
+    model2vec installed, a corrupt matrix). The lexical arm is the floor.
+    """
+    cfg = config_from_dict(payload, [])
+    titles, location = search_inputs(payload)
+    probes = _clean_list(payload.get("probes"))
+    k = max(1, min(int(payload.get("k") or CANDIDATE_CAP), CANDIDATE_MAX))
+    related = _clean_list(payload.get("related_titles"))
+    raw_age = payload.get("max_age_days")
+    max_age_days = (
+        int(raw_age)
+        if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool)
+        else None
+    )
+    degraded = _warm_cache(titles, location)
+    search_titles = titles + related if RELATED_IN_RETRIEVAL else titles
+
+    # PRE-FILTER, then retrieve. `_eligible` is the same predicate /api/score applies, so
+    # the two endpoints cannot disagree about who is eligible for what.
+    pool_rows = _dedupe_listings(
+        _eligible(
+            store.bm25_candidates(search_titles),
+            list(cfg.exclude_titles),
+            cfg.remote_only,
+            max_age_days,
+        )
+    ) if search_titles else []
+    lexical_urls = [c.get("url", "") for c in pool_rows if c.get("url")]
+    by_url = {c["url"]: c for c in pool_rows if c.get("url")}
+
+    fused = semantic.hybrid(
+        lexical_urls, probes, k=k,
+        per_company={u: (r.get("company") or "") for u, r in by_url.items()},
+    )
+    dense_only = [u for u in fused if u not in set(lexical_urls)]
+    # A dense hit outside the lexical pool never passed _eligible, because _eligible only
+    # ever saw the lexical arm's rows. Fetch and filter those before they reach anyone.
+    if dense_only:
+        extra = _eligible(
+            store.rows_by_url(dense_only),
+            list(cfg.exclude_titles),
+            cfg.remote_only,
+            max_age_days,
+        )
+        by_url.update({c["url"]: c for c in extra if c.get("url")})
+    out = [by_url[u] for u in fused if u in by_url][:k]
+
+    return {
+        "count": len(out),
+        "degraded": degraded,
+        "semantic": semantic.available(),
+        "pool": store.pool_size(),
+        "jobs": [_shape_candidate(c) for c in out],
     }
 
 

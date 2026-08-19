@@ -43,7 +43,12 @@ echo "▸ installing deps (from the lockfile — a replay, not a re-solve)"
 # also meant a rollback restored the old code against a possibly-different graph. The
 # range is a wish; the lockfile is the contract. If this errors with a stale-lockfile
 # complaint, the fix is `uv lock` committed from a dev machine, never a re-solve here.
-sudo -u jobfitr sh -c "cd '$dir' && '$UV' sync --frozen --extra web --quiet"
+# --extra semantic pulls model2vec (+ tokenizers/safetensors) for the dense retrieval arm.
+# Deliberately NOT fastembed: that drags onnxruntime, 69 MB on its own, for a model that
+# measured no better. The whole semantic extra is ~30 MB and has no torch.
+# The arm degrades to lexical-only if it is ever missing, so a slot that somehow installs
+# without it still serves searches — it just answers `"semantic": false`.
+sudo -u jobfitr sh -c "cd '$dir' && '$UV' sync --frozen --extra web --extra semantic --quiet"
 
 systemctl restart "jobfitr-web@${slot}"
 sleep 1

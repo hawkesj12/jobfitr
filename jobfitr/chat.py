@@ -48,6 +48,7 @@ REQUEST_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT", "30"))
 CONFIG_FIELDS = (
     "titles",
     "related_titles",
+    "probes",
     "boosts",
     "exclude",
     "rank_down",
@@ -85,6 +86,17 @@ TURN_SYSTEM_PROMPT = (
     "- location: a place, or 'remote', or 'anywhere'. A bare city is ambiguous "
     "(Madison, IN vs Madison, WI), so if they give a city with no state, ASK which "
     "state and store it as 'City, ST'. If they say remote, set remote_only=true.\n"
+    "- probes: 4-6 full SENTENCES describing the work this person wants, written the "
+    "way a JOB POSTING would describe the role — one per distinct facet of what they "
+    "said (the kind of work, the setting, the technical surface, the shape of the team). "
+    "These drive the semantic search, which matches on MEANING, so keywords are nearly "
+    "useless here and prose is what works. Never write a probe about being remote, about "
+    "salary, about seniority or about recency — those are filters applied separately and "
+    "a probe spent on one is wasted. Never phrase a probe as a negative ('no travel', "
+    "'not a startup') — the search cannot represent negation and will match the very "
+    "thing you meant to exclude. FEWER AND SHARPER IS BETTER: a single off-target probe "
+    "measurably costs the user real results and nothing downstream can repair it. Derive "
+    "them from what the user actually SAID, never from the job titles alone.\n"
     "- boosts: skills/tools/industry to rank HIGHER. These are the single most valuable "
     "answer in the whole interview: the titles FIND the jobs, but the boosts are what "
     "ORDER them, and a search with none comes back in essentially no order at all. So "
@@ -174,6 +186,26 @@ TURN_SCHEMA = {
                     "items": {"type": "string"},
                     "description": "Five canonical, SHORT adjacent job titles you suggest — only once the user's own title list is final ([] before that).",
                 },
+                # The SEMANTIC arm's queries — full sentences describing the WORK, not
+                # keywords. The lexical arm needs titles; this one matches on meaning, and
+                # a bare keyword carries almost none.
+                #
+                # FEW AND ON-TARGET. Measured 2026-08-19 on a graded set: probe QUALITY is
+                # the lever, count is not. More on-target probes help monotonically (2 ->
+                # 6.3 relevant, 8 -> 11.0), while ONE off-target probe costs real results
+                # (8 probes scored 12; adding one loose one dropped it to 9, seven dropped
+                # it to 5) — and no fusion rule or deeper cut repairs it, because a bad
+                # probe's most CONFIDENT matches are exactly its wrong ones.
+                #
+                # NO NEGATIONS, NO FILTERS. Embeddings cannot represent negation —
+                # measured, "you will not be on call" scores 0.92 against "you will be on
+                # call" — and remote/salary/seniority/recency are hard filters a WHERE
+                # clause excludes perfectly. A probe spent on either is a wasted slot.
+                "probes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "4-6 SENTENCES describing the work the user wants, each a distinct facet of it, for semantic search. Prose, not keywords. Never about remote/salary/seniority/recency, and never phrased as a negative.",
+                },
                 "boosts": {"type": "array", "items": {"type": "string"}},
                 "exclude": {"type": "array", "items": {"type": "string"}},
                 "rank_down": {"type": "array", "items": {"type": "string"}},
@@ -209,6 +241,10 @@ TURN_SCHEMA = {
             },
             "required": [
                 "reply",
+                # strict mode requires EVERY property here — a property present in
+                # `properties` but absent from `required` is a 400 on every single turn,
+                # not a soft degradation. Adding a field means adding it in both places.
+                "probes",
                 "ready",
                 "titles",
                 "related_titles",
