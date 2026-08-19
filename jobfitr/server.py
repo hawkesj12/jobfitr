@@ -33,6 +33,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from . import agent as agentmod
 from . import chat as chatmod
 from . import live, searchlog, semantic, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
@@ -1105,6 +1106,36 @@ def candidates_endpoint(request: Request, payload: dict = Body(...)) -> dict:
         "pool": store.pool_size(),
         "jobs": [_shape_candidate(c) for c in out],
     }
+
+
+@app.post("/api/agent")
+@limiter.limit(CHAT_RATE_LIMIT)
+async def agent_endpoint(request: Request, payload: dict = Body(...)) -> dict:
+    """The agentic path: a model that interviews, then drives its own search loop.
+
+    Distinct from /api/chat, which fills a config in one structured turn and runs ONE
+    search. The 2026-08-17 experiment that produced five jobs Justin called right ran
+    NINE searches, each chosen from what the previous returned. That difference is the
+    whole point of this endpoint, and it is why the tool budget rather than the turn
+    count is what bounds it.
+
+    Fails CLOSED, like /api/chat: without a key the front end falls back to the form.
+    """
+    if not agentmod.available():
+        raise HTTPException(status_code=503, detail="agent_unavailable")
+    if chatmod.daily_ceiling_reached():
+        raise HTTPException(status_code=503, detail="daily_ceiling")
+    messages = chatmod.sanitize_messages(payload.get("messages"))
+    if not messages:
+        raise HTTPException(status_code=422, detail="messages required")
+    if len(messages) > agentmod.MAX_TURNS:
+        raise HTTPException(status_code=429, detail="turn_cap")
+    chatmod.note_request()
+    try:
+        return await agentmod.turn(messages)
+    except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
+        log.warning("agent turn failed: %s: %s", type(e).__name__, e)
+        return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}"}
 
 
 @app.post("/api/chat")
