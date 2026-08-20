@@ -241,7 +241,12 @@ def search_jobs(args: dict) -> dict:
 
 def read_jobs(args: dict) -> dict:
     """Full postings, sections labelled — the handicap the experiment ran under, removed."""
-    urls = [u for u in (args.get("urls") or []) if str(u).strip()][:MAX_READ]
+    asked = [u for u in (args.get("urls") or []) if str(u).strip()]
+    urls = asked[:MAX_READ]
+    # SILENTLY dropping the overflow is how a model ends up recommending a job it believes
+    # it read and never saw. One run passed 35 urls and got 25 back with no indication.
+    # Telling it costs a line and lets it ask for the rest.
+    unread = asked[MAX_READ:]
     out = []
     for c in store.rows_by_url(urls):
         parts = sectionsmod.split_sections(c.get("body") or "")
@@ -258,7 +263,16 @@ def read_jobs(args: dict) -> dict:
             "posted": c.get("posted", ""), "team": c.get("team") or "",
             "sections": {k: " ".join(v)[:DEEP_CHARS] for k, v in labelled.items()},
         })
-    return {"read": len(out), "jobs": out}
+    result = {"read": len(out), "jobs": out}
+    if unread:
+        result["not_read"] = unread
+        result["note"] = (f"Only the first {MAX_READ} were read. {len(unread)} were NOT — "
+                          "call read_jobs again for those before judging them.")
+    missing = [u for u in urls if u not in {j["url"] for j in out}]
+    if missing:
+        # A url that is not in the pool: invented, or evicted since the search returned it.
+        result["not_found"] = missing
+    return result
 
 
 def recommend(args: dict) -> dict:
