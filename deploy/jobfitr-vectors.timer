@@ -1,0 +1,26 @@
+# Fire the vector backstop nightly at 04:40 — after the harvest (04:00 + 5 min jitter,
+# 25-40 min run) and before eviction at 04:45.
+#
+# ORDERING IS THE POINT, and this box has already been bitten by getting it wrong: the
+# eviction used to run at 03:30, BEFORE the 04:07 harvest, so it removed stale rows and
+# the harvest put them straight back — 14% of the live pool ended up older than the
+# 60-day rule while the eviction itself was working perfectly. Same class of error here:
+# embedding before the harvest would embed yesterday's pool and leave every row the
+# harvest just imported without a vector, which is the exact failure this unit exists to
+# prevent, reintroduced by a clock.
+#
+# OnCalendar (never OnUnitActiveSec) because a relative timer re-anchors on any manual
+# `systemctl start` and drifts into the middle of the day. Persistent=true catches up
+# after downtime.
+# Install: /etc/systemd/system/jobfitr-vectors.timer.
+
+[Unit]
+Description=Run the jobfitr vector backstop nightly
+
+[Timer]
+OnCalendar=*-*-* 04:40:00
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

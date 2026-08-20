@@ -57,6 +57,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import logging
 import sys
 
 from jobfitr import store
@@ -87,6 +88,8 @@ from .semantic import DIMS, EMBED_MODEL  # noqa: E402
 # spends its first 550 characters on an "Application and Interview Impersonation Notice"
 # before naming the role, so a 300-char summary embeds the legal notice.
 SUMMARY_CHARS = 1800
+
+log = logging.getLogger("jobfitr.vectors")
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS vectors (
@@ -198,12 +201,112 @@ def iter_jsonl(path: str):
                 yield json.loads(line)
 
 
+# EVERY column summary_text() actually reads. It used to select five, while summary_text
+# built its "semantic header" from title_root, title_qualifiers, team, category and tags —
+# so the header the docstring calls load-bearing was empty in every vector ever built, and
+# nothing failed, because a missing key just yields an empty string. Fill rates when this
+# was found (2026-08-20): title_root 7.7%, category 7.4%, title_qualifiers 2.5%, team 0.1%,
+# tags 0%. Small today, and job-radar 0.9.0 raises them — a bug that grows on its own.
+_JOB_COLS = ("url,title,title_root,title_qualifiers,company,team,category,"
+             "location,tags,body")
+
+
 def iter_jobs(store_path: str):
     con = sqlite3.connect(f"file:{store_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    for r in con.execute("SELECT url,title,company,location,body FROM jobs"):
+    for r in con.execute(f"SELECT {_JOB_COLS} FROM jobs"):
         yield dict(r)
     con.close()
+
+
+def _encode(rows: list[dict]):
+    """rows -> L2-normalized float32 vectors. The only place the model is invoked.
+
+    IT REUSES semantic's MODEL, and that is not a micro-optimisation. `StaticModel.
+    from_pretrained` can reach the network: measured 2026-08-20, an intake embed of FIVE
+    rows took 217 SECONDS on a cold HuggingFace fetch, against 535 ms cold-from-cache and
+    1 ms warm. Building a second model here would put that stall inside a request handler.
+    The web process already holds exactly this model for queries — semantic.EMBED_MODEL is
+    the same constant — so there is one instance, one load, and one thing that can hang,
+    and it hangs at query time where it already did rather than in a new place.
+
+    The CLI path takes the same route; on a box with no HF cache the first call still
+    fetches, which is why the nightly unit is oneshot with a 20-min timeout instead of
+    something that has to answer a user.
+    """
+    import numpy as np
+
+    from .semantic import _model
+
+    v = np.asarray(_model().encode([summary_text(r) for r in rows]), dtype=np.float32)
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    return v
+
+
+def vector_count(vectors_path: str | None = None) -> int:
+    """How many vectors exist. For /api/health — `semantic.available()` only proves the
+    FILE is there, which cannot tell a current store from one built in June."""
+    from .semantic import VECTORS_PATH
+
+    try:
+        con = sqlite3.connect(f"file:{vectors_path or VECTORS_PATH}?mode=ro", uri=True)
+        n = con.execute("SELECT count(*) FROM vectors").fetchone()[0]
+        con.close()
+        return int(n)
+    except sqlite3.Error:
+        return 0
+
+
+def embed_urls(urls: list[str], vectors_path: str | None = None) -> int:
+    """Embed these urls NOW, reading their rows back from the store. Returns how many.
+
+    THE POINT OF THIS FUNCTION: a nightly pass cannot keep up, because the live lane adds
+    rows all day and those are precisely the local ones. Measured 2026-08-20 before this
+    existed — of 1,998 unvectorised rows, 1,929 were adzuna, and 97% of every Louisville/KY
+    row in the pool had no vector at all. The semantic arm was dark exactly where the
+    product claims to work, while /api/health read healthy.
+
+    It reads back from the STORE rather than embedding the fetched records directly, so the
+    vector is built from the same normalized row retrieval will return.
+
+    Never raises. Embedding is an enhancement to search and may not be able to break it —
+    the same contract semantic.candidates() keeps.
+    """
+    from . import store
+    from .semantic import VECTORS_PATH
+
+    urls = [u for u in (urls or []) if u]
+    if not urls:
+        return 0
+    try:
+        rows = [r for r in store.rows_by_url(urls) if r.get("url")]
+        if not rows:
+            return 0
+        con = open_vectors(vectors_path or VECTORS_PATH)
+        # Two slots share one vectors file on the box, same as the store — WAL plus a
+        # busy timeout is what makes concurrent small writes safe rather than an
+        # intermittent "database is locked" in a request handler.
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=8000")
+        known = dict(con.execute(
+            "SELECT url, content_id FROM vectors WHERE url IN (%s)"
+            % ",".join("?" * len(rows)), [r["url"] for r in rows]))
+        stale = [r for r in rows if known.get(r["url"]) != content_id(r)]
+        if not stale:
+            con.close()
+            return 0
+        vecs = _encode(stale)
+        now = time.time()
+        con.executemany(
+            "INSERT OR REPLACE INTO vectors(url,content_id,embedding,built_at) "
+            "VALUES(?,?,?,?)",
+            [(r["url"], content_id(r), v.tobytes(), now) for r, v in zip(stale, vecs)])
+        con.commit()
+        con.close()
+        return len(stale)
+    except Exception as e:  # noqa: BLE001 — see the docstring: never break search
+        log.warning("embed_urls failed (%s: %s) — rows stay unvectorised", type(e).__name__, e)
+        return 0
 
 
 def main(argv=None) -> int:
@@ -238,16 +341,12 @@ def main(argv=None) -> int:
         stale = stale[: a.limit]
         print(f"--limit: embedding {len(stale)}")
 
-    import numpy as np
-    from model2vec import StaticModel
 
-    model = StaticModel.from_pretrained(EMBED_MODEL)
     t0 = time.perf_counter()
     done = 0
     for i in range(0, len(stale), 500):
         chunk = stale[i : i + 500]
-        vecs = np.asarray(model.encode([summary_text(j) for j in chunk]), dtype=np.float32)
-        vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+        vecs = _encode(chunk)
         now = time.time()
         vec.executemany(
             "INSERT OR REPLACE INTO vectors(url,content_id,embedding,built_at) VALUES(?,?,?,?)",

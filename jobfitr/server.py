@@ -33,7 +33,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from . import chat as chatmod
-from . import live, semantic, snapshot, store
+from . import live, semantic, snapshot, store, vectors
 from .config_builder import _clean_list, filters_from_dict, search_inputs
 from .match import has_term, norm_key
 from .snapshot import load_dotenv
@@ -422,6 +422,24 @@ def _warm_cache(titles: list, location: str) -> str | None:
         )  # blocking (threadpool), single-flight
         if rows:
             store.upsert_jobs(rows)
+            # EMBED AT INTAKE. A nightly pass cannot keep up with this lane: it runs all
+            # day and its rows are the LOCAL ones. Measured 2026-08-20, before this
+            # existed — 1,929 of 1,998 unvectorised rows were adzuna, and 97% of every
+            # Louisville/KY row in the pool had no vector, so hybrid retrieval silently
+            # collapsed to lexical-only exactly where local search lives.
+            # Cost is why there is no argument for deferring it: Model2Vec is a table
+            # lookup with no forward pass — 7,240 rows/s measured, 1 ms for five rows once
+            # the model is warm — so a 177-row fetch is tens of ms against a fetch that
+            # just spent ~22 s. It reuses semantic's already-resident model rather than
+            # building its own, because from_pretrained can reach the network and was
+            # measured taking 217 SECONDS on a cold HuggingFace fetch. embed_urls never
+            # raises: a row that misses its vector is a slightly worse search, not a 500.
+            n = vectors.embed_urls([r.get("url") for r in rows])
+            if n:
+                # The in-process matrix is a snapshot; without this the new vectors are on
+                # disk and invisible until the next restart. Measured 63 ms to reload.
+                semantic.reset_cache()
+                log.info("embedded %d new row(s) at intake", n)
         store.mark_fetched(key)
         _note_fetch()
         # A fetch that SUCCEEDED can still be short a source. Google for Jobs is the only
@@ -622,6 +640,12 @@ def health() -> dict:
         "daily_fetches_used": store.live_fetch_count(),
         "daily_fetch_ceiling": ADZUNA_DAILY_CEILING,
         "pool_size": store.pool_size(),
+        # THE VECTOR GAP, and it has to be a NUMBER. `semantic` below only reports that
+        # the file EXISTS — it cannot tell a current store from one built in June, which
+        # is how the arm went dark on 97% of Louisville rows with every dashboard green.
+        # unvectorised > 0 and rising means the nightly timer is not running.
+        "vectors": vectors.vector_count(),
+        "unvectorised": max(0, store.pool_size() - vectors.vector_count()),
         # The size of the harvest snapshot this slot should be serving. The pool is
         # that snapshot plus live-fetch accumulation, so pool_size < snapshot_count
         # means the slot UNDER-ingested — the exact regression verify-slot.sh gates on

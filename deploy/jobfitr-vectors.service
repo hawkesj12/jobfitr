@@ -1,0 +1,41 @@
+# jobfitr vectors — the nightly BACKSTOP for the semantic arm.
+#
+# It is a backstop and not the mechanism, and the distinction is the whole design. The
+# live lane adds rows all day and those rows are the LOCAL ones, so a nightly pass alone
+# cannot keep up: measured 2026-08-20, 1,929 of 1,998 unvectorised rows were adzuna, and
+# 97% of every Louisville/KY row in the pool had no vector at all. The real fix is
+# embedding at intake (server._warm_cache -> vectors.embed_urls). THIS catches what
+# intake cannot see — the ~30,000 rows the nightly HARVEST imports through
+# store.sync_snapshot(), which never passes through a request handler.
+#
+# Runs AFTER the harvest (04:00 + up to 5 min jitter, typically 25-40 min) and before
+# eviction reads the pool at 04:45. Oneshot; fired by jobfitr-vectors.timer.
+# Install: /etc/systemd/system/jobfitr-vectors.service.
+#
+# Cheap enough that the schedule barely matters: Model2Vec is a static table lookup with
+# no forward pass, measured 7,240 rows/s, so a full 34k-row incremental pass is seconds.
+# It is idempotent — content_id hashes exactly the text that gets embedded, so a row
+# re-embeds only when its vector would actually change.
+
+[Unit]
+Description=jobfitr — embed any job rows that have no vector
+After=network-online.target
+OnFailure=jobfitr-notify@%n.service
+
+[Service]
+Type=oneshot
+User=jobfitr
+Group=jobfitr
+EnvironmentFile=/etc/jobfitr/jobfitr.env
+ExecStart=/opt/jobfitr/bin/vectors-active.sh
+
+# The vectors file is SHARED by both slots, like the store and the search log — a
+# per-slot copy would double the disk for one cache and let a flip change which rows
+# are semantically reachable.
+ReadWritePaths=/opt/jobfitr/data
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
