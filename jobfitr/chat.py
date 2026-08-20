@@ -54,10 +54,34 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # with how many searches the model chooses to run — which is the whole point of the loop,
 # so treat these as a ranking, not a bill. Prices move; re-fetch before quoting them.
 #
-# NOTHING HERE IS MEASURED FOR QUALITY. The retrieval work of 2026-08-19 established that
-# the interview's output (its probes and its titles) is what drives results, and that probe
-# QUALITY is the lever — but no model has been compared against another on it. The bench
-# exists so that comparison is a one-line change instead of a refactor.
+# MEASURED 2026-08-20 — a 14-model screen, persona B (a Louisville warehouse supervisor
+# who cannot work nights or take a pay cut), against a pre-warmed FROZEN 34,226-row pool.
+# 9 of 14 passed a binary gate: searched, READ, delivered or honestly declined, fabricated
+# nothing. `_private/model-bakeoff/` holds the harness, results and the searches themselves.
+#
+# The five failures are worth knowing because each fails differently: gemini-2.5-flash-lite
+# recommended off 320-char snippets without reading; minimax-m3 never searched at all;
+# glm-4.7-flash and grok-4.6 exhausted the tool budget; grok-4.20 FABRICATED 3 urls — caught
+# only because `fabricated` reached the response that morning.
+#
+# PRICE DOES NOT PREDICT ANY OF IT. sonnet-5 ($0.61/session) and deepseek-v4-flash ($0.009)
+# both pass; grok-4.6 and gemini-2.5-flash-lite sit at opposite ends and both fail. The tiers
+# below group by cost and that is ALL they group by — do not read capability into them.
+#
+# WHY deepseek-v4-flash IS ACTIVE, and it is not the price: it is the only model that ran
+# MULTIPLE searches and let each one change the next. Its third search asked for
+# "1st Shift Supervisor" / "Day Shift Supervisor" — turning the persona's stated reason for
+# leaving ("six years on nights, I want off nights") into a title query. No other model did.
+# All five of its picks were at her actual level; qwen3.5-flash returned five MANAGER roles
+# to a supervisor and still scored 5/5 clean, because no column expresses over-levelling.
+#
+# TWO THINGS THIS DOES NOT ESTABLISH. It is n=2 on ONE persona — enough to separate "always
+# completes" from "coin flip" (gemini-2.5-flash passed once, then recommended five jobs
+# having read NONE of them) and NOT enough to rank the passers. And persona A has not been
+# re-run since the harness was fixed. Do not read an order into the survivors.
+#
+# `session_usd` remains modelled; MEASURED per-conversation cost now comes back on the
+# response as `usage` and is what the harness records.
 MODELS = {
     # ── cheap, and a million tokens of context ───────────────────────────────
     "qwen3.5-flash":     {"id": "qwen/qwen3.5-flash-02-23",   "ctx": 1_000_000, "session_usd": 0.011},
@@ -84,7 +108,7 @@ MODELS = {
 }
 
 # ↓↓↓ THE ONE LINE TO CHANGE ↓↓↓
-ACTIVE_MODEL = "gemini-2.5-flash"
+ACTIVE_MODEL = "deepseek-v4-flash"   # measured 2026-08-20; see the bench note
 
 DEFAULT_MODEL = os.environ.get("CHAT_MODEL") or MODELS[ACTIVE_MODEL]["id"]
 MAX_TOOL_CALLS = int(os.environ.get("CHAT_MAX_TOOL_CALLS", "12"))
