@@ -546,7 +546,7 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
         raise HTTPException(status_code=429, detail="turn_cap")
     chatmod.note_request()
     try:
-        return await chatmod.turn(messages)
+        return await chatmod.turn(messages, payload.get("model"))
     except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
         log.warning("chat turn failed: %s: %s", type(e).__name__, e)
         return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}"}

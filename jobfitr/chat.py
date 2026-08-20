@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import os
 
 import httpx
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import prompts, semantic, store
+from . import prompts, searchlog, semantic, store
 
 log = logging.getLogger("jobfitr.chat")
 
@@ -73,6 +74,9 @@ MODELS = {
     "grok-4.3":          {"id": "x-ai/grok-4.3",               "ctx": 1_000_000, "session_usd": 0.203},
     "grok-4.20":         {"id": "x-ai/grok-4.20",              "ctx": 2_000_000, "session_usd": 0.203},
     "grok-4.6":          {"id": "x-ai/grok-4.6",               "ctx":   500_000, "session_usd": 0.336},
+    # ── the CONTROL, not a candidate. If a model this capable also fails the loop, the
+    #    fault is the tools or the prompt, not the model. That is what it is here for.
+    "sonnet-5":          {"id": "anthropic/claude-sonnet-5",   "ctx": 1_000_000, "session_usd": 0.360},
     "gemini-3.5-flash":  {"id": "google/gemini-3.5-flash",     "ctx": 1_048_576, "session_usd": 0.279},
     # NOTE grok-4.3 carries TWICE the context of grok-4.6 at 60% of the cost, and grok-4.20
     # carries four times it for the same price. If the reason for reaching for Grok is
@@ -309,6 +313,49 @@ def _shallow(c: dict) -> dict:
     }
 
 
+def _warm_live(titles: list[str], location: str) -> str | None:
+    """One bounded live fetch for this (titles, location), or the fresh cache untouched.
+
+    Deliberately imported lazily from the server: the fetch policy, the daily ceiling and
+    the load-shed all live there with the endpoints, and duplicating them here is how the
+    two paths would drift into disagreeing about what "fresh" means.
+    """
+    try:
+        from .server import _warm_cache
+
+        return _warm_cache(titles, location)
+    except Exception as e:  # noqa: BLE001 — a dead live lane must not kill the search
+        log.warning("live warm failed (%s: %s) — serving the cache", type(e).__name__, e)
+        return "fetch_error"
+
+
+def _place_filter(location: str) -> tuple[str, str] | None:
+    """A requested place -> (city_lower, STATE) to test rows against. None means anywhere."""
+    loc = (location or "").strip()
+    if not loc or loc.lower() in ("remote", "anywhere", "any", "us", "usa", "united states"):
+        return None
+    parts = [x.strip() for x in loc.split(",")]
+    city = parts[0].lower() if parts else ""
+    state = parts[1].upper()[:2] if len(parts) > 1 else ""
+    return (city, state)
+
+
+def _in_place(row: dict, place: tuple[str, str]) -> bool:
+    """Is this row available to someone in `place`?
+
+    A REMOTE row is available everywhere — that is the point of remote, and dropping it
+    would delete most of what a location search should surface. Otherwise the row has to
+    name the state or the city.
+    """
+    if (row.get("remote") or "") == "remote":
+        return True
+    city, state = place
+    if state and (row.get("state") or "").upper() == state:
+        return True
+    text = f"{row.get('location') or ''} {row.get('city') or ''}".lower()
+    return bool(city) and city in text
+
+
 def search_jobs(args: dict) -> dict:
     """The hybrid arm. Pre-filter, then BOTH arms over the filtered pool, fused by RRF."""
     from .config_builder import filters_from_dict
@@ -320,31 +367,94 @@ def search_jobs(args: dict) -> dict:
         {"titles": titles, "location": args.get("location") or "",
          "remote_only": bool(args.get("remote_only"))})
     age = args.get("max_age_days")
+    # FETCH LIVE FIRST. Without this the agent only ever sees the baseline harvest, which
+    # is structurally remote-and-tech (~88% greenhouse ATS boards) and — in CLAUDE.md's own
+    # words — "was never meant to hold a Louisville warehouse job". The local lane IS the
+    # live fetch: Google for Jobs alone supplied 14 of 17 employers on one measured
+    # Louisville search that appeared in NO other source.
+    #
+    # This was missing until 2026-08-20 and it made local search structurally impossible on
+    # the agent path, which is now the whole product. The symptom was not an error: a
+    # warehouse supervisor in Louisville got out-of-state jobs and the models that refused
+    # to recommend them were scored as failures.
+    #
+    # Idempotent and single-flighted, so several searches in one conversation cost at most
+    # one upstream fetch per (titles, location).
+    degraded = _warm_live(titles, args.get("location") or "")
     rows = store.bm25_candidates(titles) if titles else []
     # Hard filters BEFORE retrieval depth is spent. See semantic.hybrid.
-    keep = []
+    _t0 = time.perf_counter()
     floor = args.get("salary_floor")
-    for c in rows:
+    place = _place_filter(f.location)
+
+    def eligible(c: dict) -> bool:
+        """ONE predicate, applied to BOTH arms.
+
+        The lexical arm's rows were filtered and the dense arm's were not, so a search
+        could return 11 rows having reported that 8 passed — and the extras were exactly
+        the ones the user had excluded. A filter that runs on one retrieval path is not a
+        filter; it is a suggestion.
+        """
         if f.remote_only and (c.get("remote") or "") in ("onsite", "hybrid"):
-            continue
+            return False
+        # LOCATION. This was advertised in the tool schema and NOT IMPLEMENTED until
+        # 2026-08-20, and the cost was not a missing feature — it was a wrong answer that
+        # looked right. A Louisville warehouse supervisor who cannot relocate was handed
+        # Aurora IL, Laredo TX, Memphis TN and two air-traffic-control roles, with zero
+        # Louisville rows in 25. Models that refused to recommend from that were behaving
+        # correctly and were scored as failures; models that recommended anyway were scored
+        # as passing. An unimplemented filter is worse than an absent one, because the
+        # caller trusts it.
+        if place and not _in_place(c, place):
+            return False
         if age and (c.get("posted") or ""):
             from job_radar.util import age_int
+
             a = age_int(c.get("posted"))
             if a is not None and a > int(age):
-                continue
+                return False
         if floor:
-            s = store.annual_salary(c)
-            if s is not None and s < int(floor):   # unstated salary is KEPT — see SCHEMA_NOTE
-                continue
-        keep.append(c)
+            sal = store.annual_salary(c)
+            if sal is not None and sal < int(floor):  # unstated salary is KEPT
+                return False
+        return True
+
+    keep = [c for c in rows if eligible(c)]
     by_url = {c["url"]: c for c in keep if c.get("url")}
+    # Snapshot BEFORE the dense extras are merged in. Taking it afterwards makes every
+    # dense-only hit look lexical, which is how the provenance counts read 0 on their
+    # first run — the exact class of error this logging exists to surface.
+    lexical_set = set(by_url)
     fused = semantic.hybrid(list(by_url), probes, k=k,
                             per_company={u: (r.get("company") or "") for u, r in by_url.items()})
     extra = [u for u in fused if u not in by_url]
     if extra:
-        by_url.update({c["url"]: c for c in store.rows_by_url(extra) if c.get("url")})
+        # THROUGH THE SAME GATE. A dense hit never met `eligible` — it was found by meaning
+        # over the whole pool, not by retrieving from the filtered set.
+        by_url.update({c["url"]: c for c in store.rows_by_url(extra)
+                       if c.get("url") and eligible(c)})
     out = [_shallow(by_url[u]) for u in fused if u in by_url][:k]
+
+    # SHAPE ONLY — see searchlog.record_search. `in_place` is the number that would have
+    # caught the unimplemented location filter on its first ever call.
+    delivered_urls = [u for u in fused if u in by_url][:k]
+    searchlog.record_search(
+        n_titles=len(titles), n_probes=len(probes),
+        probe_chars=sum(len(p) for p in probes),
+        has_location=bool(f.location), remote_only=bool(f.remote_only),
+        salary_floor=int(floor) if floor else None,
+        max_age_days=int(age) if age else None, k=k,
+        matched=len(keep), returned=len(out),
+        in_place=(sum(1 for u in delivered_urls if _in_place(by_url[u], place))
+                  if place else None),
+        from_lexical=sum(1 for u in delivered_urls if u in lexical_set),
+        from_dense=sum(1 for u in delivered_urls if u not in lexical_set),
+        from_both=0,  # the arms are fused by RRF, so "both" is not separable per row
+        fetched=degraded is None and bool(titles), degraded=degraded,
+        elapsed_ms=(time.perf_counter() - _t0) * 1000,
+    )
     return {"searched": {"titles": titles, "probes": probes, "why": args.get("why", "")},
+            "degraded": degraded,
             "matched_before_fusion": len(keep), "returned": len(out),
             "semantic": semantic.available(), "jobs": out}
 
@@ -499,13 +609,27 @@ async def _call(payload: dict) -> dict:
         return r.json()
 
 
-async def turn(messages: list) -> dict:
+def resolve_model(name: str | None) -> str:
+    """A caller-supplied model, but only from the bench.
+
+    The bakeoff needs to vary the model per request; a public endpoint must not let a
+    caller name an arbitrary one, because "model" is the field that decides what a request
+    COSTS. Restricting it to MODELS keys makes the worst case a known entry on a curated
+    list rather than whatever is most expensive in the catalogue today.
+    """
+    if name and name in MODELS:
+        return MODELS[name]["id"]
+    return DEFAULT_MODEL
+
+
+async def turn(messages: list, model: str | None = None) -> dict:
     """Run the model until it produces text for the user, executing its tool calls.
 
     Bounded twice over: MAX_TOOL_CALLS across the loop and MAX_TURNS on the transcript. An
     agent that can choose its own searches can also choose them forever, and this is the
     only thing standing between a curious model and the token bill.
     """
+    model_id = resolve_model(model)
     convo = [{"role": "system", "content": system_prompt()}, *messages]
     trace, calls = [], 0
     picks: list = []
@@ -514,7 +638,7 @@ async def turn(messages: list) -> dict:
     nudged = False
     while calls <= MAX_TOOL_CALLS:
         data = await _call({
-            "model": DEFAULT_MODEL,
+            "model": model_id,
             "messages": convo, "tools": TOOLS, "tool_choice": "auto",
         })
         msg = data["choices"][0]["message"]

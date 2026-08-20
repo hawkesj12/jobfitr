@@ -211,14 +211,149 @@ def record(
         if len(text.encode()) > LINE_CAP:
             return
 
-        path = Path(LOG_PATH)
-        with _lock:
-            # Rotate BEFORE writing, so the cap is a real ceiling rather than a ceiling
-            # plus one line. Single generation on purpose — this is a review buffer, not
-            # an audit trail, and a box with a 32 MB budget should not grow .1 .2 .3.
-            if path.exists() and path.stat().st_size >= MAX_BYTES:
-                path.replace(path.with_suffix(path.suffix + ".1"))
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(text + "\n")
+        _append(text)
     except Exception:  # noqa: BLE001 — see the block header: never break a search.
         return
+
+
+def _append(text: str) -> None:
+    """The one writer. Rotate BEFORE writing, so the cap is a real ceiling rather than a
+    ceiling plus one line. Single generation on purpose — this is a review buffer, not an
+    audit trail, and a box with a 32 MB budget should not grow .1 .2 .3."""
+    if not LOG_PATH:
+        return
+    path = Path(LOG_PATH)
+    with _lock:
+        if path.exists() and path.stat().st_size >= MAX_BYTES:
+            path.replace(path.with_suffix(path.suffix + ".1"))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+
+
+# ═══════════════════════════════════════════════════════════════
+# record_search() — one line per tool call the model makes
+# ═══════════════════════════════════════════════════════════════
+# The conversation had NO observability at all, and it cost three real
+# bugs that survived for days because nothing recorded what a search
+# asked for or what came back:
+#
+#   1. `location` was in the tool schema and never implemented. A
+#      Louisville search returned Laredo, Boston and Memphis.
+#   2. Filters ran on the lexical arm only, so a search could report
+#      8 rows passing and return 11 — the extras being the excluded ones.
+#   3. The agent never triggered the live lane, so local search was
+#      structurally impossible on the path that is now the whole product.
+#
+# EVERY ONE of those is visible in the numbers below WITHOUT recording a
+# word of what anyone said: `in_place` against `returned` catches (1),
+# `returned` against `matched` catches (2), `fetched` catches (3). That
+# is the design constraint doing real work — the privacy promise made
+# this a better instrument, not a weaker one.
+#
+# Same discipline as record(): no identifier, no free text, no probe
+# prose, off unless JOBFITR_SEARCH_LOG is set, and every exception
+# swallowed. The observer may never take down the thing it observes.
+# ═══════════════════════════════════════════════════════════════
+def _now() -> str:
+    """Local time, no zone suffix — the same stamp `record` writes, so one file sorts."""
+    return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _emit(line: dict) -> None:
+    text = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
+    if len(text.encode()) <= LINE_CAP:
+        _append(text)
+
+
+def record_search(
+    *,
+    n_titles: int,
+    n_probes: int,
+    probe_chars: int,
+    has_location: bool,
+    remote_only: bool,
+    salary_floor: int | None,
+    max_age_days: int | None,
+    k: int,
+    matched: int,
+    returned: int,
+    in_place: int | None,
+    from_lexical: int,
+    from_dense: int,
+    from_both: int,
+    fetched: bool,
+    degraded: str | None,
+    elapsed_ms: float,
+) -> None:
+    """One JSONL line per search_jobs call. Shape and outcome only."""
+    try:
+        _emit(
+            {
+                "kind": "search",
+                "ts": _now(),
+                "ask": {
+                    "titles": n_titles,
+                    "probes": n_probes,
+                    "probe_chars": probe_chars,
+                    "location": has_location,
+                    "remote_only": remote_only,
+                    "salary_floor": salary_floor,
+                    "max_age_days": max_age_days,
+                    "k": k,
+                },
+                "got": {
+                    "matched": matched,
+                    "returned": returned,
+                    # THE BUG-CATCHER. Of the rows handed back, how many are actually in
+                    # the place that was asked for. A location search whose `in_place` is
+                    # 0 is broken however healthy every other number looks.
+                    "in_place": in_place,
+                    "lexical_only": from_lexical,
+                    "dense_only": from_dense,
+                    "both": from_both,
+                },
+                "live": {"fetched": fetched, "degraded": degraded},
+                "elapsed_ms": round(elapsed_ms, 1),
+            }
+        )
+    except Exception:  # noqa: BLE001 — see the block header
+        pass
+
+
+def record_delivery(
+    *,
+    turns: int,
+    searches: int,
+    reads: int,
+    picks: int,
+    rejected: int,
+    fabricated: int,
+    nothing_fits: bool,
+    model: str,
+    elapsed_ms: float,
+) -> None:
+    """One line when a conversation delivers (or declines to).
+
+    `fabricated` is the count of urls the model named that were not in the pool. It is
+    zero almost always and it is the number that matters most: a fabricated listing is
+    the one failure the product cannot survive, and it was measured happening on
+    REFINEMENT turns specifically.
+    """
+    try:
+        _emit(
+            {
+                "kind": "delivery",
+                "ts": _now(),
+                "turns": turns,
+                "searches": searches,
+                "reads": reads,
+                "picks": picks,
+                "rejected": rejected,
+                "fabricated": fabricated,
+                "nothing_fits": nothing_fits,
+                "model": model,
+                "elapsed_ms": round(elapsed_ms, 1),
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
