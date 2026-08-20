@@ -4,7 +4,7 @@
 // This used to fill a config: the model returned {reply, config, ready}, the client
 // watched for titles + location, then handed off to /api/score and switched to a board of
 // 200 scored rows. That design is gone. The model now runs its own search loop server-side
-// (POST /api/agent) — it interviews, decides what to search for, searches several times,
+// (POST /api/chat) — it interviews, decides what to search for, searches several times,
 // reads the postings, and calls `recommend` with the jobs it chose.
 //
 // So there is no config to fill, no readiness to detect, no view to switch to. The answer
@@ -130,7 +130,7 @@
     setBusy(true);
     messages.push({ role: "user", content: text });
     try {
-      const r = await fetch("/api/agent", {
+      const r = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages }),

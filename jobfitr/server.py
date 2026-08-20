@@ -33,7 +33,6 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from . import agent as agentmod
 from . import chat as chatmod
 from . import live, searchlog, semantic, snapshot, store
 from .config_builder import _clean_list, config_from_dict, search_inputs
@@ -1108,62 +1107,37 @@ def candidates_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     }
 
 
-@app.post("/api/agent")
+@app.post("/api/chat")
 @limiter.limit(CHAT_RATE_LIMIT)
-async def agent_endpoint(request: Request, payload: dict = Body(...)) -> dict:
-    """The agentic path: a model that interviews, then drives its own search loop.
+async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
+    """THE conversation. A model interviews, then drives its own search loop.
 
-    Distinct from /api/chat, which fills a config in one structured turn and runs ONE
-    search. The 2026-08-17 experiment that produced five jobs Justin called right ran
-    NINE searches, each chosen from what the previous returned. That difference is the
-    whole point of this endpoint, and it is why the tool budget rather than the turn
-    count is what bounds it.
+    This replaced a structured turn that filled a CONFIG (titles, boosts, exclude,
+    rank_down) which ran ONE keyword search against a scoreboard. The run that produced
+    five jobs Justin confirmed were right ran NINE searches, each chosen from what the
+    previous returned — and that difference, one query versus an adaptive loop, is the
+    product. The old design is deleted, not deprecated: it is in git if it is ever wanted.
 
-    Fails CLOSED, like /api/chat: without a key the front end falls back to the form.
+    Bounded by the TOOL budget rather than the turn count, because a model that picks its
+    own searches can pick them forever.
+
+    Fails CLOSED: no key or ceiling reached returns 503 and the UI says so.
     """
-    if not agentmod.available():
+    if not chatmod.available():
         raise HTTPException(status_code=503, detail="agent_unavailable")
     if chatmod.daily_ceiling_reached():
         raise HTTPException(status_code=503, detail="daily_ceiling")
     messages = chatmod.sanitize_messages(payload.get("messages"))
     if not messages:
         raise HTTPException(status_code=422, detail="messages required")
-    if len(messages) > agentmod.MAX_TURNS:
+    if chatmod.over_turn_cap(messages):
         raise HTTPException(status_code=429, detail="turn_cap")
     chatmod.note_request()
     try:
-        return await agentmod.turn(messages)
+        return await chatmod.turn(messages)
     except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
-        log.warning("agent turn failed: %s: %s", type(e).__name__, e)
+        log.warning("chat turn failed: %s: %s", type(e).__name__, e)
         return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}"}
-
-
-@app.post("/api/chat")
-@limiter.limit(CHAT_RATE_LIMIT)
-async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
-    """One structured chat turn → {reply, config, ready}. The ONLY metered path;
-    never touches scoring.
-
-    Fails CLOSED to the form: a 503 (no key / daily ceiling) or 429 (rate/turn cap)
-    tells the front end to fall back to the search form.
-    """
-    if not chatmod.chat_available():
-        raise HTTPException(status_code=503, detail="chat_unavailable")
-    if chatmod.daily_ceiling_reached():
-        raise HTTPException(status_code=503, detail="daily_ceiling")
-
-    messages = chatmod.sanitize_messages(payload.get("messages"))
-    if not messages:
-        raise HTTPException(status_code=422, detail="messages required")
-    if chatmod.over_turn_cap(messages):
-        raise HTTPException(status_code=429, detail="turn_cap")
-
-    current = payload.get("config") if isinstance(payload.get("config"), dict) else {}
-    # The client flips this on once the board has been shown — after that the user is
-    # adjusting a live search, not answering intake questions.
-    refining = bool(payload.get("refining"))
-    chatmod.note_request()
-    return await chatmod.turn(messages, current, refining=refining)
 
 
 def _code_sha() -> str:
@@ -1232,7 +1206,7 @@ def health() -> dict:
         "adzuna_ok": bool(
             os.environ.get("ADZUNA_APP_ID") and os.environ.get("ADZUNA_APP_KEY")
         ),
-        "openrouter_ok": chatmod.chat_available(),
+        "openrouter_ok": chatmod.available(),
         "daily_fetches_used": store.live_fetch_count(),
         "daily_fetch_ceiling": ADZUNA_DAILY_CEILING,
         "pool_size": store.pool_size(),

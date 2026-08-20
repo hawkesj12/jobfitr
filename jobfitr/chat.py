@@ -1,19 +1,28 @@
-"""The conversational front door — the ONLY metered path in jobfitr.
+"""The conversation. A model that interviews, then drives its own search loop.
 
-The AI's single job is to fill the same config the fallback form fills, by chatting.
-Each turn is ONE structured-output call: the model returns a JSON object carrying its
-next `reply` to the user, the merged `config`, and a `ready` flag — all in one shot.
-Because `reply` is a required schema field, the model can never go silent (the old
-"speak AND call a tool in one turn" design failed when the model returned a tool call
-with no text). The config fields are the only thing that ever leaves this module
-toward scoring, and config_from_dict is already inert to hostile input.
+WHY THIS EXISTS, and it is a different shape from chat.py. The 2026-08-17 experiment that
+produced five jobs Justin called right did NOT fill in a form. Its method, recorded in
+_private/experiment-runs/: seven interview questions with ZERO tool calls, then **nine
+separate searches**, each one chosen from what the previous returned — an automation lane
+and a controls lane run specifically to test whether his manufacturing background retrieved
+a different and better set than his AI background. It concluded from results that it did
+not. Then it read descriptions and picked five, with rejections.
 
-Two planes, one gate: this metered plane calls OpenRouter; the free scoring plane
-(`/api/score`) is never touched here. server.py adds the cost controls (turn cap,
-per-IP rate limit, daily ceiling → form fallback) using the constants exposed below.
+chat.py fills a config and runs ONE search. That single difference — one query versus nine
+adaptive ones — is the gap between the product and the thing that worked, and no amount of
+prompt-tuning on a one-shot config closes it.
 
-Network boundary: `_call_openrouter` is the ONLY thing that hits the wire, so tests
-monkeypatch it and run with zero real network.
+THE INTERVIEW MAKES NO TOOL CALLS. That was explicit in the experiment and it is enforced
+here: questions asked while looking at stock get steered by stock, and the point of the
+interview is to learn what the person wants, not what happens to be in the pool tonight.
+
+WHAT IT RUNS ON: search_jobs is the hybrid arm (semantic.hybrid over the pre-filtered pool
+— FTS5 title BM25 fused with Model2Vec by RRF), never /api/score. That endpoint is the free
+deterministic floor for people who never open the chat; it is not this path's retrieval.
+
+THE HANDICAP IS REMOVED. The experiment judged every job on 1,200 characters, about two
+paragraphs, and said so as a flaw. read_jobs serves the whole posting with its sections
+labelled, so responsibilities and requirements are separable from benefits and EEO.
 """
 
 from __future__ import annotations
@@ -21,351 +30,353 @@ from __future__ import annotations
 import json
 import logging
 import os
+
+import httpx
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import httpx
-
 from . import prompts
-
-_ET = ZoneInfo("America/New_York")
+from . import sections as sectionsmod
+from . import semantic, store
 
 log = logging.getLogger("jobfitr.chat")
 
-# ── config from env (key/model live only in the server environment) ───────────
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# Structured outputs (response_format json_schema, strict) need a model that
-# supports them — the free llama does not, so the default is the cheap, reliable
-# gpt-4o-mini (~pennies per thousand chats). Override with CHAT_MODEL per deploy.
-DEFAULT_MODEL = "openai/gpt-4o-mini"
 
-MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "8"))
-DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "500"))
-MAX_TOKENS = int(os.environ.get("CHAT_MAX_TOKENS", "320"))
-REQUEST_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT", "30"))
-
-# The config fields the turn fills. Pickiness (min_score) and freshness (max_age_days)
-# are NOT here — the scorer sets those deterministically (a freshness/pickiness ladder
-# that relaxes until ~50 results), so the chat never asks about them.
-CONFIG_FIELDS = (
-    "titles",
-    "related_titles",
-    "probes",
-    "boosts",
-    "exclude",
-    "rank_down",
-    "location",
-    "remote_only",
-)
-
-TURN_SYSTEM_PROMPT = prompts.load("chat_turn")
-
-# The structured-output contract. strict json_schema → the model MUST return exactly
-# these keys, valid — so `reply` is always present (no empty-text failure) and the
-# config is always parseable (no JSON-repair). All keys required by strict mode.
-TURN_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "turn",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "reply": {
-                    "type": "string",
-                    "description": "Your next short, warm message to the user.",
-                },
-                "ready": {
-                    "type": "boolean",
-                    "description": "True once titles AND location are known (or the user said to just go).",
-                },
-                "titles": {"type": "array", "items": {"type": "string"}},
-                # The model's OWN suggestions, not the user's answers. Kept in a
-                # separate field because the ranker scores them lower on purpose —
-                # merged into `titles` they would be indistinguishable from a role the
-                # user actually asked for, and would score a full exact-match tier.
-                "related_titles": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Five canonical, SHORT adjacent job titles you suggest — only once the user's own title list is final ([] before that).",
-                },
-                # The SEMANTIC arm's queries — full sentences describing the WORK, not
-                # keywords. The lexical arm needs titles; this one matches on meaning, and
-                # a bare keyword carries almost none.
-                #
-                # FEW AND ON-TARGET. Measured 2026-08-19 on a graded set: probe QUALITY is
-                # the lever, count is not. More on-target probes help monotonically (2 ->
-                # 6.3 relevant, 8 -> 11.0), while ONE off-target probe costs real results
-                # (8 probes scored 12; adding one loose one dropped it to 9, seven dropped
-                # it to 5) — and no fusion rule or deeper cut repairs it, because a bad
-                # probe's most CONFIDENT matches are exactly its wrong ones.
-                #
-                # NO NEGATIONS, NO FILTERS. Embeddings cannot represent negation —
-                # measured, "you will not be on call" scores 0.92 against "you will be on
-                # call" — and remote/salary/seniority/recency are hard filters a WHERE
-                # clause excludes perfectly. A probe spent on either is a wasted slot.
-                "probes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "4-6 SENTENCES describing the work the user wants, each a distinct facet of it, for semantic search. Prose, not keywords. Never about remote/salary/seniority/recency, and never phrased as a negative.",
-                },
-                "boosts": {"type": "array", "items": {"type": "string"}},
-                "exclude": {"type": "array", "items": {"type": "string"}},
-                "rank_down": {"type": "array", "items": {"type": "string"}},
-                "location": {
-                    "type": "string",
-                    "description": "A place as 'City, ST', or 'remote', or 'anywhere', or '' if unknown.",
-                },
-                # Nullable ON PURPOSE. Strict mode requires every key every turn, and a
-                # bare boolean has no way to say "the user hasn't addressed this" — so
-                # the model emitted `false` on unrelated turns and merge_config, which
-                # lets booleans overwrite by design, erased a remote answer given
-                # earlier. `null` restores the missing third state; _is_empty already
-                # treats it as absent, so a null turn cannot clobber.
-                "remote_only": {"type": ["boolean", "null"]},
-                "chips": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "4-8 short tappable example answers for the current question ([] if none help).",
-                },
-                # A separate field, not a longer `reply`. Two live runs showed the model
-                # drops "explain the mechanic" instructions under this prompt + strict
-                # schema, because the standing "ONE short sentence" rule wins. Splitting
-                # it out lets the server force the text where it actually matters.
-                # A user on the board had no conversational way back to a blank search:
-                # the refine prompt says the interview is over, so "I want to restart"
-                # was answered with "re-scoring." and nothing changed. The model can now
-                # say so explicitly and the client resets.
-                "restart": {"type": "boolean"},
-                "hint": {
-                    "type": "string",
-                    "description": "One short plain-language line under the question explaining how the answer is used ('' when the question is self-evident).",
-                },
-            },
-            "required": [
-                "reply",
-                # strict mode requires EVERY property here — a property present in
-                # `properties` but absent from `required` is a 400 on every single turn,
-                # not a soft degradation. Adding a field means adding it in both places.
-                "probes",
-                "ready",
-                "titles",
-                "related_titles",
-                "boosts",
-                "exclude",
-                "rank_down",
-                "location",
-                "remote_only",
-                "chips",
-                "hint",
-                "restart",
-            ],
-        },
-    },
+# ═══════════════════════════════════════════════════════════════════════════
+# THE MODEL BENCH — pick one by moving ACTIVE_MODEL. CHAT_MODEL env overrides.
+# ═══════════════════════════════════════════════════════════════════════════
+# Every entry VERIFIED tool-capable against the live OpenRouter catalog on
+# 2026-08-19 (`"tools" in supported_parameters`). That filter is not optional here: this
+# path is a tool-use loop, and a model without tool support does not degrade — it holds a
+# conversation and never searches.
+#
+# `session_usd` is a MODELLED figure, not a measured one: 150k input / 6k output, which is
+# an interview plus three searches at 40 rows plus a dozen full reads. Real sessions vary
+# with how many searches the model chooses to run — which is the whole point of the loop,
+# so treat these as a ranking, not a bill. Prices move; re-fetch before quoting them.
+#
+# NOTHING HERE IS MEASURED FOR QUALITY. The retrieval work of 2026-08-19 established that
+# the interview's output (its probes and its titles) is what drives results, and that probe
+# QUALITY is the lever — but no model has been compared against another on it. The bench
+# exists so that comparison is a one-line change instead of a refactor.
+MODELS = {
+    # ── cheap, and a million tokens of context ───────────────────────────────
+    "qwen3.5-flash":     {"id": "qwen/qwen3.5-flash-02-23",   "ctx": 1_000_000, "session_usd": 0.011},
+    "deepseek-v4-flash": {"id": "deepseek/deepseek-v4-flash",  "ctx": 1_048_576, "session_usd": 0.013},
+    "glm-4.7-flash":     {"id": "z-ai/glm-4.7-flash",          "ctx":   202_752, "session_usd": 0.011},
+    "gemini-2.5-flash-lite": {"id": "google/gemini-2.5-flash-lite", "ctx": 1_048_576, "session_usd": 0.017},
+    # ── mid: where a conversational protocol starts holding reliably ─────────
+    "gemini-2.5-flash":  {"id": "google/gemini-2.5-flash",     "ctx": 1_048_576, "session_usd": 0.060},
+    "gemini-3.7-flash":  {"id": "google/gemini-3.7-flash",     "ctx": 1_048_576, "session_usd": 0.067},
+    "glm-4.7":           {"id": "z-ai/glm-4.7",                "ctx":   204_800, "session_usd": 0.070},
+    "kimi-k2.5":         {"id": "moonshotai/kimi-k2.5",        "ctx":   262_144, "session_usd": 0.081},
+    "minimax-m3":        {"id": "minimax/minimax-m3",          "ctx": 1_048_576, "session_usd": 0.052},
+    # ── upper: the top of the band Justin drew (above Haiku, below Sonnet) ───
+    "grok-4.3":          {"id": "x-ai/grok-4.3",               "ctx": 1_000_000, "session_usd": 0.203},
+    "grok-4.20":         {"id": "x-ai/grok-4.20",              "ctx": 2_000_000, "session_usd": 0.203},
+    "grok-4.6":          {"id": "x-ai/grok-4.6",               "ctx":   500_000, "session_usd": 0.336},
+    "gemini-3.5-flash":  {"id": "google/gemini-3.5-flash",     "ctx": 1_048_576, "session_usd": 0.279},
+    # NOTE grok-4.3 carries TWICE the context of grok-4.6 at 60% of the cost, and grok-4.20
+    # carries four times it for the same price. If the reason for reaching for Grok is
+    # capability rather than the specific 4.6 build, 4.3 is the better entry point.
 }
 
+# ↓↓↓ THE ONE LINE TO CHANGE ↓↓↓
+ACTIVE_MODEL = "gemini-2.5-flash"
 
-# ── availability + cost gates (the endpoint calls these) ──────────────────────
-def chat_available() -> bool:
-    """Chat is only live when a key is configured; otherwise the UI uses the form."""
+DEFAULT_MODEL = os.environ.get("CHAT_MODEL") or MODELS[ACTIVE_MODEL]["id"]
+MAX_TOOL_CALLS = int(os.environ.get("CHAT_MAX_TOOL_CALLS", "12"))
+MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "24"))
+REQUEST_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT", "90"))
+SHALLOW_CHARS = int(os.environ.get("CHAT_SHALLOW_CHARS", "320"))
+DEEP_CHARS = int(os.environ.get("CHAT_DEEP_CHARS", "6000"))
+MAX_READ = int(os.environ.get("CHAT_MAX_READ", "25"))
+
+# ── what the model is told about the corpus ──────────────────────────────────
+# Fill rates are MEASURED over the live pool (65,391 rows, 2026-08-19) and they are in the
+# prompt for one reason: a model that does not know `seniority` is 28% filled will filter on
+# it and silently delete 72% of the corpus. NULL means "the source never said", never "no".
+SCHEMA_NOTE = prompts.load("chat_schema")
+
+TOOLS_NOTE = prompts.load("chat_tools")
+
+SYSTEM_PROMPT = prompts.render("chat_system", tools=TOOLS_NOTE, schema=SCHEMA_NOTE)
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_jobs",
+            "description": "Search the job store. Returns shallow rows (facts + a short snippet). Call it several times with different framings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "titles": {"type": "array", "items": {"type": "string"},
+                               "description": "Job titles as the market writes them."},
+                    "probes": {"type": "array", "items": {"type": "string"},
+                               "description": "2-6 SENTENCES describing the work. Prose, not keywords. Never about remote/salary/seniority, never negative."},
+                    "location": {"type": "string"},
+                    "remote_only": {"type": "boolean"},
+                    "salary_floor": {"type": "integer", "description": "Annual USD. Rows with no stated salary are KEPT."},
+                    "max_age_days": {"type": "integer"},
+                    "k": {"type": "integer", "description": "How many rows to return (default 40, max 120)."},
+                    "why": {"type": "string", "description": "One line: what this search is testing."},
+                },
+                "required": ["titles", "probes", "why"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recommend",
+            "description": "Deliver the final picks. Call this ONCE, after reading, with the jobs you are recommending. Then write your answer to the person in your own words.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "picks": {
+                        "type": "array",
+                        "description": "The jobs you are recommending, best first. Five unless you genuinely cannot justify five.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "Must be a url a tool returned in this conversation."},
+                                "why": {"type": "string", "description": "One or two sentences: why this job fits THIS person. The work, not the words that matched."},
+                                "caveat": {"type": "string", "description": "Anything about it that conflicts with what they told you, or '' if nothing does."},
+                            },
+                            "required": ["url", "why"],
+                        },
+                    },
+                    "rejected": {
+                        "type": "array",
+                        "description": "Jobs they would expect to see, and what ruled each one out.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "why_not": {"type": "string"},
+                            },
+                            "required": ["url", "why_not"],
+                        },
+                    },
+                    "nothing_fits": {
+                        "type": "boolean",
+                        "description": "True if the pool genuinely holds nothing worth applying to. Say so rather than padding.",
+                    },
+                },
+                "required": ["picks"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_jobs",
+            "description": "Read the FULL posting for specific urls, with sections labelled. Use before judging fit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "urls": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["urls"],
+            },
+        },
+    },
+]
+
+
+def _shallow(c: dict) -> dict:
+    body = sectionsmod._detag(c.get("body") or "")
+    return {
+        "url": c.get("url", ""),
+        "title": c.get("title", ""),
+        "company": c.get("company", ""),
+        "location": c.get("location", ""),
+        "remote": c.get("remote") or "",
+        "salary": c.get("salary", ""),
+        "salary_min": store.annual_salary(c),
+        "posted": c.get("posted", ""),
+        "snippet": body[:SHALLOW_CHARS],
+    }
+
+
+def search_jobs(args: dict) -> dict:
+    """The hybrid arm. Pre-filter, then BOTH arms over the filtered pool, fused by RRF."""
+    from .config_builder import config_from_dict
+
+    titles = [t for t in (args.get("titles") or []) if str(t).strip()]
+    probes = [p for p in (args.get("probes") or []) if str(p).strip()]
+    k = max(1, min(int(args.get("k") or 40), 120))
+    cfg = config_from_dict(
+        {"titles": titles, "location": args.get("location") or "",
+         "remote_only": bool(args.get("remote_only"))}, [])
+    age = args.get("max_age_days")
+    rows = store.bm25_candidates(titles) if titles else []
+    # Hard filters BEFORE retrieval depth is spent. See semantic.hybrid.
+    keep = []
+    floor = args.get("salary_floor")
+    for c in rows:
+        if cfg.remote_only and (c.get("remote") or "") in ("onsite", "hybrid"):
+            continue
+        if age and (c.get("posted") or ""):
+            from job_radar.util import age_int
+            a = age_int(c.get("posted"))
+            if a is not None and a > int(age):
+                continue
+        if floor:
+            s = store.annual_salary(c)
+            if s is not None and s < int(floor):   # unstated salary is KEPT — see SCHEMA_NOTE
+                continue
+        keep.append(c)
+    by_url = {c["url"]: c for c in keep if c.get("url")}
+    fused = semantic.hybrid(list(by_url), probes, k=k,
+                            per_company={u: (r.get("company") or "") for u, r in by_url.items()})
+    extra = [u for u in fused if u not in by_url]
+    if extra:
+        by_url.update({c["url"]: c for c in store.rows_by_url(extra) if c.get("url")})
+    out = [_shallow(by_url[u]) for u in fused if u in by_url][:k]
+    return {"searched": {"titles": titles, "probes": probes, "why": args.get("why", "")},
+            "matched_before_fusion": len(keep), "returned": len(out),
+            "semantic": semantic.available(), "jobs": out}
+
+
+def read_jobs(args: dict) -> dict:
+    """Full postings, sections labelled — the handicap the experiment ran under, removed."""
+    asked = [u for u in (args.get("urls") or []) if str(u).strip()]
+    urls = asked[:MAX_READ]
+    # SILENTLY dropping the overflow is how a model ends up recommending a job it believes
+    # it read and never saw. One run passed 35 urls and got 25 back with no indication.
+    # Telling it costs a line and lets it ask for the rest.
+    unread = asked[MAX_READ:]
+    out = []
+    for c in store.rows_by_url(urls):
+        parts = sectionsmod.split_sections(c.get("body") or "")
+        labelled = {}
+        for kind, header, text in parts:
+            if not text:
+                continue
+            key = kind or "other"
+            labelled.setdefault(key, []).append((header + ": " if header else "") + text)
+        out.append({
+            "url": c.get("url", ""), "title": c.get("title", ""),
+            "company": c.get("company", ""), "location": c.get("location", ""),
+            "remote": c.get("remote") or "", "salary": c.get("salary", ""),
+            "posted": c.get("posted", ""), "team": c.get("team") or "",
+            "sections": {k: " ".join(v)[:DEEP_CHARS] for k, v in labelled.items()},
+        })
+    result = {"read": len(out), "jobs": out}
+    if unread:
+        result["not_read"] = unread
+        result["note"] = (f"Only the first {MAX_READ} were read. {len(unread)} were NOT — "
+                          "call read_jobs again for those before judging them.")
+    missing = [u for u in urls if u not in {j["url"] for j in out}]
+    if missing:
+        # A url that is not in the pool: invented, or evicted since the search returned it.
+        result["not_found"] = missing
+    return result
+
+
+def recommend(args: dict) -> dict:
+    """The final picks, as DATA rather than as prose the client has to parse.
+
+    A third tool rather than a parse of the closing message, for one reason: the front end
+    has to render cards, and pulling five urls out of free text is the kind of thing that
+    works in testing and fails on the first answer written slightly differently. This also
+    lets the server VERIFY every url actually came from the pool before it reaches anyone —
+    a hallucinated listing is the one failure the whole product cannot survive, because the
+    person goes looking for a job that does not exist.
+    """
+    picks = args.get("picks") or []
+    urls = [p.get("url", "") for p in picks if p.get("url")]
+    rejected = args.get("rejected") or []
+    known = {r["url"]: r for r in store.rows_by_url(urls + [r.get("url", "") for r in rejected]) if r.get("url")}
+    out, dropped = [], []
+    for p in picks:
+        row = known.get(p.get("url", ""))
+        if not row:                       # not in the pool = invented, or long evicted
+            dropped.append(p.get("url", ""))
+            continue
+        out.append({**_shallow(row), "why": p.get("why", ""), "caveat": p.get("caveat", "")})
+    if dropped:
+        log.warning("recommended %d url(s) not in the store: %s", len(dropped), dropped)
+    return {
+        "delivered": len(out),
+        "picks": out,
+        "rejected": [{**_shallow(known[r["url"]]), "why_not": r.get("why_not", "")}
+                     for r in rejected if r.get("url") in known],
+        "nothing_fits": bool(args.get("nothing_fits")),
+        # Told back to the MODEL so it can correct itself in the closing message rather
+        # than describing a job the person will never see on screen.
+        "rejected_by_server": dropped or None,
+    }
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# cost control and message hygiene
+# ═══════════════════════════════════════════════════════════════
+# Carried over from the retired config-filling chat. These were never part of that
+# design — they are what stops a metered endpoint from being an open tap, and what
+# refuses a malformed or smuggled turn before it reaches a model. They outlived the
+# thing they were written for.
+# ═══════════════════════════════════════════════════════════════
+_ET = ZoneInfo("America/New_York")
+DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "500"))
+_usage = {"date": "", "count": 0}
+
+
+def available() -> bool:
+    """Live only when a key is configured; without one the UI must say so, not hang."""
     return bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
 def over_turn_cap(messages: list) -> bool:
     """True once the conversation has run past MAX_TURNS user messages."""
-    user_turns = sum(1 for m in messages if (m or {}).get("role") == "user")
-    return user_turns > MAX_TURNS
+    return sum(1 for m in messages if (m or {}).get("role") == "user") > MAX_TURNS
 
 
 def sanitize_messages(raw: list) -> list:
     """Keep only well-formed user/assistant turns with string content.
 
-    The client holds the transcript, so this is where we refuse anything odd — a
-    smuggled 'system' role, a non-string content, an over-long blob — before it
-    reaches the model.
+    The client holds the transcript, so this is the boundary where anything odd is
+    refused — a smuggled `system` role, a non-string content, an over-long blob —
+    before it reaches the model.
     """
     out: list[dict] = []
     for m in raw or []:
         if not isinstance(m, dict):
             continue
-        role = m.get("role")
-        content = m.get("content")
-        if (
-            role in ("user", "assistant")
-            and isinstance(content, str)
-            and content.strip()
-        ):
+        role, content = m.get("role"), m.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
             out.append({"role": role, "content": content[:4000]})
     return out
 
 
-# In-process daily counter. Resets when the ET date rolls over. A blunt but
-# effective spend fuse for a single-box deploy; distributed would need shared state.
-_usage: dict[str, int] = {"date": "", "count": 0}
+def _roll_day() -> None:
+    today = datetime.now(_ET).date().isoformat()
+    if _usage["date"] != today:
+        _usage["date"], _usage["count"] = today, 0
 
 
 def daily_ceiling_reached() -> bool:
-    """True if today's request budget is spent — the endpoint then 503s → form."""
-    today = datetime.now(_ET).date().isoformat()
-    if _usage["date"] != today:
-        _usage["date"] = today
-        _usage["count"] = 0
+    """True if today's request budget is spent — the endpoint then 503s to the form."""
+    _roll_day()
     return _usage["count"] >= DAILY_CEILING
 
 
 def note_request() -> None:
-    """Count one accepted chat request against today's ceiling."""
-    today = datetime.now(_ET).date().isoformat()
-    if _usage["date"] != today:
-        _usage["date"] = today
-        _usage["count"] = 0
+    """Count one accepted request against today's ceiling."""
+    _roll_day()
     _usage["count"] += 1
 
 
-# ── config assembly ───────────────────────────────────────────────────────────
-def _is_empty(v) -> bool:
-    """A value the model returned that should NOT overwrite a known field."""
-    if v is None:
-        return True
-    if isinstance(v, str):
-        return not v.strip()
-    if isinstance(v, (list, tuple, dict)):
-        return len(v) == 0
-    return False
+DISPATCH = {"search_jobs": search_jobs, "read_jobs": read_jobs, "recommend": recommend}
 
 
-def merge_config(current: dict | None, delta: dict | None) -> dict:
-    """Overlay a config delta onto the running config.
-
-    Only the known CONFIG_FIELDS cross (the model cannot smuggle extra keys). An
-    EMPTY value never clobbers a field we already learned — the model re-derives the
-    whole config each turn, and a momentary blank for a known field must not wipe it.
-    Booleans (remote_only) are kept as-is: False is a real answer, not "empty".
-    """
-    out = dict(current or {})
-    for k in CONFIG_FIELDS:
-        if not delta or k not in delta:
-            continue
-        v = delta[k]
-        if isinstance(v, bool):
-            out[k] = v
-        elif not _is_empty(v):
-            out[k] = v
-    return out
 
 
-# The avoid question's chips, enforced rather than requested. The prompt has always
-# said to lead with staffing/recruiting, and the model ignores it: asked what to AVOID
-# for an AI-engineering search it suggested "Python", "MLOps", "DevOps" and "AI
-# Engineering" — the user's own boosts, inverted. A wrong suggestion here is worse than
-# a generic one, because acting on it hides the jobs they came for.
-_AVOID_CHIPS = (
-    "Staffing",
-    "Recruiting agencies",
-    "Internships",
-    "Contract",
-    "Junior",
-    "On-site",
-    "Clearance required",
-)
-
-
-# The two mechanics a user cannot guess, and that the model would not reliably explain.
-# Forced server-side for the same reason as _AVOID_CHIPS: measured, not assumed.
-# Says what is actually true of the engine: the titles FIND the jobs, these RANK them.
-# Measured — a search with no boosts returns fifty results carrying one distinct fit
-# value, because BM25 rates fifty jobs all titled "...Engineer" as equally relevant. The
-# earlier copy said "three to six works best, more is not better", which was true of the
-# old flat scoring where nine boosts could swamp relevance entirely. The bonus is now
-# capped and scored as a FRACTION of boosts matched, so the ceiling no longer moves and
-# extra terms buy resolution instead of swing. More really is better now.
-_BOOSTS_HINT = (
-    "These are what rank your list — add as many as you can think of. "
-    "Specific ones separate the results; “Python” in an AI job matches everything, "
-    "so it can’t."
-)
-_AVOID_HINT = (
-    "Anything you name here is removed from your results entirely, "
-    "so keep it to real dealbreakers."
-)
-
-
-def _is_boosts_turn(cfg: dict) -> bool:
-    """True when the next question is 'what should rank higher' — the required answers
-    are in, but no boosts have been recorded yet."""
-    return _has_titles(cfg) and _has_location(cfg) and not cfg.get("boosts")
-
-
-def _is_avoid_turn(cfg: dict) -> bool:
-    """True when the next question is 'what should I avoid' — titles, location and
-    boosts are known, but nothing to avoid has been recorded yet."""
-    has_boosts = bool(cfg.get("boosts"))
-    has_avoid = bool(cfg.get("exclude")) or bool(cfg.get("rank_down"))
-    return _has_titles(cfg) and _has_location(cfg) and has_boosts and not has_avoid
-
-
-def _already_chosen(cfg: dict) -> set[str]:
-    """Every value the user has already given, lowercased — for filtering chips.
-
-    The prompt tells the model never to repeat a chip the user picked, and it does it
-    anyway: after five forward-deployed titles it still offered Python / Machine
-    Learning / NLP. A suggestion the user has already acted on is worse than no
-    suggestion, so this is the deterministic backstop rather than trusting the model.
-    """
-    chosen: set[str] = set()
-    for key in ("titles", "related_titles", "boosts", "exclude", "rank_down"):
-        value = cfg.get(key)
-        if isinstance(value, str):
-            value = [value]
-        for item in value or []:
-            text = str(item).strip().lower()
-            if text:
-                chosen.add(text)
-    location = cfg.get("location")
-    if isinstance(location, str) and location.strip():
-        chosen.add(location.strip().lower())
-    return chosen
-
-
-def _needs_related(cfg: dict) -> bool:
-    """True when this is the turn to fill `related_titles`.
-
-    The gate is `location answered`, not `titles present` — the interview asks about
-    titles across more than one turn ("what role?", then "any others you'd take?"), and
-    a user can leave that stage with four. Suggestions generated against the first
-    answer would be built on an incomplete picture. Location cannot be reached while
-    titles are outstanding, so answering it is the unambiguous end of the title stage.
-
-    Deterministic on purpose. The prompt asks for the behaviour; this decides whether it
-    happened — the same reason _already_chosen and AVOID_CHIPS exist.
-    """
-    return (
-        _has_titles(cfg)
-        and _has_location(cfg)
-        and not (cfg or {}).get("related_titles")
-    )
-
-
-def _has_titles(cfg: dict) -> bool:
-    v = (cfg or {}).get("titles")
-    if isinstance(v, str):
-        return bool(v.strip())
-    return bool(v)
-
-
-def _has_location(cfg: dict) -> bool:
-    """A location answer gates the search — a real place OR an explicit remote choice."""
-    loc = (cfg or {}).get("location")
-    if isinstance(loc, str) and loc.strip():
-        return True
-    return bool((cfg or {}).get("remote_only"))
-
-
-# ── the OpenRouter network boundary (mocked in tests) ─────────────────────────
-async def _call_openrouter(payload: dict) -> dict:
-    """POST one non-streaming completion and return the parsed JSON body. The only
-    code that hits the wire — tests monkeypatch this."""
+async def _call(payload: dict) -> dict:
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}",
         "Content-Type": "application/json",
@@ -373,141 +384,72 @@ async def _call_openrouter(payload: dict) -> dict:
         "X-Title": "jobfitr",
     }
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-        resp.raise_for_status()
-        return resp.json()
+        r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json()
 
 
-def _extract_turn(data: dict) -> dict:
-    """Pull the model's JSON object out of the completion response. Defensive: strict
-    mode guarantees valid JSON, but a provider hiccup shouldn't 500 the turn."""
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return {}
-    if isinstance(content, dict):
-        return content
-    if isinstance(content, str):
-        try:
-            parsed = json.loads(content)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
+async def turn(messages: list) -> dict:
+    """Run the model until it produces text for the user, executing its tool calls.
 
-
-# The interview prompt above runs the FIRST search. Once results are on screen the job
-# is a different one — the user is adjusting a search that already exists, not answering
-# an intake form — and running the interview script against a refinement is exactly what
-# broke: "make it senior roles only, $150k+" came back as "What skills should rank
-# HIGHER?", the change was never applied, and `ready` stayed false so the board never
-# re-scored. The user's request simply vanished.
-REFINE_SYSTEM_PROMPT = prompts.load("chat_refine")
-
-
-# ── the turn the endpoint serves ──────────────────────────────────────────────
-async def turn(
-    messages: list, current_config: dict | None = None, refining: bool = False
-) -> dict:
-    """One structured chat turn.
-
-    Returns {"reply": str, "config": dict, "ready": bool} (plus "error": str on an
-    upstream failure, so the endpoint can fall the UI back to the form). `ready` is
-    gated server-side on titles + location so the model can't jump the search early.
-
-    `refining` switches to the post-results prompt: the client sets it once the board
-    has been shown, because at that point the user is editing a live search rather than
-    answering an intake question.
+    Bounded twice over: MAX_TOOL_CALLS across the loop and MAX_TURNS on the transcript. An
+    agent that can choose its own searches can also choose them forever, and this is the
+    only thing standing between a curious model and the token bill.
     """
-    system = REFINE_SYSTEM_PROMPT if refining else TURN_SYSTEM_PROMPT
-    convo = [{"role": "system", "content": system}]
-    # The model has never actually been SHOWN the config — during the interview it
-    # re-derives it from the transcript, which works only because the transcript is the
-    # whole conversation. A refinement can arrive with almost no transcript at all (a
-    # shared #q= link opens the board with an empty message log), and then "keep every
-    # field they already set" is an instruction about data the model cannot see: it
-    # dropped titles and boosts and returned an empty board. State it explicitly.
-    if current_config:
-        convo.append(
-            {
-                "role": "system",
-                "content": (
-                    "The user's CURRENT search config is:\n"
-                    + json.dumps(current_config, sort_keys=True)
-                    + "\nRe-emit this whole object with any change applied. Never drop a "
-                    "field that is already set."
-                ),
-            }
-        )
-    payload = {
-        "model": os.environ.get("CHAT_MODEL", DEFAULT_MODEL),
-        "messages": [*convo, *messages],
-        "response_format": TURN_SCHEMA,
-        "max_tokens": MAX_TOKENS,
-    }
-    try:
-        data = await _call_openrouter(payload)
-    except httpx.HTTPError as e:
-        return {
-            "reply": "",
-            "config": dict(current_config or {}),
-            "ready": False,
-            "chips": [],
-            "hint": "",
-            "restart": False,
-            "error": f"upstream: {type(e).__name__}",
-        }
-
-    parsed = _extract_turn(data)
-    reply = parsed.get("reply") if isinstance(parsed.get("reply"), str) else ""
-    model_ready = bool(parsed.get("ready"))
-    delta = {k: parsed[k] for k in CONFIG_FIELDS if k in parsed}
-    merged = merge_config(current_config, delta)
-    # The gate is a DETECTOR, not a fixer. If the title stage closed and the model did
-    # not suggest anything, the search still runs — it just runs without the flexibility
-    # related titles buy, exactly as it did before this field existed. Logging it is what
-    # makes the miss countable; silently backfilling would hide how often the model
-    # ignores the instruction, which is the number worth having.
-    if _needs_related(merged):
-        log.info(
-            "chat: title stage closed with no related_titles (titles=%r)",
-            merged.get("titles"),
-        )
-    ready = _has_titles(merged) and _has_location(merged) and model_ready
-    raw_chips = parsed.get("chips") if isinstance(parsed.get("chips"), list) else []
-    # The interview's forced avoid-chips and mechanic hints belong to the intake flow
-    # only — injecting them into a refinement would re-open a question already answered.
-    if _is_avoid_turn(merged) and not refining:
-        # Lead, don't replace: the client renders only the first few, so the curated
-        # dealbreakers are what the user actually sees, while any genuinely tailored
-        # model suggestion still survives further down the pool.
-        raw_chips = [*_AVOID_CHIPS, *raw_chips]
-    chosen = _already_chosen(merged)
-    seen: set[str] = set()
-    chips = []
-    for c in raw_chips:
-        text = str(c).strip()
-        key = text.lower()
-        if not text or key in chosen or key in seen:
-            continue  # already answered, or a duplicate within this turn
-        seen.add(key)
-        chips.append(text)
-        if len(chips) == 10:
-            break
-    # The hint the client renders under the question. Forced on the two turns whose
-    # mechanic is invisible; otherwise the model's own line (often just "").
-    hint = parsed.get("hint") if isinstance(parsed.get("hint"), str) else ""
-    if not ready and not refining:
-        if _is_boosts_turn(merged):
-            hint = _BOOSTS_HINT
-        elif _is_avoid_turn(merged):
-            hint = _AVOID_HINT
-    restart = bool(parsed.get("restart"))
-    return {
-        "reply": reply,
-        "restart": restart,
-        "config": merged,
-        "ready": ready,
-        "chips": chips,
-        "hint": hint.strip(),
-    }
+    convo = [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
+    trace, calls = [], 0
+    picks: list = []
+    rejected: list = []
+    nothing_fits = False
+    nudged = False
+    while calls <= MAX_TOOL_CALLS:
+        data = await _call({
+            "model": DEFAULT_MODEL,
+            "messages": convo, "tools": TOOLS, "tool_choice": "auto",
+        })
+        msg = data["choices"][0]["message"]
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            # THE NUDGE, and it is load-bearing rather than defensive. Measured: a model
+            # that has searched and read will write five jobs into its prose and never call
+            # `recommend` — the answer reads fine and the screen shows no cards at all.
+            # Asking politely in the prompt did not fix it. So if it tries to finish after
+            # searching without ever delivering, it gets told once, in the transcript,
+            # which is the only place a model reliably notices anything.
+            searched = any(t["tool"] == "search_jobs" for t in trace)
+            if searched and not picks and not nudged:
+                nudged = True
+                convo.append(msg)
+                convo.append({"role": "user", "content":
+                    "You have not called `recommend`, so the person's screen is empty — "
+                    "whatever you wrote is invisible to them. Call `recommend` now with the "
+                    "jobs you chose (url, why, caveat) and the rejections worth naming, "
+                    "using only urls a tool returned. Then write your answer."})
+                continue
+            return {"reply": msg.get("content") or "", "trace": trace,
+                    "tool_calls": calls, "model": data.get("model"),
+                    "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits}
+        convo.append(msg)
+        for tc in tool_calls:
+            calls += 1
+            name = tc["function"]["name"]
+            args: dict = {}
+            try:
+                args = json.loads(tc["function"]["arguments"] or "{}")
+                result = DISPATCH[name](args) if name in DISPATCH else {"error": f"no tool {name}"}
+            except Exception as e:  # a tool fault is a RESULT the model can react to,
+                log.warning("chat tool %s failed: %s", name, e)  # never a dead conversation
+                result = {"error": f"{type(e).__name__}: {e}"}
+            if name == "recommend" and isinstance(result, dict):
+                picks = result.get("picks") or picks
+                rejected = result.get("rejected") or rejected
+                nothing_fits = result.get("nothing_fits") or nothing_fits
+            trace.append({"tool": name, "args": args,
+                          "returned": (result.get("returned") if "returned" in result
+                                       else result.get("read") if "read" in result
+                                       else result.get("delivered", 0)),
+                          "why": args.get("why", "")})
+            convo.append({"role": "tool", "tool_call_id": tc["id"],
+                          "content": json.dumps(result)[:120000]})
+    return {"reply": "", "trace": trace, "tool_calls": calls,
+            "error": "tool_budget_exhausted"}
