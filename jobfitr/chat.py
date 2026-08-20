@@ -636,6 +636,27 @@ async def turn(messages: list, model: str | None = None) -> dict:
     rejected: list = []
     nothing_fits = False
     nudged = False
+    fabricated = 0
+    t0 = time.perf_counter()
+
+    def _log_delivery() -> None:
+        """Shape only — counts, never content. See searchlog.record_delivery.
+
+        Called on BOTH exits, including the budget-exhausted one: a conversation that ran
+        out of tool calls without delivering is exactly the failure worth counting, and it
+        is the exit that returns no reply at all, so nothing else would ever notice it.
+        """
+        searchlog.record_delivery(
+            turns=len(messages),
+            searches=sum(1 for t in trace if t["tool"] == "search_jobs"),
+            reads=sum(1 for t in trace if t["tool"] == "read_jobs"),
+            picks=len(picks),
+            rejected=len(rejected),
+            fabricated=fabricated,
+            nothing_fits=nothing_fits,
+            model=model_id,
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+        )
     while calls <= MAX_TOOL_CALLS:
         data = await _call({
             "model": model_id,
@@ -660,6 +681,8 @@ async def turn(messages: list, model: str | None = None) -> dict:
                     "jobs you chose (url, why, caveat) and the rejections worth naming, "
                     "using only urls a tool returned. Then write your answer."})
                 continue
+            if picks or nothing_fits:
+                _log_delivery()
             return {"reply": msg.get("content") or "", "trace": trace,
                     "tool_calls": calls, "model": data.get("model"),
                     "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits}
@@ -675,6 +698,7 @@ async def turn(messages: list, model: str | None = None) -> dict:
                 log.warning("chat tool %s failed: %s", name, e)  # never a dead conversation
                 result = {"error": f"{type(e).__name__}: {e}"}
             if name == "recommend" and isinstance(result, dict):
+                fabricated += len(result.get("rejected_by_server") or [])
                 picks = result.get("picks") or picks
                 rejected = result.get("rejected") or rejected
                 nothing_fits = result.get("nothing_fits") or nothing_fits
@@ -685,5 +709,6 @@ async def turn(messages: list, model: str | None = None) -> dict:
                           "why": args.get("why", "")})
             convo.append({"role": "tool", "tool_call_id": tc["id"],
                           "content": json.dumps(result)[:120000]})
+    _log_delivery()
     return {"reply": "", "trace": trace, "tool_calls": calls,
             "error": "tool_budget_exhausted"}
