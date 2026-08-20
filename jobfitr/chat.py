@@ -21,8 +21,7 @@ WHAT IT RUNS ON: search_jobs is the hybrid arm (semantic.hybrid over the pre-fil
 deterministic floor for people who never open the chat; it is not this path's retrieval.
 
 THE HANDICAP IS REMOVED. The experiment judged every job on 1,200 characters, about two
-paragraphs, and said so as a flaw. read_jobs serves the whole posting with its sections
-labelled, so responsibilities and requirements are separable from benefits and EEO.
+paragraphs, and said so as a flaw. read_jobs serves the whole posting.
 """
 
 from __future__ import annotations
@@ -35,9 +34,7 @@ import httpx
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import prompts
-from . import sections as sectionsmod
-from . import semantic, store
+from . import prompts, semantic, store
 
 log = logging.getLogger("jobfitr.chat")
 
@@ -97,11 +94,122 @@ MAX_READ = int(os.environ.get("CHAT_MAX_READ", "25"))
 # Fill rates are MEASURED over the live pool (65,391 rows, 2026-08-19) and they are in the
 # prompt for one reason: a model that does not know `seniority` is 28% filled will filter on
 # it and silently delete 72% of the corpus. NULL means "the source never said", never "no".
-SCHEMA_NOTE = prompts.load("chat_schema")
 
 TOOLS_NOTE = prompts.load("chat_tools")
 
-SYSTEM_PROMPT = prompts.render("chat_system", tools=TOOLS_NOTE, schema=SCHEMA_NOTE)
+
+
+# ═══════════════════════════════════════════════════════════════
+# store_glimpse()
+# ═══════════════════════════════════════════════════════════════
+# Show the model the store instead of describing it. Two REAL rows and the
+# live column list, read at runtime — so this is correct on schema v3, v4
+# or v27 without anyone remembering to update a prompt.
+# ═══════════════════════════════════════════════════════════════
+# It replaced a hand-written note that asserted "remote 45%, seniority 28%,
+# category 12%". Those were measured once and then rotted silently as the
+# harvester improved, which is the worst failure shape available: a model
+# filtering confidently against a picture of the store that is no longer true.
+#
+# TWO rows, not one and not five. One row cannot show that a field is often
+# absent — and "a blank field means the source did not say it, never no" is
+# the single most important thing about this corpus, because a model that
+# filters on `seniority` throws away every posting that never stated one.
+# So: the most complete row available, and the sparsest, side by side. Five
+# would spend tokens re-teaching what the second row already taught.
+_GLIMPSE: str | None = None
+GLIMPSE_BODY = int(os.environ.get("CHAT_GLIMPSE_BODY", "600"))
+
+
+def store_glimpse(force: bool = False) -> str:
+    """A rendered sample of the live store: its columns and two real rows.
+
+    Returns "" when the store cannot be read — an empty section is honest, and the
+    alternative (asserting field names that may not exist) is how a model writes a
+    filter against a column that was renamed two schema versions ago.
+    """
+    global _GLIMPSE
+    if _GLIMPSE is not None and not force:
+        return _GLIMPSE
+    try:
+        import sqlite3
+
+        with store._conn() as con:
+            con.row_factory = sqlite3.Row
+            cols = [r[1] for r in con.execute("PRAGMA table_info(jobs)")]
+            # richest first, then sparsest: ordering by how many of the optional
+            # fields are actually populated, which is the axis being demonstrated.
+            optional = [c for c in cols if c not in ("url", "title", "company", "body")]
+            score = " + ".join(
+                f'(CASE WHEN "{c}" IS NOT NULL AND trim(CAST("{c}" AS TEXT)) <> \'\' THEN 1 ELSE 0 END)'
+                for c in optional
+            ) or "0"
+            rich = con.execute(
+                f"SELECT * FROM jobs WHERE body IS NOT NULL AND length(body) > 800 "
+                f"ORDER BY ({score}) DESC LIMIT 1").fetchone()
+            thin = con.execute(
+                f"SELECT * FROM jobs WHERE body IS NOT NULL "
+                f"ORDER BY ({score}) ASC LIMIT 1").fetchone()
+        if not rich or not thin:
+            return ""
+        total = len(cols)
+
+        # LIVE fill rates, one pass. The numbers themselves were always the useful part —
+        # hardcoding them was the mistake, because they drift every time the harvester
+        # improves and nothing tells you the prompt went stale. Computed here they are
+        # true for whatever schema and whatever corpus is actually loaded.
+        with store._conn() as con2:
+            sel = ", ".join(
+                f'SUM(CASE WHEN "{c}" IS NOT NULL AND trim(CAST("{c}" AS TEXT)) <> \'\' THEN 1 ELSE 0 END)'
+                for c in cols)
+            counts = con2.execute(f"SELECT COUNT(*), {sel} FROM jobs").fetchone()
+        n = counts[0] or 1
+        fill = {c: counts[i + 1] / n for i, c in enumerate(cols)}
+        # Only the columns worth a decision. url/title/company are always there and
+        # listing them at 100% teaches nothing; the internal `_basis`/`_raw` provenance
+        # columns are not the model's business.
+        show = [c for c in cols
+                if c not in ("url", "title", "company", "body", "fetched_at", "last_seen")
+                and not c.endswith(("_basis", "_raw", "_extra"))]
+        bar = lambda f: "\u2588" * round(f * 5) + "\u2591" * (5 - round(f * 5))  # noqa: E731
+        stats = "\n".join(
+            f"  {c:<20} {fill[c] * 100:3.0f}% {bar(fill[c])}"
+            for c in sorted(show, key=lambda c: -fill[c]))
+
+        def render(row, label):
+            lines = [f"### {label}"]
+            for c in cols:
+                v = row[c]
+                v = "" if v is None else str(v)
+                if c == "body":
+                    v = store.plain(v)[:GLIMPSE_BODY] + (" …" if len(v) > GLIMPSE_BODY else "")
+                elif len(v) > 160:
+                    v = v[:160] + " …"
+                lines.append(f"{c}: {v}" if v else f"{c}:")
+            return "\n".join(lines)
+
+        _GLIMPSE = (
+            f"The store holds ~{store.pool_size():,} live postings in a table of {total} "
+            "columns. Here are two REAL rows from it, so you can see the shape rather than "
+            "be told it.\n\n"
+            + render(rich, "A richly populated posting")
+            + "\n\n"
+            + render(thin, "A sparse one — and this is the common case")
+            + "\n\n### How often each field is actually populated, right now\n"
+            + stats
+            + "\n\nA BLANK FIELD MEANS THE SOURCE NEVER SAID IT. It does not mean no. Most "
+            "postings state no seniority and no salary; filtering on a field you merely wish "
+            "were populated silently discards the majority of the corpus."
+        )
+        return _GLIMPSE
+    except Exception as e:  # noqa: BLE001 — no glimpse is survivable, a wrong one is not
+        log.warning("store glimpse unavailable (%s: %s)", type(e).__name__, e)
+        return ""
+
+
+def system_prompt() -> str:
+    """The system prompt, with a live look at the store spliced in."""
+    return prompts.render("chat_system", tools=TOOLS_NOTE, schema=store_glimpse())
 
 TOOLS = [
     {
@@ -173,7 +281,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_jobs",
-            "description": "Read the FULL posting for specific urls, with sections labelled. Use before judging fit.",
+            "description": "Read the FULL text of specific postings. Use before judging whether someone should apply.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -187,7 +295,7 @@ TOOLS = [
 
 
 def _shallow(c: dict) -> dict:
-    body = sectionsmod._detag(c.get("body") or "")
+    body = store.plain(c.get("body") or "")
     return {
         "url": c.get("url", ""),
         "title": c.get("title", ""),
@@ -242,7 +350,15 @@ def search_jobs(args: dict) -> dict:
 
 
 def read_jobs(args: dict) -> dict:
-    """Full postings, sections labelled — the handicap the experiment ran under, removed."""
+    """The FULL posting text. Removes the handicap the 2026-08-17 experiment ran under:
+    it judged every job on 1,200 characters, about two paragraphs, and said so as a flaw.
+
+    No section parsing. jobfitr used to split the body on its HTML headers, which only
+    worked because job-radar was leaking raw markup — an upstream bug, now being fixed.
+    Cleaning the body upstream removes the tags and with them anything to parse, so a
+    parser here would silently return nothing. Sections, if they are ever wanted, are the
+    engine's job to emit; this reads whatever `body` holds.
+    """
     asked = [u for u in (args.get("urls") or []) if str(u).strip()]
     urls = asked[:MAX_READ]
     # SILENTLY dropping the overflow is how a model ends up recommending a job it believes
@@ -251,19 +367,13 @@ def read_jobs(args: dict) -> dict:
     unread = asked[MAX_READ:]
     out = []
     for c in store.rows_by_url(urls):
-        parts = sectionsmod.split_sections(c.get("body") or "")
-        labelled = {}
-        for kind, header, text in parts:
-            if not text:
-                continue
-            key = kind or "other"
-            labelled.setdefault(key, []).append((header + ": " if header else "") + text)
         out.append({
             "url": c.get("url", ""), "title": c.get("title", ""),
             "company": c.get("company", ""), "location": c.get("location", ""),
             "remote": c.get("remote") or "", "salary": c.get("salary", ""),
             "posted": c.get("posted", ""), "team": c.get("team") or "",
-            "sections": {k: " ".join(v)[:DEEP_CHARS] for k, v in labelled.items()},
+            "seniority": c.get("seniority") or "", "employment_type": c.get("employment_type") or "",
+            "body": store.plain(c.get("body"))[:DEEP_CHARS],
         })
     result = {"read": len(out), "jobs": out}
     if unread:
@@ -396,7 +506,7 @@ async def turn(messages: list) -> dict:
     agent that can choose its own searches can also choose them forever, and this is the
     only thing standing between a curious model and the token bill.
     """
-    convo = [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
+    convo = [{"role": "system", "content": system_prompt()}, *messages]
     trace, calls = [], 0
     picks: list = []
     rejected: list = []

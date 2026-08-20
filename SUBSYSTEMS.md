@@ -56,7 +56,7 @@ answers.
 | **FTS5 index** | **LIVE** | `porter unicode61`, title weighted 8× over body. |
 | **Intake filters** | **LIVE** | US-servable only, direct-employer links only. Non-US is never *stored*, not filtered at query time. |
 | **Eviction** (`jobfitr-evict`) | **LIVE** | 05:00 UTC, after the harvest. Unseen >14d, posted >60d, LRU cap 120k. |
-| **Sections** (`sections.py`) | **BUILT** | body → labelled sections. Greenhouse-only in practice (~52% of the pool). Destined for job-radar; dependency-free so it can move unchanged. |
+| ~~Sections~~ | **DELETED** | 2026-08-20. It only worked because job-radar leaked raw HTML — an upstream bug being fixed. Cleaning the body removes the tags and with them anything to parse, so it would have silently returned nothing. Sections, if ever wanted, are the engine's to emit. |
 | **Schema v4** | **PLANNED** | waits on job-radar 0.9.0 delivering clean bodies + a `sections` field. |
 
 ## 3. Retrieval
@@ -79,6 +79,7 @@ answers.
 | **Tools** | **BUILT** | `search_jobs`, `read_jobs`, `recommend`. `recommend` checks every url against the pool — it has caught real fabrication. |
 | **Prompts as files** (`prompts/chat_*.md`) | **BUILT** | every system prompt is a `.md`, loaded by `prompts.load()`. |
 | **Model bench** (`agent.MODELS`) | **PARTIAL** | 13 candidates, live-verified tool-capable. **Quality unverified — no bakeoff has run.** |
+| **Live store glimpse** (`chat.store_glimpse`) | **BUILT** | two real rows + live fill rates, read at runtime. Replaced a hand-written note whose numbers rotted as the harvester improved. |
 | **Interview structure** | **PLANNED** | measured: prose instructions do not hold. Needs `ask(question, slot)` + a slot ledger + a server-side gate. Design in `_private/ORACLE-interview-design-2026-08-19.md`. |
 | **Refinement loop** | **NONE** | the biggest missing feature. "this one's perfect" / "not this" has no path. The model **fabricates urls** on a revision turn, so it must be a typed tool call, never a prose rewrite. |
 | ~~Old config chat~~ | **DELETED** | 2026-08-20. Filled a config for the scoreboard; recoverable from git. Its cost controls and message sanitising were carried into the new `chat.py` — they were never part of that design. |

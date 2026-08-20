@@ -47,9 +47,10 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import sys
+
+from jobfitr import store
 import time
 from pathlib import Path
 
@@ -74,48 +75,6 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
-_TAG = re.compile(r"<[^>]+>")
-_BLOCK = re.compile(r"</(li|p|div|h[1-6]|tr|ul|ol)\s*>", re.I)
-_ENTITIES = (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"), ("&rsquo;", "'"),
-             ("&quot;", '"'), ("&lt;", "<"), ("&gt;", ">"), ("&ndash;", "–"), ("&mdash;", "—"))
-
-
-def plain(html: str) -> str:
-    """Markup out, text in — measured over 400 live postings on 2026-08-19.
-
-    55% of bodies carry raw HTML and markup is 12.9% of their characters (worst case 79%).
-    Embedding that spends budget on `<span style="font-family: helvetica, arial, sans-serif">`
-    and on Notion discussion GUIDs, and it does something worse than waste: every posting from
-    the same ATS shares the same boilerplate markup, so it pulls unrelated jobs TOWARD each
-    other in vector space.
-
-    The tags are formatting, not data — 1,190 distinct <h*>/<strong> strings over 1,683
-    occurrences, 82% of them appearing exactly once, top-30 covering 15%. There is no shared
-    section vocabulary to parse into fields, so this is a cleanup, not a parser.
-
-    </li> and friends become NEWLINES rather than spaces: 221 of 400 postings are bullet lists
-    with a median of 22 bullets, and those bullets are the responsibilities and requirements.
-    Collapsing them into one run of prose destroys the only sentence boundaries left.
-
-    Markdown is not a factor: 6 of 400 bodies use `**bold**` and none use markdown headings,
-    bullets, links, or code. The two `re.sub`s for it are belt-and-braces.
-
-    THE REAL HOME FOR THIS IS job-radar's extraction, not here — this is jobfitr cleaning up
-    after its dependency. Keep the function self-contained so it can move upstream unchanged.
-    """
-    if not html:
-        return ""
-    t = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
-    t = _BLOCK.sub("\n", t)
-    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.I)
-    t = _TAG.sub(" ", t)
-    for a, b in _ENTITIES:
-        t = t.replace(a, b)
-    t = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", t)
-    t = re.sub(r"(?m)^#{1,4}\s*", "", t)
-    t = re.sub(r"[ \t]+", " ", t)
-    t = re.sub(r"\n\s*\n+", "\n", t)
-    return t.strip()
 
 
 def content_id(row: dict) -> str:
@@ -145,29 +104,6 @@ def _listy(v) -> list:
     except Exception:
         return []
 
-
-def _signal(row: dict) -> str:
-    """Responsibilities + requirements when the posting exposes them, else the cleaned head.
-
-    Measured 2026-08-19 over the whole pool: 51.8% of bodies carry a responsibilities
-    section and 51.7% a requirements section, and for those the two together are only 40%
-    of the cleaned body — the other 60% is benefits, compensation, company marketing, EEO
-    and recruiting-fraud boilerplate, which is near-identical across thousands of postings
-    and pulls unrelated jobs toward each other. Dropping it moved top-rated jobs reaching
-    the top 25 from 5 to 8 on the graded set, at no extra embedding cost.
-
-    Greenhouse-only in practice (100% of greenhouse bodies carry HTML, ~0% of every other
-    adapter), so this is a no-op for 35% of the pool and it falls back rather than failing.
-    Once job-radar ships the `sections` field this reads that instead of re-parsing.
-    """
-    from jobfitr.sections import KEEP, split_sections
-
-    parts = split_sections(row.get("body") or "")
-    keep = [t for kind, _h, t in parts if kind in KEEP and t]
-    if not keep:
-        return plain(row.get("body"))
-    intro = next((t for kind, h, t in parts if kind is None and not h and t), "")
-    return " ".join([intro[:600]] + keep).strip()
 
 
 def summary_text(row: dict) -> str:
@@ -200,7 +136,7 @@ def summary_text(row: dict) -> str:
         meta.append(f"Location: {row['location']}")
     tags = _listy(row.get("tags"))
     tagline = f"\nTags: {', '.join(str(t) for t in tags[:8])}" if tags else ""
-    return f"{head}\n{' · '.join(meta)}{tagline}\n{_signal(row)[:SUMMARY_CHARS]}"
+    return f"{head}\n{' · '.join(meta)}{tagline}\n{store.plain(row.get('body'))[:SUMMARY_CHARS]}"
 
 
 def open_vectors(path: str) -> sqlite3.Connection:

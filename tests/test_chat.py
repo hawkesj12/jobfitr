@@ -177,9 +177,29 @@ def test_the_tool_budget_is_bounded(monkeypatch):
 # as an error.
 # ═══════════════════════════════════════════════════════════════
 def test_every_prompt_loads_and_the_placeholders_are_filled():
-    assert len(chat.SYSTEM_PROMPT) > 2000
-    assert "{tools}" not in chat.SYSTEM_PROMPT
-    assert "{schema}" not in chat.SYSTEM_PROMPT
+    p = chat.system_prompt()
+    assert len(p) > 2000
+    assert "{tools}" not in p and "{schema}" not in p
+
+
+def test_the_store_glimpse_is_read_from_the_live_store(monkeypatch):
+    # It replaced a hand-written note asserting fixed fill rates, which rotted silently
+    # as the harvester improved. Whatever store is loaded is what the model is told.
+    chat.store_glimpse(force=True)
+    g = chat.store_glimpse()
+    assert "How often each field" in g
+    assert "%" in g
+
+
+def test_a_glimpse_failure_is_survivable(monkeypatch):
+    # No glimpse is honest. A WRONG one — field names that no longer exist — is how a
+    # model writes a filter against a column renamed two schema versions ago.
+    def boom(*a, **k):
+        raise RuntimeError("store is gone")
+
+    monkeypatch.setattr(chat.store, "_conn", boom)
+    assert chat.store_glimpse(force=True) == ""
+    assert "{schema}" not in chat.system_prompt()
 
 
 def test_a_missing_prompt_raises_rather_than_returning_empty():
@@ -192,6 +212,6 @@ def test_the_retired_config_vocabulary_is_gone():
     # boosts / rank_down / exclude belonged to the scoreboard. The model now searches
     # and judges directly, and a prompt that still asked for them would be asking for
     # inputs nothing consumes.
-    low = chat.SYSTEM_PROMPT.lower()
+    low = chat.system_prompt().lower()
     assert "boost" not in low
     assert "rank_down" not in low

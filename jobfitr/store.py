@@ -197,6 +197,50 @@ CARRIED_AGGREGATORS = tuple(
 )
 
 
+_TAG = re.compile(r"<[^>]+>")
+_BLOCK = re.compile(r"</(li|p|div|h[1-6]|tr|ul|ol)\s*>", re.I)
+_ENTITIES = (("&nbsp;", " "), ("&amp;", "&"), ("&#39;", "'"), ("&rsquo;", "'"),
+             ("&quot;", '"'), ("&lt;", "<"), ("&gt;", ">"), ("&ndash;", "–"), ("&mdash;", "—"))
+
+
+def plain(html: str) -> str:
+    """Markup out, text in — measured over 400 live postings on 2026-08-19.
+
+    55% of bodies carry raw HTML and markup is 12.9% of their characters (worst case 79%).
+    Embedding that spends budget on `<span style="font-family: helvetica, arial, sans-serif">`
+    and on Notion discussion GUIDs, and it does something worse than waste: every posting from
+    the same ATS shares the same boilerplate markup, so it pulls unrelated jobs TOWARD each
+    other in vector space.
+
+    The tags are formatting, not data — 1,190 distinct <h*>/<strong> strings over 1,683
+    occurrences, 82% of them appearing exactly once, top-30 covering 15%. There is no shared
+    section vocabulary to parse into fields, so this is a cleanup, not a parser.
+
+    </li> and friends become NEWLINES rather than spaces: 221 of 400 postings are bullet lists
+    with a median of 22 bullets, and those bullets are the responsibilities and requirements.
+    Collapsing them into one run of prose destroys the only sentence boundaries left.
+
+    Markdown is not a factor: 6 of 400 bodies use `**bold**` and none use markdown headings,
+    bullets, links, or code. The two `re.sub`s for it are belt-and-braces.
+
+    THE REAL HOME FOR THIS IS job-radar's extraction, not here — this is jobfitr cleaning up
+    after its dependency. Keep the function self-contained so it can move upstream unchanged.
+    """
+    if not html:
+        return ""
+    t = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    t = _BLOCK.sub("\n", t)
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.I)
+    t = _TAG.sub(" ", t)
+    for a, b in _ENTITIES:
+        t = t.replace(a, b)
+    t = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", t)
+    t = re.sub(r"(?m)^#{1,4}\s*", "", t)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n\s*\n+", "\n", t)
+    return t.strip()
+
+
 def direct_to_employer(row: dict) -> bool:
     """True when the row may enter the store under the link policy.
 
