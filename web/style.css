@@ -817,3 +817,25 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   color: var(--warn, #b4462e);
   border-color: color-mix(in srgb, var(--warn, #b4462e) 40%, transparent);
 }
+
+/* ── the answer, rendered in the conversation ──────────────────────────────
+   The agent returns five jobs with reasons, not 200 scored rows, so these are
+   cards in the transcript rather than a board you switch to. */
+.echo-act { margin: .6rem 0 .2rem; font-size: .82rem; opacity: .62; }
+.echo-act ul { margin: 0; padding-left: 1.05rem; }
+.echo-act li { margin: .15rem 0; }
+.echo-act b { font-weight: 600; opacity: .85; }
+.act-n { opacity: .55; }
+.echo-picks { display: grid; gap: .85rem; margin: .9rem 0 1.1rem; }
+.pick { padding: 1rem 1.15rem; border-radius: 14px; }
+.pick-title { font-size: 1.02rem; font-weight: 650; text-decoration: none; line-height: 1.3; }
+.pick-title:hover { text-decoration: underline; }
+.pick-meta { display: flex; flex-wrap: wrap; gap: .55rem; margin: .35rem 0 .55rem;
+             font-size: .84rem; opacity: .72; }
+.pick-co { font-weight: 600; opacity: .9; }
+.pick-pay { font-variant-numeric: tabular-nums; }
+.pick-tag { text-transform: capitalize; opacity: .8; }
+.pick-why { margin: 0 0 .5rem; font-size: .92rem; line-height: 1.5; }
+.pick-caveat { margin: 0 0 .55rem; font-size: .85rem; opacity: .7; font-style: italic; }
+.pick-go { font-size: .85rem; font-weight: 600; text-decoration: none; }
+.pick-go:hover { text-decoration: underline; }

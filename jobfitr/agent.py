@@ -40,7 +40,50 @@ from . import semantic, store
 log = logging.getLogger("jobfitr.agent")
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = os.environ.get("AGENT_MODEL", "google/gemini-2.5-flash")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE MODEL BENCH — pick one by moving ACTIVE_MODEL. AGENT_MODEL env overrides.
+# ═══════════════════════════════════════════════════════════════════════════
+# Every entry VERIFIED tool-capable against the live OpenRouter catalog on
+# 2026-08-19 (`"tools" in supported_parameters`). That filter is not optional here: this
+# path is a tool-use loop, and a model without tool support does not degrade — it holds a
+# conversation and never searches.
+#
+# `session_usd` is a MODELLED figure, not a measured one: 150k input / 6k output, which is
+# an interview plus three searches at 40 rows plus a dozen full reads. Real sessions vary
+# with how many searches the model chooses to run — which is the whole point of the loop,
+# so treat these as a ranking, not a bill. Prices move; re-fetch before quoting them.
+#
+# NOTHING HERE IS MEASURED FOR QUALITY. The retrieval work of 2026-08-19 established that
+# the interview's output (its probes and its titles) is what drives results, and that probe
+# QUALITY is the lever — but no model has been compared against another on it. The bench
+# exists so that comparison is a one-line change instead of a refactor.
+MODELS = {
+    # ── cheap, and a million tokens of context ───────────────────────────────
+    "qwen3.5-flash":     {"id": "qwen/qwen3.5-flash-02-23",   "ctx": 1_000_000, "session_usd": 0.011},
+    "deepseek-v4-flash": {"id": "deepseek/deepseek-v4-flash",  "ctx": 1_048_576, "session_usd": 0.013},
+    "glm-4.7-flash":     {"id": "z-ai/glm-4.7-flash",          "ctx":   202_752, "session_usd": 0.011},
+    "gemini-2.5-flash-lite": {"id": "google/gemini-2.5-flash-lite", "ctx": 1_048_576, "session_usd": 0.017},
+    # ── mid: where a conversational protocol starts holding reliably ─────────
+    "gemini-2.5-flash":  {"id": "google/gemini-2.5-flash",     "ctx": 1_048_576, "session_usd": 0.060},
+    "gemini-3.7-flash":  {"id": "google/gemini-3.7-flash",     "ctx": 1_048_576, "session_usd": 0.067},
+    "glm-4.7":           {"id": "z-ai/glm-4.7",                "ctx":   204_800, "session_usd": 0.070},
+    "kimi-k2.5":         {"id": "moonshotai/kimi-k2.5",        "ctx":   262_144, "session_usd": 0.081},
+    "minimax-m3":        {"id": "minimax/minimax-m3",          "ctx": 1_048_576, "session_usd": 0.052},
+    # ── upper: the top of the band Justin drew (above Haiku, below Sonnet) ───
+    "grok-4.3":          {"id": "x-ai/grok-4.3",               "ctx": 1_000_000, "session_usd": 0.203},
+    "grok-4.20":         {"id": "x-ai/grok-4.20",              "ctx": 2_000_000, "session_usd": 0.203},
+    "grok-4.6":          {"id": "x-ai/grok-4.6",               "ctx":   500_000, "session_usd": 0.336},
+    "gemini-3.5-flash":  {"id": "google/gemini-3.5-flash",     "ctx": 1_048_576, "session_usd": 0.279},
+    # NOTE grok-4.3 carries TWICE the context of grok-4.6 at 60% of the cost, and grok-4.20
+    # carries four times it for the same price. If the reason for reaching for Grok is
+    # capability rather than the specific 4.6 build, 4.3 is the better entry point.
+}
+
+# ↓↓↓ THE ONE LINE TO CHANGE ↓↓↓
+ACTIVE_MODEL = "gemini-2.5-flash"
+
+DEFAULT_MODEL = os.environ.get("AGENT_MODEL") or MODELS[ACTIVE_MODEL]["id"]
 MAX_TOOL_CALLS = int(os.environ.get("AGENT_MAX_TOOL_CALLS", "12"))
 MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "24"))
 REQUEST_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "90"))
@@ -79,6 +122,48 @@ TOOLS = [
                     "why": {"type": "string", "description": "One line: what this search is testing."},
                 },
                 "required": ["titles", "probes", "why"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recommend",
+            "description": "Deliver the final picks. Call this ONCE, after reading, with the jobs you are recommending. Then write your answer to the person in your own words.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "picks": {
+                        "type": "array",
+                        "description": "The jobs you are recommending, best first. Five unless you genuinely cannot justify five.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "Must be a url a tool returned in this conversation."},
+                                "why": {"type": "string", "description": "One or two sentences: why this job fits THIS person. The work, not the words that matched."},
+                                "caveat": {"type": "string", "description": "Anything about it that conflicts with what they told you, or '' if nothing does."},
+                            },
+                            "required": ["url", "why"],
+                        },
+                    },
+                    "rejected": {
+                        "type": "array",
+                        "description": "Jobs they would expect to see, and what ruled each one out.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "why_not": {"type": "string"},
+                            },
+                            "required": ["url", "why_not"],
+                        },
+                    },
+                    "nothing_fits": {
+                        "type": "boolean",
+                        "description": "True if the pool genuinely holds nothing worth applying to. Say so rather than padding.",
+                    },
+                },
+                "required": ["picks"],
             },
         },
     },
@@ -176,7 +261,42 @@ def read_jobs(args: dict) -> dict:
     return {"read": len(out), "jobs": out}
 
 
-DISPATCH = {"search_jobs": search_jobs, "read_jobs": read_jobs}
+def recommend(args: dict) -> dict:
+    """The final picks, as DATA rather than as prose the client has to parse.
+
+    A third tool rather than a parse of the closing message, for one reason: the front end
+    has to render cards, and pulling five urls out of free text is the kind of thing that
+    works in testing and fails on the first answer written slightly differently. This also
+    lets the server VERIFY every url actually came from the pool before it reaches anyone —
+    a hallucinated listing is the one failure the whole product cannot survive, because the
+    person goes looking for a job that does not exist.
+    """
+    picks = args.get("picks") or []
+    urls = [p.get("url", "") for p in picks if p.get("url")]
+    rejected = args.get("rejected") or []
+    known = {r["url"]: r for r in store.rows_by_url(urls + [r.get("url", "") for r in rejected]) if r.get("url")}
+    out, dropped = [], []
+    for p in picks:
+        row = known.get(p.get("url", ""))
+        if not row:                       # not in the pool = invented, or long evicted
+            dropped.append(p.get("url", ""))
+            continue
+        out.append({**_shallow(row), "why": p.get("why", ""), "caveat": p.get("caveat", "")})
+    if dropped:
+        log.warning("agent recommended %d url(s) not in the store: %s", len(dropped), dropped)
+    return {
+        "delivered": len(out),
+        "picks": out,
+        "rejected": [{**_shallow(known[r["url"]]), "why_not": r.get("why_not", "")}
+                     for r in rejected if r.get("url") in known],
+        "nothing_fits": bool(args.get("nothing_fits")),
+        # Told back to the MODEL so it can correct itself in the closing message rather
+        # than describing a job the person will never see on screen.
+        "rejected_by_server": dropped or None,
+    }
+
+
+DISPATCH = {"search_jobs": search_jobs, "read_jobs": read_jobs, "recommend": recommend}
 
 
 def available() -> bool:
@@ -205,16 +325,37 @@ async def turn(messages: list) -> dict:
     """
     convo = [{"role": "system", "content": SYSTEM_PROMPT}, *messages]
     trace, calls = [], 0
+    picks: list = []
+    rejected: list = []
+    nothing_fits = False
+    nudged = False
     while calls <= MAX_TOOL_CALLS:
         data = await _call({
-            "model": os.environ.get("AGENT_MODEL", DEFAULT_MODEL),
+            "model": DEFAULT_MODEL,
             "messages": convo, "tools": TOOLS, "tool_choice": "auto",
         })
         msg = data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
+            # THE NUDGE, and it is load-bearing rather than defensive. Measured: a model
+            # that has searched and read will write five jobs into its prose and never call
+            # `recommend` — the answer reads fine and the screen shows no cards at all.
+            # Asking politely in the prompt did not fix it. So if it tries to finish after
+            # searching without ever delivering, it gets told once, in the transcript,
+            # which is the only place a model reliably notices anything.
+            searched = any(t["tool"] == "search_jobs" for t in trace)
+            if searched and not picks and not nudged:
+                nudged = True
+                convo.append(msg)
+                convo.append({"role": "user", "content":
+                    "You have not called `recommend`, so the person's screen is empty — "
+                    "whatever you wrote is invisible to them. Call `recommend` now with the "
+                    "jobs you chose (url, why, caveat) and the rejections worth naming, "
+                    "using only urls a tool returned. Then write your answer."})
+                continue
             return {"reply": msg.get("content") or "", "trace": trace,
-                    "tool_calls": calls, "model": data.get("model")}
+                    "tool_calls": calls, "model": data.get("model"),
+                    "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits}
         convo.append(msg)
         for tc in tool_calls:
             calls += 1
@@ -226,8 +367,14 @@ async def turn(messages: list) -> dict:
             except Exception as e:  # a tool fault is a RESULT the model can react to,
                 log.warning("agent tool %s failed: %s", name, e)  # never a dead conversation
                 result = {"error": f"{type(e).__name__}: {e}"}
+            if name == "recommend" and isinstance(result, dict):
+                picks = result.get("picks") or picks
+                rejected = result.get("rejected") or rejected
+                nothing_fits = result.get("nothing_fits") or nothing_fits
             trace.append({"tool": name, "args": args,
-                          "returned": result.get("returned") or result.get("read") or 0,
+                          "returned": (result.get("returned") if "returned" in result
+                                       else result.get("read") if "read" in result
+                                       else result.get("delivered", 0)),
                           "why": args.get("why", "")})
             convo.append({"role": "tool", "tool_call_id": tc["id"],
                           "content": json.dumps(result)[:120000]})

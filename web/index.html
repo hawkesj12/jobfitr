@@ -338,7 +338,9 @@
     </template>
 
     <script src="atmosphere.js?v=51"></script>
-    <script src="app.js?v=56"></script>
-    <script src="chat.js?v=65"></script>
+    <!-- app.js (the /api/score board) is NOT loaded: the agent renders its five picks in
+         the conversation. Kept in the tree until the agent flow has run live for a while;
+         delete it and #results-view together, not one at a time. -->
+    <script src="chat.js?v=66"></script>
   </body>
 </html>
