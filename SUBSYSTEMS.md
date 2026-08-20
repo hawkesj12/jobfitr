@@ -1,6 +1,6 @@
 # jobfitr — the parts, and how finished each one is
 
-**Updated:** 2026-08-20 · one line per subsystem, and an honest status.
+**Updated:** 2026-08-20 09:00 ET · one line per subsystem, and an honest status.
 
 This is the inventory: what jobfitr is made of, what each part does, and **whether it is
 actually done**. It is deliberately not a roadmap and not a runbook — `CLAUDE.md` says how
@@ -18,6 +18,8 @@ answers.
 | **STALE** | shipped, still running, and describes a design that has been replaced |
 | **PLANNED** | designed on paper, no code |
 | **NONE** | doesn't exist, and the absence is a real gap rather than a decision |
+| **DELETED** | removed, with the date and the reason. Recoverable from git — kept here so nobody re-adds it |
+| **DECIDE** | a live question with a real cost either way, waiting on a call |
 
 ---
 
@@ -69,7 +71,8 @@ answers.
 | **Hybrid fusion** (`semantic.hybrid`) | **LIVE** | RRF k=60, per-company cap, pre-filter before both arms. |
 | **`/api/candidates`** | **LIVE** | the AI path's retrieval. Nothing user-facing calls it yet. |
 | **Nightly re-embed** | **NONE** | **A real gap.** New rows from each harvest have no vector until someone runs `jobfitr-vectors` by hand. No timer exists. |
-| **The scoreboard** (`server.scoreboard`) | **STALE** | the old 100/80/60/30 tier ladder + boosts. Still serves `/api/score`; the product no longer has a score. |
+| **The scoreboard** (`server.scoreboard`, `_rank`) | **DECIDE** | 100/80/60/30 tier ladder + boost decay. Still serves `/api/score`; **the product no longer has a score**. See "The scoreboard question" below. |
+| **Nightly re-embed** | **NONE** | listed twice on purpose — it is the gap most likely to be forgotten, because nothing reports it. |
 
 ## 4. The conversation
 
@@ -79,7 +82,7 @@ answers.
 | **Tools** | **BUILT** | `search_jobs`, `read_jobs`, `recommend`. `recommend` checks every url against the pool — it has caught real fabrication. |
 | **Prompts as files** (`prompts/chat_*.md`) | **BUILT** | every system prompt is a `.md`, loaded by `prompts.load()`. |
 | **Model bench** (`agent.MODELS`) | **PARTIAL** | 13 candidates, live-verified tool-capable. **Quality unverified — no bakeoff has run.** |
-| **Live store glimpse** (`chat.store_glimpse`) | **BUILT** | two real rows + live fill rates, read at runtime. Replaced a hand-written note whose numbers rotted as the harvester improved. |
+| **Live store glimpse** (`chat.store_glimpse`) | **BUILT** | two real rows + live fill rates, computed at runtime (263 ms, cached). Correct on any schema version without anyone updating a prompt. |
 | **Interview structure** | **PLANNED** | measured: prose instructions do not hold. Needs `ask(question, slot)` + a slot ledger + a server-side gate. Design in `_private/ORACLE-interview-design-2026-08-19.md`. |
 | **Refinement loop** | **NONE** | the biggest missing feature. "this one's perfect" / "not this" has no path. The model **fabricates urls** on a revision turn, so it must be a typed tool call, never a prose rewrite. |
 | ~~Old config chat~~ | **DELETED** | 2026-08-20. Filled a config for the scoreboard; recoverable from git. Its cost controls and message sanitising were carried into the new `chat.py` — they were never part of that design. |
@@ -149,15 +152,58 @@ answers.
 
 ---
 
+## The scoreboard question — the one open decision
+
+`/api/score` is the last thing standing on the old design, and **nothing user-facing calls
+it**. Keeping or cutting it decides roughly **3,000 lines**:
+
+| what goes with it | lines |
+| --- | ---: |
+| `server.py` — `scoreboard`, `_rank`, `_shape`, `score_jobs`, `prefetch` | 389 |
+| `match.py` — the title tiers and boost decay | 404 |
+| `config_builder.py` — boosts / rank_down / min_score → a `Config` | 244 |
+| `tests/test_scoreboard.py` — the 234 hand-computed goldens | 440 |
+| `tests/test_match.py` | 373 |
+| `web/app.js` — the board UI | 1,159 |
+| **total** | **~3,009** |
+
+**The promise and the endpoint are separable, and that is the whole point.** "Runs free with
+no API key" does not belong to `/api/score` — `/api/candidates` is already free, keyless and
+deterministic, and it is *better retrieval* (two arms, 16-10 over title-only lexical at
+p=0.031). What it does not do is print a fit number, which is exactly the thing that was
+deleted from the product.
+
+Two functions must survive whatever happens: `match.has_term` and `match.norm_key`.
+`_eligible` filters exclusions with `has_term` and runs on `/api/candidates` too.
+
+**The test that decides it:** would you point a self-hoster at the no-key path and expect
+them to use it as a product? If yes, the board UI earns its place. If the honest answer is
+"nobody runs jobfitr without a key", it is 3,000 lines maintaining a promise nobody collects.
+
+*(Not a reason either way, but worth saying: the scoreboard is careful work — 234 goldens
+computed by hand, `parts` summing to `points`, "evidence only ever adds". The principle
+behind it was honesty in ranking, and the new product keeps that principle by a different
+mechanism: the model shows its reasoning and names what it rejected. Replacing the
+implementation is not abandoning the value. Keeping two implementations of it is what makes
+a codebase hard to read.)*
+
+---
+
 ## The honest summary
 
 **Retrieval is finished and running.** Ingestion is finished apart from one upstream bug
-already handed off. **The conversation is built but unreachable**, and **the web app is still
-the old product** — a visitor today gets four questions and a scored board that the rest of
-the system no longer produces.
+already handed off. **The conversation is built but unreachable** — a visitor today still
+gets the old four-question board — and **the web app is the next real piece of work**.
 
-The three gaps that are absences rather than decisions:
+Three gaps that are absences rather than decisions:
 
-1. **No nightly re-embed** — new jobs have no vector until someone runs a command by hand.
-2. **No refinement loop** — the thing that makes a conversation worth having.
-3. **No observability on the agent** — the new product cannot be measured against real use.
+1. **No nightly re-embed.** Every harvest adds rows with no vector, and nothing reports it.
+   The semantic arm decays a little each night, silently. Cheapest fix on the list.
+2. **No refinement loop.** "This one's perfect" / "not this one" has no path. Measured
+   hazard: the model **fabricates urls** on a revision turn, so it has to be a typed tool
+   call, never a prose rewrite.
+3. **No observability on the conversation.** `searchlog` records `/api/score` searches and
+   has no idea the agent exists — so the new product has zero real-user signal, which is
+   precisely the hole the search log was built to close for the old one.
+
+And one decision: **the scoreboard**, above.
