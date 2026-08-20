@@ -1,9 +1,13 @@
-"""The matcher — unit contract plus a corpus-anchored regression.
+"""Term matching — what survived the scoreboard.
 
-Two layers, and the second is the point. The unit tests pin the RULE; the corpus tests
-pin the NUMBERS the rule produces against the real 39,597-row snapshot. Those numbers are
-what the whole ranking rebuild is measured against, so if a future change to the matcher
-moves them, it should fail here loudly rather than quietly shift every downstream result.
+`match.py` used to hold the title tier ladder (100/80/60/30) and the boost decay too.
+Those went with the scoreboard on 2026-08-20; the tests for them went with them.
+
+What is left is load-bearing on a path that is very much alive: `_eligible` filters the
+user's exclusions with `has_term`, on every /api/candidates request. The rule it pins is
+WHOLE-WORD matching — the substring form deleted `Software Engineer, Internal Systems`
+under "intern" and `…Salesforce Health Cloud` under "sales", 220 of 2,573 exclusions
+(8.6%) being false hides. That is why these tests are worth keeping.
 """
 
 from __future__ import annotations
@@ -13,16 +17,7 @@ import sqlite3
 
 import pytest
 
-from jobfitr.match import (
-    _TIER_RELATED,
-    _stem,
-    has_term,
-    norm_key,
-    term_hits,
-    term_pattern,
-    title_points,
-    title_score,
-)
+from jobfitr.match import _stem, has_term, norm_key, term_hits, term_pattern
 
 # ── unit: the matching rule ──────────────────────────────────────────────────
 
@@ -101,16 +96,8 @@ TIERS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "job,pts,why", TIERS, ids=[t[2] + "->" + str(t[1]) for t in TIERS]
-)
-def test_title_tiers(job, pts, why):
-    assert title_points(WANT, job) == pts, why
 
 
-def test_tiers_do_not_stack():
-    """An exact match scores 100, not 100+80+60 — the best single tier only."""
-    assert title_points(WANT, WANT) == 100
 
 
 # ── the related tier: the model's suggestions, flat 30 ───────────────────────
@@ -118,56 +105,18 @@ def test_tiers_do_not_stack():
 SUGGESTED = ["AI Engineer", "Applied Scientist"]
 
 
-def test_a_suggested_title_earns_the_related_tier():
-    pts, is_related = title_score([WANT], SUGGESTED, "AI Engineer")
-    assert (pts, is_related) == (30, True)
 
 
-def test_a_suggested_title_is_flat_30_however_well_it_matches():
-    """No weight, no fraction of a primary tier. An EXACT match on a suggestion scores
-    the same 30 as a seniority-shifted one, because the tier is a statement about whose
-    list the title came from — not about how close the strings are."""
-    for job in ("AI Engineer", "Senior AI Engineer", "AI Engineer, Staff"):
-        assert title_score([WANT], SUGGESTED, job) == (30, True)
 
 
-def test_the_users_own_title_always_wins():
-    """Precedence, not addition. Even the WEAKEST primary tier outranks the strongest
-    possible related match — the user's own words beat the machine's guess."""
-    pts, is_related = title_score([WANT], ["Staff AI Product Builder"], "Staff AI Product Builder")
-    assert (pts, is_related) == (60, False), "core+modifier on a named title, not related"
 
 
-def test_no_suggestions_means_no_related_tier():
-    """Every stored search predates this field. Absent must score exactly as before."""
-    assert title_score([WANT], None, "AI Engineer") == (0, False)
-    assert title_score([WANT], [], "AI Engineer") == (0, False)
 
 
-def test_the_word_overlap_rule_is_gone():
-    """REGRESSION. A job title sharing half its words used to earn 30 on that alone —
-    which caught 'Warehouse Lead' for 'Warehouse Supervisor' and also 'Senior Full-Stack
-    Developer' for 'Instructional Designer'. Right by accident; now it scores nothing
-    unless the model actually suggested it."""
-    assert title_score(["Instructional Designer"], [], "Senior Full-Stack Developer") == (0, False)
-    assert title_score(["Warehouse Supervisor"], [], "Warehouse Lead") == (0, False)
-    # ...and comes back the moment it IS suggested
-    assert title_score(["Warehouse Supervisor"], ["Warehouse Lead"], "Warehouse Lead") == (30, True)
 
 
-def test_title_outweighs_a_keyword_stuffed_body():
-    """The regression that forced the doubling: an exact title must beat a listing with
-    NO title match whose body merely repeats the user's boost terms.
-
-    Observed in production — a $235-315k exact-title role ranked below a $94,876
-    off-title listing. At the old 50/40/30/15 values only 7 single-occurrence boosts
-    were needed to overturn an exact title; it now takes 13.
-    """
-    assert title_points(WANT, WANT) > 8 * 12  # 12 boosts, one occurrence each
 
 
-def test_empty_user_title_scores_nothing():
-    assert title_points("", "AI Engineer") == 0
 
 
 def test_norm_key_matches_the_behaviour_it_replaced():
@@ -263,43 +212,12 @@ ROOT_CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "want,job,root,before,after,why", ROOT_CASES,
-    ids=[f"{c[4]}<-{c[3]}" for c in ROOT_CASES],
-)
-def test_root_title_tiers(want, job, root, before, after, why):
-    assert title_score([want], [], job)[0] == before, f"baseline: {why}"
-    assert title_score([want], [], job, root)[0] == after, why
 
 
-def test_an_empty_root_scores_exactly_as_before():
-    """The default. Every caller predating the column — and the 234 goldens, which pass
-    no root — must be byte-identical."""
-    for want, job in [("ai engineer", "AI Engineer"), ("nurse", "Senior Nurse"),
-                      ("data analyst", "Chef")]:
-        assert title_score([want], [], job) == title_score([want], [], job, "")
 
 
-def test_a_root_match_cannot_promote_a_suggestion_over_a_named_title():
-    """The locked precedence rule. Both surfaces are tried for every NAMED title before
-    any suggestion is considered, so the root cannot smuggle a suggestion to the top."""
-    pts, is_related = title_score(
-        ["Data Analyst"], ["Software Engineer"], "Senior Software Engineer",
-        "Software Engineer",
-    )
-    assert (pts, is_related) == (_TIER_RELATED, True)
-    # and a named title still beats it outright even when only the ROOT matches
-    pts, is_related = title_score(
-        ["Software Engineer"], ["Data Analyst"], "Senior Software Engineer II",
-        "Software Engineer",
-    )
-    assert (pts, is_related) == (100, False)
 
 
-def test_a_root_identical_to_the_title_is_not_compared_twice():
-    """The common case — nothing was stripped. Cheap, and it must not change the answer."""
-    assert title_score(["ai engineer"], [], "AI Engineer", "AI Engineer")[0] == 100
-    assert title_score(["ai engineer"], [], "Chef", "Chef")[0] == 0
 
 
 # ── the substring gate ───────────────────────────────────────────────────────

@@ -311,21 +311,21 @@ def _shallow(c: dict) -> dict:
 
 def search_jobs(args: dict) -> dict:
     """The hybrid arm. Pre-filter, then BOTH arms over the filtered pool, fused by RRF."""
-    from .config_builder import config_from_dict
+    from .config_builder import filters_from_dict
 
     titles = [t for t in (args.get("titles") or []) if str(t).strip()]
     probes = [p for p in (args.get("probes") or []) if str(p).strip()]
     k = max(1, min(int(args.get("k") or 40), 120))
-    cfg = config_from_dict(
+    f = filters_from_dict(
         {"titles": titles, "location": args.get("location") or "",
-         "remote_only": bool(args.get("remote_only"))}, [])
+         "remote_only": bool(args.get("remote_only"))})
     age = args.get("max_age_days")
     rows = store.bm25_candidates(titles) if titles else []
     # Hard filters BEFORE retrieval depth is spent. See semantic.hybrid.
     keep = []
     floor = args.get("salary_floor")
     for c in rows:
-        if cfg.remote_only and (c.get("remote") or "") in ("onsite", "hybrid"):
+        if f.remote_only and (c.get("remote") or "") in ("onsite", "hybrid"):
             continue
         if age and (c.get("posted") or ""):
             from job_radar.util import age_int

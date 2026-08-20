@@ -38,15 +38,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-__all__ = [
-    "SENIORITY_PREFIXES",
-    "has_term",
-    "norm_key",
-    "term_hits",
-    "term_pattern",
-    "title_points",
-    "title_score",
-]
+__all__ = ["norm_key", "term_pattern", "term_hits", "has_term"]
 
 # A term shorter than this gets no plural suffix. "icu" + "s" would match "icus", which is
 # harmless, but the guard keeps very short terms from growing surprising surface area.
@@ -55,17 +47,6 @@ _MIN_PLURAL_LEN = 4
 # Leading words stripped from BOTH sides before the core-role comparison, so that
 # "Senior AI Product Builder" and "Staff AI Product Builder" are recognised as the same
 # role at a different level rather than as unrelated titles.
-SENIORITY_PREFIXES = (
-    "head of",
-    "director of",
-    "senior",
-    "staff",
-    "principal",
-    "junior",
-    "lead",
-    "sr",
-    "jr",
-)
 
 # Doubled from 50/40/30/15 on 2026-08-02. The original values let a listing with NO
 # title match at all out-score a perfect one: a "Consultant" whose body repeated all nine
@@ -79,11 +60,6 @@ SENIORITY_PREFIXES = (
 # whether a heavily-matching listing with an unrecognisable title is a keyword-stuffed
 # impostor or a genuinely good job under an odd name is not something the arithmetic can
 # see. That is what the judged comparison is for.
-_TIER_EXACT = 100
-_TIER_ALL_WORDS = 80
-_TIER_CORE = 60
-_TIER_RELATED = 30
-_TIER_NONE = 0
 
 # WHAT THE RELATED TIER IS FOR. It was always specified as "AI-generated titles" — the
 # roles the model suggests once the user's own list is final. Nothing generated any, so
@@ -252,153 +228,11 @@ def has_term(term: str, text: str, lowered: bool = False) -> bool:
     return pattern.search(text) is not None
 
 
-def _strip_seniority(normalised: str) -> str:
-    """Drop one leading seniority marker. Applied to both sides of a comparison."""
-    for prefix in SENIORITY_PREFIXES:
-        if normalised.startswith(prefix + " "):
-            return normalised[len(prefix) + 1 :]
-    return normalised
 
 
-# ═══════════════════════════════════════════════════════════════
-# title_points()
-# ═══════════════════════════════════════════════════════════════
-# Score one job title against ONE title, on the three tiers that mean
-# "the user asked for this". Returns the BEST single tier — tiers do
-# not add, so a listing cannot collect 100 and 80 for the same title.
-# The related tier is not here on purpose: it is not a property of a
-# title pair, it is a statement about WHOSE list the title came from.
-# title_score() below is what applies it.
-#
-# THE RULES, WRITTEN SO A STRANGER CAN FOLLOW THEM. This wording is
-# not decoration — it is the spec five independent readers scored 250
-# listings against in the 1.5 audit, and one of them flagged six cases
-# as ambiguous because the old phrasing did not say this out loud:
-#
-#   Every comparison is WHOLE WORD, after normalising (lowercase,
-#   punctuation to spaces, collapse runs of space). "engineering" does
-#   NOT satisfy a want for "engineer" — they are different words, and
-#   no stemming or prefix matching happens anywhere in this file. The
-#   reader who flagged it guessed strict whole-word and matched the
-#   code on all six, so the RULE was right; the sentence describing it
-#   was not.
-#
-#   100  exact      the two normalise to the same string
-#    80  all words  every word of the USER's title appears somewhere in
-#                   the JOB's title, any order. The job title may carry
-#                   extra words; the user's may not go unmatched. So
-#                   "Senior Data Engineer" satisfies a want for "Data
-#                   Engineer", but not the reverse.
-#    60  core       equal after removing ONE leading seniority word from
-#                   each side (see SENIORITY_PREFIXES). Only the leading
-#                   one, and only if it is followed by a space.
-#     0  none
-#
-# Mechanical by design: no similarity model, no embedding, no judgment
-# call. Deciding what counts as "close enough" is not the ranker's job
-# — the interview asks the model for it explicitly, and the answer
-# arrives as `related_titles`.
-# ═══════════════════════════════════════════════════════════════
-def title_points(user_title: str, job_title: str) -> int:
-    got = norm_key(job_title)
-    return _tier(_prepared(user_title), got, set(got.split())) if got else _TIER_NONE
 
 
-@lru_cache(maxsize=512)
-def _prepared(title: str) -> tuple[str, frozenset[str], str]:
-    """A title reduced to the three forms the tiers compare against.
-
-    Cached because the caller asks for the SAME handful of strings over and over: a
-    search scores one user's 2-15 titles against every candidate, so without this the
-    user's own titles were re-normalised once per candidate — roughly 50,000 identical
-    norm_key calls per request for a wide search, all producing the same answer.
-    Measured on the real corpus: 158 ms of title tiering became 9 ms, with zero
-    disagreements across every candidate.
-
-    Bounded at 512 so a long-lived process cannot accumulate entries for the job titles
-    that also pass through here; those are mostly distinct and would otherwise turn a
-    cache into a leak.
-    """
-    key = norm_key(title)
-    return key, frozenset(key.split()), _strip_seniority(key)
 
 
-def _tier(want: tuple[str, frozenset[str], str], got: str, got_words: set) -> int:
-    """The three tiers, against a job title that is ALREADY normalised.
-
-    Split out so the caller normalises the job side once per candidate rather than once
-    per (candidate × user title) — the other half of the same redundancy.
-    """
-    key, words, stripped = want
-    if not key:
-        return _TIER_NONE
-    if key == got:
-        return _TIER_EXACT
-    if words <= got_words:
-        return _TIER_ALL_WORDS
-    if stripped == _strip_seniority(got):
-        return _TIER_CORE
-    return _TIER_NONE
 
 
-# ═══════════════════════════════════════════════════════════════
-# title_score()
-# ═══════════════════════════════════════════════════════════════
-# The whole ladder, in one call: the best tier across every title
-# the user named, and only if NONE of them land, a flat 30 for
-# matching one of the model's suggestions.
-#
-# The precedence is the point. A related title can never outrank a
-# real one — not even an exact match on a suggestion beats a
-# seniority-shifted match on a role the user actually asked for.
-# The user's own words always win.
-# ═══════════════════════════════════════════════════════════════
-def title_score(
-    titles, related_titles, job_title: str, job_title_root: str = ""
-) -> tuple[int, bool]:
-    """(points, is_related). `is_related` labels the card's receipt.
-
-    A listing is compared on TWO surfaces: the title the employer wrote, and the same
-    title with its seniority and decoration stripped (job_radar's `title_root`). The
-    best tier across both wins — never a swap.
-
-    THE MAX FORM IS THE WHOLE POINT, and it is measured. Swapping the root in regresses
-    3,254 pairs, 3,202 of them 80 -> 0: `Software Engineer, Applied AI` scores 80 for
-    someone wanting "AI Engineer" on the full title and 0 on the root, because the root
-    is where the qualifier went. Taking the max can only ever RAISE a tier — over all
-    93,139 retrieved pairs it changes 10,452 with ZERO scores lowered.
-
-    THAT IS MONOTONE IN THE SCORE, NOT IN THE BOARD, and an earlier version of this
-    docstring claimed the stronger thing. Raising 10,452 pairs and lowering none still
-    demotes everything that did not rise, and `_rank` slices at RESULT_CAP: measured,
-    47 of 57 profiles reorder, 35 change their top-200 membership, and the worst case
-    delivers 176 of 200 different rows. The max form is safe in the sense that no
-    listing is scored lower than before — it is not a claim that the delivered board is
-    unchanged, and the harness has no relevance labels that could judge the difference.
-
-    Both surfaces are folded in HERE rather than by max()-ing two calls, so the
-    precedence rule survives untouched: a related title can never outrank a real one,
-    because every title the user actually named — on either surface — is tried before
-    any suggestion is considered. Two separate calls would each apply that rule to half
-    the evidence and then have to reconcile the flags.
-
-    `job_title_root` defaults to "" so every caller that predates the column, and the
-    234 goldens, score exactly as they did.
-    """
-    got = norm_key(job_title)  # once per candidate, not once per user title
-    root = norm_key(job_title_root)
-    if root == got:
-        root = ""  # the common case: nothing was stripped, so do not compare twice
-    if not got and not root:
-        return _TIER_NONE, False
-    surfaces = [(g, set(g.split())) for g in (got, root) if g]
-    best = max(
-        (_tier(_prepared(t), g, gw) for t in titles or [] if t for g, gw in surfaces),
-        default=0,
-    )
-    if best:
-        return best, False
-    for t in related_titles or []:
-        if t and any(_tier(_prepared(t), g, gw) for g, gw in surfaces):
-            return _TIER_RELATED, True
-    return _TIER_NONE, False

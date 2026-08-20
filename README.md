@@ -1,10 +1,12 @@
 # jobfitr
 
-**Answer four questions, get a ranked list of jobs that actually fit you — each with a link straight to apply.**
+**Talk about the work you want. Get five jobs worth applying to, and the reasoning.**
 
-jobfitr is a small, self-hostable web app. An assistant asks you four things — the job you want, where, what should rank a role higher (skills, tools), and what to keep out — then hands back fit-scored, clickable job listings — straight to the company where there is a company link, and labelled where there is not. Mark the ones you apply to and they fly to a saved rail. No account, no tracking.
+jobfitr is a small, self-hostable web app over about 65,000 live job postings, harvested nightly from employers' own hiring systems. You have a conversation with it — it asks what it needs to, not a fixed list of questions — and then it searches the pool several times, changing what it looks for based on what came back, reads the promising postings in full, and hands you **five jobs with its reasoning**, plus the ones it rejected and why. Each links straight to the employer. No account, no tracking.
 
-Each result carries its **fit as a plain integer** you can read off the card, with the signals that earned it listed underneath. Those signals add up to the number — that is a tested guarantee, not a hope. The score is **absolute**: 100 means an exact title match whether it is alone on your board or one of fifty, and it means the same thing tomorrow.
+**There is no fit score.** There used to be, and it was a careful one — a plain integer you could read off the card with the signals that earned it listed underneath. It went because a number is easier to show and harder to trust, and it cannot tell you *why*. A sentence about the work can.
+
+**Search runs free and offline. The conversation is the part that costs.** Retrieval — harvesting, indexing, and the hybrid keyword-plus-meaning search — needs no API key and no spend at all. Only the conversation calls a model, and which model is one line of config.
 
 It's the consumer front end on top of the open-source [**job-radar**](https://github.com/hawkesj12/job-radar) engine, which does the harvesting.
 
@@ -47,16 +49,14 @@ Watson, New Albany and Shepherdsville. Judge coverage by running a search, never
 
 ```
 nightly:      resolve companies → harvest → jobs.json ──▶ the SQLite/FTS5 store
-per request:  your 4 answers ──▶ fresh cache OR one live fetch ──▶ rank the store ──▶ ranked links
+per request:  what you said ──▶ fresh cache OR one live fetch ──▶ keyword + meaning search ──▶ the model reads and chooses
 nightly:      verify the unverifiable, then evict what's gone
 ```
 
-**The assistant also suggests five adjacent titles**, once your own list is final, and those join the
-search as well as the scoring. It matters more than it sounds: a job board indexes the wording a posting
-actually uses, so `"High School Teacher"` matches **0** listings while the suggested `Teacher` matches
-**225**. They score a flat **30** — below anything you named yourself, because you did not ask for them —
-and they are what stops a precisely-worded search returning nothing. They also quietly fix typos: type
-`data analist` and the assistant writes `Data Analyst`.
+**It searches under titles you did not say.** A job board indexes the wording a posting actually uses, so
+`"High School Teacher"` matches **0** listings while `Teacher` matches **225**. It works out the canonical
+wording itself, and searches more than once when the first framing comes back thin — a bad result is
+information, not an answer.
 
 Three things bound the cost, which is what makes it safe to run on free API tiers:
 
@@ -85,37 +85,29 @@ jobfitr-serve
 
 > **Hacking on the engine too?** To run against a local `job-radar` checkout instead of the PyPI release, clone it next door and install it editable first: `uv pip install -e ../job-radar`.
 
-Open **http://localhost:8000** and answer the four questions the assistant asks. The board
-appears as soon as it has enough. From there, **Refine** re-opens the assistant inline at
-the top of the board — say "drop contract roles" or "senior only" and it re-scores — or
-edit the criteria pills directly.
+Open **http://localhost:8000** and tell it what you are looking for. It will ask what it
+needs to — as many questions as that takes, not a fixed list — then search, read, and come
+back with five jobs and why. It shows what it searched for as it goes.
+
+Without an `OPENROUTER_API_KEY` the conversation is unavailable and the app says so;
+retrieval itself needs no key.
 
 > **Heads-up:** the free, no-key boards skew toward remote tech roles. A broad non-tech search stays thin until you add a free Adzuna key (see _Configure_). The app tells you this when results are sparse — it won't silently hand you an empty list.
 
-## How a job gets its score
+## How it decides
 
-Deliberately mechanical, so it can be read off the card and checked:
+Two searches run over the pool, and they find different things:
 
-```
-points = title tier + Σ boost points − penalties
-```
+- a **keyword search** over job titles — precise, and blind to a job whose title uses words you did not think of
+- a **meaning search** over what the posting actually says — it reaches `Forward Deployment Engineer` when you asked for `Forward Deployed Engineer`, which the keyword search cannot, because those are different words
 
-| Component     | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Title**     | the best single tier — **100** exact · **80** every word of your title present · **60** same role, different seniority · **30** a title the assistant suggested. Tiers never stack. Each is tried against **both** the title the employer wrote and the same title with its seniority and decoration stripped, whichever scores better: `Senior Application Security Engineer (Remote)` is an exact match for _Application Security Engineer_. |
-| **Boosts**    | **8/6/4/2** for the 1st–4th time a term appears (20 max per term), across the title and the body. Uncapped across terms.                                                                                                                                                                                                                                                                                                                       |
-| **Penalties** | **−30** when an avoid-term is in the title or the employer's name, **−15** when it is buried in the body. Strongest hit only.                                                                                                                                                                                                                                                                                                                  |
-| **Freshness** | not scored. A three-day-old wrong job is not a better fit than a month-old perfect one — recency is a filter.                                                                                                                                                                                                                                                                                                                                  |
+Their results are fused, and the measured reason both exist: on a graded set they overlapped on **one** job out of twenty-five each. Together they beat title-only search 16-10 (p = 0.031). Two thirds of the candidates would not exist under a single arm.
 
-Three properties this design guarantees, and all three are tested over every listing in the corpus:
+Then the model reads the postings — the full text, not a snippet — and picks five. Hard constraints stay hard: if you say remote only, postings that state onsite are filtered out before the search runs, not rejected afterwards.
 
-- **The number means the same thing every day.** 92 is 92 whether it's alone on the board or one of fifty, and whether you search today or next month. Only the card's _bar_ is relative — it's a fraction of the best match in front of you.
-- **Naming another skill can never lower your score.** Evidence only ever adds.
-- **The chips on the card sum to the number beside them.** A breakdown that doesn't reconcile is worse than showing none, because it invites you to trust a wrong explanation.
+**What it will not do:** name a job that does not exist. Every url it gives you is checked against the pool before you see it — a listing invented on the way to an answer is dropped, because the one failure this cannot survive is sending someone after a job that was never there.
 
-Two listings on the same score are shown in retrieval order — how well the search engine matched them — which is why a board can have a run of identical numbers in a deliberate sequence rather than an arbitrary one.
-
-Matching is **whole-word, plus a plural** — not substring. Boosting "rag" matches _RAG_, not _storage_, _leverage_, or _coverage_. Multi-word terms match as a phrase, and accept the hyphen English writes half the time ("forward deployed" finds "forward-deployed").
+Matching for your exclusions is **whole-word, plus a plural** — not substring. Excluding "intern" does not delete `Software Engineer, Internal Systems`, and excluding "sales" does not delete `Salesforce Health Cloud`.
 
 ## Configure
 
@@ -184,9 +176,8 @@ Same-origin; the front end talks to these directly.
 
 | Method & path        | Purpose                                                                                                                                                                                                                                                                        |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `POST /api/score`    | Score against a config body (`titles`, `related_titles`, `boosts`, `exclude`, `rank_down`, `location`, `remote_only`, `max_age_days`). Returns up to `JOBFITR_RESULT_CAP` (default 200) ranked jobs plus facet counts, gzipped.                                                |
-| `POST /api/chat`     | One conversational turn: `{messages, config, refining}` → `{reply, config, ready, chips, hint, restart}` (structured output). The only thing that reaches scoring is the config it fills. `refining` switches from the intake interview to editing a search already on screen. |
-| `POST /api/prefetch` | Warms the cache once titles + location are known, so the board is ready by the last answer. Also returns `candidates` — how many listings the search will have to rank — so the wait can say what it is doing instead of spinning.                                             |
+| `POST /api/candidates` | Retrieval, and **no key required**. Body: `titles`, `probes` (sentences describing the work), `location`, `remote_only`, `max_age_days`, `k`. Pre-filters, runs the keyword and meaning searches, fuses them, and returns candidates with enough body text to judge from. This is the free, deterministic half of the product. |
+| `POST /api/chat`       | The conversation. `{messages}` → `{reply, picks, rejected, trace, nothing_fits}`. The model runs its own search loop server-side; `trace` is what it searched and why. The **only** metered path — needs `OPENROUTER_API_KEY`, fails closed with a 503 when absent or over the daily ceiling. |
 | `GET /api/meta`      | `count` (pool size), `harvested_at`, and the `code_sha` this process is running.                                                                                                                                                                                               |
 | `GET /api/health`    | Which feeds are live, the daily fetch budget used, pool size vs. the snapshot it should be serving, and when that snapshot was last ingested.                                                                                                                                  |
 
@@ -197,10 +188,10 @@ analytics script, and nothing that follows a person between visits or between se
 
 A self-hosted instance can optionally keep a **search-quality log** — set
 `JOBFITR_SEARCH_LOG` to a file path, and each search appends one JSON line: the query
-shape (titles, boosts, exclusions, location), how the funnel went (candidates retrieved,
-jobs delivered, latency), the top ten results with their scores, and — when it happened —
-which part of the request the app had to override to answer it at all. It exists because
-every ranking number in this repo is measured against synthetic, author-written profiles,
+shape (titles, exclusions, location), how the funnel went (candidates retrieved, jobs
+delivered, latency), the top ten results, and — when it happened — which part of the
+request the app had to override to answer it at all. It exists because
+every retrieval number in this repo is measured against synthetic, author-written profiles,
 which cannot tell you whether a _real_ search returned something a real person wanted.
 
 What that log deliberately does not contain: no IP address, no user agent, no referer,
@@ -219,17 +210,20 @@ python scripts/review_searches.py /path/to/searches.jsonl --days 7
 
 ```
 jobfitr/
-  server.py           FastAPI: /api/chat + /api/score + /api/meta + /api/health; the scoreboard; serves web/
+  server.py           FastAPI: /api/chat + /api/candidates + /api/meta + /api/health; serves web/
   store.py            SQLite + FTS5 — the job pool, BM25 retrieval, eviction, the company→ATS
                       ledger. ONE store, shared by both deploy slots, named jobs-v<schema>.db
   searchlog.py        optional append-only record of searches + what they returned (off unless configured)
-  match.py            term matching (whole-word + plural) and the title tiers
+  match.py            term matching (whole-word + plural) — what your exclusions are filtered with
   live.py             the per-search live fetch, single-flighted
   snapshot.py         the baseline harvest → atomic jobs.json; the cached reader
   resolve.py          company → ATS board discovery, with a negative cache and an audit path
   universe.py         reads deploy/board-universe.json — the set of ATS boards known to exist
-  chat.py             the structured-turn assistant behind /api/chat
-  config_builder.py   the posted answers → a job_radar Config (the per-user lens)
+  chat.py             THE conversation: interviews, searches repeatedly, reads, delivers five
+  semantic.py         the meaning-search arm (Model2Vec vectors) and the fusion with keyword search
+  vectors.py          builds the vector store; incremental, keyed by a hash of the embedded text
+  prompts/            every system prompt, as .md — nothing is inlined in Python
+  config_builder.py   the posted answers → a job_radar Config (the FILTER half: what you may receive)
 web/
   index.html          the chat front door + the results board + applied rail
   chat.js             the four-question assistant (one structured turn per message)
@@ -239,10 +233,9 @@ web/
 scripts/
   mine_universe.py    regenerate deploy/board-universe.json from Common Crawl (run OFF-box)
   rebuild_store.py    back up, rebuild on the current schema, report per-column fill
-tests/                the store, the chat, the web API, the front-end facet logic, and 234
-                      golden cases whose expected score was computed by hand from the spec —
-                      not from the code
-bakeoff/              the model bake-off: which LLM should run the chat, and how we know
+tests/                the store, the conversation, the web API, and term matching. The 234
+                      hand-computed scoring goldens went with the scoreboard in Aug 2026
+bakeoff/              the model bake-off: which LLM should run the conversation, and how we know
 deploy/               systemd units, Caddyfile, bootstrap.sh, and the blue-green slots
 web-harvest.example.yaml   the wide-harvest config
 ```

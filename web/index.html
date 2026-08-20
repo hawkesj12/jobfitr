@@ -6,7 +6,7 @@
     <title>jobfitr — jobs that actually fit you</title>
     <meta
       name="description"
-      content="Tell jobfitr what you're after and get a ranked list of jobs that fit you, with the employer's own link where there is one."
+      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
     />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230e1424'/><text x='50' y='70' font-size='56' font-family='Helvetica,Arial,sans-serif' font-weight='700' letter-spacing='-3' text-anchor='middle' fill='%23e6b985'>jf</text></svg>" />
 
@@ -16,18 +16,18 @@
     <meta property="og:title" content="jobfitr — jobs that actually fit you" />
     <meta
       property="og:description"
-      content="Tell jobfitr what you're after and get a ranked list of jobs that fit you, with the employer's own link where there is one."
+      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
     />
     <meta property="og:url" content="https://jobfitr.app/" />
     <meta property="og:image" content="https://jobfitr.app/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="jobfitr — ranked job cards scored by how well they fit you" />
+    <meta property="og:image:alt" content="jobfitr — a conversation that finds you five jobs worth applying to" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="jobfitr — jobs that actually fit you" />
     <meta
       name="twitter:description"
-      content="Tell jobfitr what you're after and get a ranked list of jobs that fit you, with the employer's own link where there is one."
+      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
     <link rel="stylesheet" href="style.css?v=75" />
@@ -80,9 +80,9 @@
           <div class="hero" id="hero">
             <h1 class="hero-prop">Jobs that <em>actually fit you</em>.</h1>
             <p class="hero-sub">
-              Answer four questions. jobfitr ranks every open role against them and sends
-              you to the employer's own posting wherever there is one — and says so on the
-              card when there isn't. No account, no tracking, no fee.
+              Tell it about the work you want. It asks what it needs to, searches sixty
+              thousand live postings, reads the ones worth reading, and comes back with
+              five jobs and why — linked to the employer. No account, no tracking, no fee.
             </p>
             <p class="proof" id="proof"></p>
           </div>
@@ -140,10 +140,13 @@
             <section id="how">
               <h2>How it works</h2>
               <p>
-                You answer four questions in the box above. jobfitr scores every role in its
-                pool against your answers — title match first, then the skills you said matter,
-                minus anything you asked to avoid — and shows the best fits in order. Fit is
-                relative to your own best match, not an absolute grade.
+                You have a conversation. It asks about the work you want, where you can do
+                it from, what you are good at and what you would turn down — as many
+                questions as that takes, not a fixed list. Then it searches, more than once,
+                changing what it looks for based on what comes back; reads the postings in
+                full; and gives you five with its reasoning, plus the ones it rejected and
+                why. There is no fit score. A number would be easier to show and harder to
+                trust, and it could not tell you <em>why</em>.
               </p>
             </section>
             <section id="sources">
@@ -154,156 +157,15 @@
                 Adzuna. Most results link straight to the employer's posting. The rest —
                 mainly local roles that reach jobfitr only through Adzuna — pass through that
                 site first, and every card says which it is before you click. jobfitr takes no
-                fee either way, and no employer can pay to rank higher.
+                fee either way, and no employer can pay for a better answer.
               </p>
             </section>
           </div>
         </div>
 
-      <!-- ── results: the board ───────────────────────────────────────────────── -->
-      <section id="results-view" class="results-view" hidden>
-        <!-- The criteria bar and the toolbar stick as ONE group: the criteria pills
-             wrap to a second line on narrow screens, so a hardcoded sticky offset for
-             the toolbar underneath would collide with them. -->
-        <div class="boardbar">
-        <!-- THE HANDOFF: the answered questions, collapsed into editable pills -->
-        <div class="criteria" id="criteria" hidden></div>
 
-        <div class="toolbar" id="toolbar">
-          <button type="button" class="tb-btn" id="filters-toggle" aria-expanded="false">
-            <span aria-hidden="true">☰</span> Filters
-          </button>
-          <label class="tb-sort">
-            <span class="sr-only">Sort</span>
-            <select id="sort" aria-label="Sort results">
-              <option value="fit">Best fit</option>
-              <option value="new">Newest</option>
-              <option value="salary">Highest salary</option>
-            </select>
-          </label>
-          <label class="tb-salary">
-            <span class="tb-salary-val" id="f-salary-val">$ any</span>
-            <input type="range" id="f-salary" min="0" max="200000" step="10000" value="0" aria-label="Minimum salary" />
-          </label>
-          <span class="spacer"></span>
-          <span class="result-summary" id="result-summary" aria-live="polite"></span>
-
-        </div>
-        </div>
-
-        <p class="notice" id="notice" hidden></p>
-        <div class="carousel" id="carousel"></div>
-
-        <!-- THE FOLD. The list's scrollbar is hidden, so the board has to say for
-             itself that it continues: the last card dissolves into the sky rather
-             than being guillotined by the window edge. Purely decorative — it fades
-             out the moment you reach the end. -->
-        <div class="fold" id="fold" aria-hidden="true"></div>
-
-        <div class="state glass" id="loading" hidden>
-          <span class="spinner" aria-hidden="true"></span> <span id="loading-text">Scoring the latest jobs…</span>
-        </div>
-        <div class="state glass" id="empty" hidden>
-          <p><strong>Nothing landed.</strong></p>
-          <p class="muted">Head back up to the chat and widen it — a broader title, or drop a filter.</p>
-        </div>
-        <div class="state glass state-error" id="error" hidden>
-          <p><strong>Couldn't reach the job service.</strong></p>
-          <p class="muted">The server may be starting up. Give it a moment and try again.</p>
-        </div>
-      </section>
-
-      <!-- ── the search form: the no-AI fallback ──────────────────────────────── -->
-      <section id="form-view" class="form-view" hidden aria-label="Search form">
-        <form id="search-form" class="search-form glass" novalidate>
-          <div class="form-head">
-            <h2>Set up your search</h2>
-            <p class="form-sub">Only the first line is needed — fill in the rest to sharpen the match.</p>
-          </div>
-
-          <div class="field">
-            <label for="q-titles">The job you want</label>
-            <small class="hint">Titles or the kind of work. Comma-separate a few.</small>
-            <input type="text" id="q-titles" name="titles" autocomplete="off" placeholder="product manager, program manager" />
-          </div>
-
-          <div class="field">
-            <label for="q-boosts">What should rank a job higher</label>
-            <small class="hint">Skills, tools, industry — add a city to float nearby roles up.</small>
-            <input type="text" id="q-boosts" name="boosts" autocomplete="off" placeholder="SaaS, roadmapping, Denver" />
-          </div>
-
-          <fieldset class="field field-split">
-            <legend>What to push down or hide</legend>
-            <div class="split">
-              <div>
-                <label for="q-exclude" class="sub">Hide entirely</label>
-                <input type="text" id="q-exclude" name="exclude" autocomplete="off" placeholder="intern, junior, contract" />
-              </div>
-              <div>
-                <label for="q-rankdown" class="sub">Just rank down</label>
-                <input type="text" id="q-rankdown" name="rank_down" autocomplete="off" placeholder="staffing, agency" />
-              </div>
-            </div>
-          </fieldset>
-
-          <fieldset class="field field-split">
-            <legend>Location &amp; freshness</legend>
-            <div class="split">
-              <div>
-                <label for="q-location" class="sub">Where</label>
-                <input type="text" id="q-location" name="location" autocomplete="off" placeholder="remote, anywhere, or a city" />
-              </div>
-              <div>
-                <label for="q-maxage" class="sub">Newer than</label>
-                <div class="with-suffix">
-                  <input type="number" id="q-maxage" name="max_age_days" min="1" max="365" placeholder="60" />
-                  <span class="suffix">days</span>
-                </div>
-              </div>
-            </div>
-          </fieldset>
-
-          <div class="field">
-            <span class="label" id="picky-label">How picky?</span>
-            <div class="segmented" role="radiogroup" aria-labelledby="picky-label">
-              <input type="radio" name="min_score" id="picky-plenty" value="plenty" />
-              <label for="picky-plenty">Show me plenty</label>
-              <input type="radio" name="min_score" id="picky-balanced" value="balanced" checked />
-              <label for="picky-balanced">Balanced</label>
-              <input type="radio" name="min_score" id="picky-strong" value="strong" />
-              <label for="picky-strong">Only the strong ones</label>
-            </div>
-          </div>
-
-          <div class="form-actions">
-            <button type="submit" class="btn btn-primary" id="submit-btn">Find my jobs</button>
-            <button type="button" class="btn btn-ghost" id="to-chat">← back to the assistant</button>
-          </div>
-        </form>
-      </section>
     </main>
 
-    <!-- ── the filter drawer (left edge) ────────────────────────────────────── -->
-    <aside class="drawer" id="filters" aria-label="Filters" hidden>
-      <div class="drawer-body glass">
-        <h2 class="drawer-head">Filters</h2>
-        <div class="fgroup">
-          <label class="flab" for="f-fit">Minimum score <span class="val" id="f-fit-val">any</span></label>
-          <!-- Four stops, not a 0-100 range. The score is absolute and clusters on the
-               title tiers, so each stop is a real statement about the match rather than
-               a slice of a gradient. "Show me only exact title matches" is a thing a
-               person wants; "show me 55%+" never was. -->
-          <input type="range" id="f-fit" min="0" max="3" step="1" value="0" />
-        </div>
-        <div class="facets" id="f-facets"></div>
-        <div class="fgroup">
-          <label class="fcheck"><input type="checkbox" id="f-agency" /> Hide staffing / agency</label>
-          <label class="fcheck"><input type="checkbox" id="f-seen" /> Hide roles I've seen</label>
-        </div>
-        <p class="fcount" id="f-count"></p>
-      </div>
-    </aside>
 
     <!-- ── the applied rail (right edge, persists in localStorage) ──────────── -->
     <!-- ── the gauge-card template ──────────────────────────────────────────── -->
@@ -338,9 +200,6 @@
     </template>
 
     <script src="atmosphere.js?v=51"></script>
-    <!-- app.js (the /api/score board) is NOT loaded: the agent renders its five picks in
-         the conversation. Kept in the tree until the agent flow has run live for a while;
-         delete it and #results-view together, not one at a time. -->
     <script src="chat.js?v=66"></script>
   </body>
 </html>

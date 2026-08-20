@@ -71,7 +71,7 @@ answers.
 | **Hybrid fusion** (`semantic.hybrid`) | **LIVE** | RRF k=60, per-company cap, pre-filter before both arms. |
 | **`/api/candidates`** | **LIVE** | the AI path's retrieval. Nothing user-facing calls it yet. |
 | **Nightly re-embed** | **NONE** | **A real gap.** New rows from each harvest have no vector until someone runs `jobfitr-vectors` by hand. No timer exists. |
-| **The scoreboard** (`server.scoreboard`, `_rank`) | **DECIDE** | 100/80/60/30 tier ladder + boost decay. Still serves `/api/score`; **the product no longer has a score**. See "The scoreboard question" below. |
+| ~~The scoreboard~~ | **DELETED** | 2026-08-20. ~3,000 lines: `scoreboard`/`_rank`/`_shape`/`score_jobs`, `match.py`'s tier ladder, `config_builder`'s ranking half, the 234 goldens, `web/app.js` and the board UI. The product has no score; a second answer to "how does jobfitr decide what is good" was what made the codebase hard to read. |
 | **Nightly re-embed** | **NONE** | listed twice on purpose — it is the gap most likely to be forgotten, because nothing reports it. |
 
 ## 4. The conversation
@@ -91,9 +91,9 @@ answers.
 
 | part | status | notes |
 | --- | --- | --- |
-| **Door / hero** (`index.html`) | **STALE** | title, meta description and og:image still sell "ranks every open role" and a fit score that no longer exists. Still contains the four-question config form. |
+| **Door / hero** (`index.html`) | **BUILT** | rewritten 2026-08-20: no score claims, no four-question form, no board. 346 → 205 lines. Not deployed. |
 | **Chat UI** (`chat.js`) | **BUILT** | rewritten for the agent: renders the reply, the picks as cards, and what it searched. Not deployed. |
-| **Results board** (`app.js`) | **STALE** | 52 KB for 200 scored rows with facets and gauges. No longer loaded. Delete with `#results-view`. |
+| ~~Results board~~ | **DELETED** | 2026-08-20, with `#results-view`, the filter drawer and the four-question fallback form. |
 | **Atmosphere** (`atmosphere.js`) | **LIVE** | time-of-day sky behind glass. The product's identity; keep. |
 | **Rejections** | **NONE** | `/api/agent` returns them, nothing renders them, and the prompt says they matter as much as the five. Cheapest real win available. |
 | **Live worklog (SSE)** | **PLANNED** | `turn()` already collects the trace per tool call and holds it to the end. ~40 lines of client JS. |
@@ -103,10 +103,10 @@ answers.
 
 | endpoint | status | notes |
 | --- | --- | --- |
-| `POST /api/score` | **LIVE** | the free deterministic floor. No API key. A README promise — do not break it. |
+| ~~`POST /api/score`~~ | **DELETED** | 2026-08-20. The *promise* moved rather than died: `/api/candidates` is free, keyless, deterministic — and better retrieval. It just does not print a fit number. |
 | `POST /api/candidates` | **LIVE** | hybrid retrieval for an AI consumer. Wider, no scoring, longer bodies. |
 | `POST /api/chat` | **BUILT** | the tool loop. Metered. Took the name the old config turn had. |
-| `POST /api/prefetch` | **LIVE** | warms the live-fetch cache so a search feels instant. |
+| ~~`POST /api/prefetch`~~ | **DELETED** | 2026-08-20. It warmed the board's cache during the four-question interview. `/api/candidates` warms it inline. |
 | `GET /api/health`, `/api/meta` | **LIVE** | `pool_size` vs `snapshot_count` is the regression that matters. |
 
 ## 7. Deploy and operations
@@ -134,7 +134,7 @@ answers.
 | part | status | notes |
 | --- | --- | --- |
 | **Test suite** | **LIVE** | 637 passing, ~11 s. `pytest -m slow` for the full-corpus sweep. `ruff` is separate — a green pytest says nothing about lint. |
-| **Scoreboard goldens** | **STALE** | 234 hand-computed goldens for a scoreboard the product no longer uses. |
+| ~~Scoreboard goldens~~ | **DELETED** | 2026-08-20, with the scoreboard they graded. |
 | **57 synthetic profiles** | **PARTIAL** | exist, never graded against the current corpus. Grading them is what turns n=1 into n=57. |
 | **Graded bed** | **PARTIAL** | 400 live postings judged 0-3. **Measures reranking, not retrieval** — a bag-of-words query reaches 94% of it. |
 | **Model bakeoff** | **PLANNED** | protocol pre-registered and gate-passed at `_private/retrieval/bakeoff/`. Never run. |
@@ -144,7 +144,7 @@ answers.
 
 | part | status | notes |
 | --- | --- | --- |
-| `README.md` | **STALE** | describes the scored-board product. |
+| `README.md` | **BUILT** | rewritten 2026-08-20 — "search runs free and offline; the conversation is the part that costs". Not published until the deploy. |
 | `CLAUDE.md` | **PARTIAL** | updated for the semantic arm and prompts; still describes the scoreboard as the product. Gitignored. |
 | `HANDOFF.md` | **LIVE** | current as of 2026-08-19 21:58 ET. Gitignored, imported by `CLAUDE.md`. |
 | `deploy/README.md` | **PARTIAL** | predates the `semantic` extra and the vector store. |
@@ -152,7 +152,7 @@ answers.
 
 ---
 
-## The scoreboard question — the one open decision
+## The scoreboard — DECIDED and cut, 2026-08-20
 
 `/api/score` is the last thing standing on the old design, and **nothing user-facing calls
 it**. Keeping or cutting it decides roughly **3,000 lines**:
@@ -176,9 +176,17 @@ deleted from the product.
 Two functions must survive whatever happens: `match.has_term` and `match.norm_key`.
 `_eligible` filters exclusions with `has_term` and runs on `/api/candidates` too.
 
-**The test that decides it:** would you point a self-hoster at the no-key path and expect
-them to use it as a product? If yes, the board UI earns its place. If the honest answer is
-"nobody runs jobfitr without a key", it is 3,000 lines maintaining a promise nobody collects.
+**Decided: cut.** The promise and the endpoint were separable, and only the endpoint went.
+
+Two things the cut surfaced that reading the code had not:
+- `job_radar.scoring.relevant()` is **never called by jobfitr** — only by a test. So
+  `config_builder`'s 211 lines were building a whole `Config` for three call sites reading
+  two fields. It is now `filters_from_dict` → a `Filters` object, 123 lines.
+- Removing the `title_signal` seeding broke a real test: without it a non-tech user
+  inherited job-radar's default AI/ML signal list and "General Accountant" became
+  irrelevant. The intent is now structural — exclusions start from the user's own list and
+  nothing can be inherited — and the test asserts that directly instead of asserting a
+  dependency's function through an object we no longer build.
 
 *(Not a reason either way, but worth saying: the scoreboard is careful work — 234 goldens
 computed by hand, `parts` summing to `points`, "evidence only ever adds". The principle
