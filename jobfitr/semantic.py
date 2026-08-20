@@ -65,7 +65,14 @@ log = logging.getLogger("jobfitr.semantic")
 # jobs on the graded set (9 vs 11) — a bigger effect than most differences between models.
 # The wrong prefix is as damaging as no prefix; it is a per-model fact, not a default.
 QUERY_PREFIX = ""
-MODEL = os.environ.get("JOBFITR_EMBED_MODEL", "minishlab/potion-retrieval-32M")
+# THE model contract, and this module owns it — jobfitr/vectors.py imports these rather
+# than restating them. Model2Vec is only `encode(texts) -> vectors`; the storage, the
+# incrementality, the KNN, the fusion and the degrade path are all here and in vectors.py.
+# Named EMBED_MODEL, not EMBED_MODEL, because "model" means two different things in this repo and
+# reading them side by side is genuinely confusing: this is the EMBEDDER (exactly one, a
+# static lookup table, no API, no key, no cost), while chat.MODELS is a bench of 13 LLM
+# candidates with one active. They have nothing to do with each other.
+EMBED_MODEL = os.environ.get("JOBFITR_EMBED_MODEL", "minishlab/potion-retrieval-32M")
 DIMS = 512
 VECTORS_PATH = os.environ.get("JOBFITR_VECTORS", "vectors-v1.db")
 
@@ -99,12 +106,12 @@ def _model():
         from model2vec import StaticModel
 
         stored = _stored_model()
-        if stored and stored != MODEL:
+        if stored and stored != EMBED_MODEL:
             # A store embedded with one model and queried with another returns plausible
             # nonsense rather than an error, which is the worst failure shape available.
             _LOAD_FAILED = True
-            raise RuntimeError(f"vector store built with {stored!r}, query model is {MODEL!r}")
-        _MODEL = StaticModel.from_pretrained(MODEL)
+            raise RuntimeError(f"vector store built with {stored!r}, query model is {EMBED_MODEL!r}")
+        _MODEL = StaticModel.from_pretrained(EMBED_MODEL)
     return _MODEL
 
 

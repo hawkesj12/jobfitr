@@ -17,7 +17,16 @@ One summary vector per job is what survived: title, company, location, and the f
 characters, which is where a posting describes the role before it turns into benefits
 boilerplate.
 
-MODEL: minishlab/potion-retrieval-32M, a Model2Vec STATIC EMBEDDER. There is no neural
+THE EMBEDDER — and there is exactly ONE. `minishlab/potion-retrieval-32M`, a Model2Vec
+static model. Every other model named below (bge, jina, arctic, MiniLM, fastembed) appears
+in this file ONLY as the record of what it was measured against on 2026-08-19. None of them
+runs. None is installed. If you are looking for a second embedding path, there isn't one.
+
+(Do not confuse this with `chat.MODELS`, which is a bench of 13 LLM candidates for the
+conversation with one active. Different thing entirely: that one is metered and needs a key,
+this one is a lookup table that costs nothing.)
+
+potion-retrieval-32M is a STATIC EMBEDDER. There is no neural
 forward pass at all — the vectors for every vocabulary token were distilled once, offline,
 from a real sentence-transformer; encoding is a table lookup plus a weighted mean. Measured
 2026-08-19 on the 363-row graded set: 11 of 36 top-rated jobs in the top 25 against
@@ -56,12 +65,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DIMS = 512
-MODEL = os.environ.get("JOBFITR_EMBED_MODEL", "minishlab/potion-retrieval-32M")
-SUMMARY_CHARS = 1800   # ~512 tokens: the most bge/arctic/bge-base can read in one pass.
-# NOT 300. Measured 2026-08-19: a posting's opening is not reliably the job — one real example
-# spends its first 550 characters on an "Application and Interview Impersonation Notice" before
-# naming the role. A 300-char summary embeds the legal notice.
+# ONE OWNER for the model contract. These used to be declared here AND in semantic.py,
+# which is a silent-failure waiting to happen: documents embedded by one model and queried
+# by another return plausible nonsense, not an error. The stored model is still stamped
+# into the vector file and checked at query time, but two constants that must agree should
+# not be two constants.
+from .semantic import DIMS, EMBED_MODEL  # noqa: E402
+# HOW MUCH OF A POSTING BECOMES ITS VECTOR — and this number is now INHERITED, not justified.
+#
+# It was 1,800 because that is ~512 tokens, the most bge/arctic/bge-base could read in one
+# pass. Model2Vec has no such limit: it averages token vectors, so length is unbounded
+# (verified — cos between 2x and 60x repetitions of the same sentence is 0.9999). We are
+# truncating for a constraint that no longer exists.
+#
+# What length is RIGHT is therefore an open question, and it is a different question from
+# the old one. Not "what fits" but "how much text before the average blurs" — more body
+# means the role gets averaged with benefits and boilerplate. Worth re-measuring against
+# the graded bed before trusting 1,800.
+#
+# What IS settled: not 300. A posting's opening is not reliably the job — one real example
+# spends its first 550 characters on an "Application and Interview Impersonation Notice"
+# before naming the role, so a 300-char summary embeds the legal notice.
+SUMMARY_CHARS = 1800
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS vectors (
@@ -143,13 +168,13 @@ def open_vectors(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript(SCHEMA)
     stored = con.execute("SELECT value FROM meta WHERE key='model'").fetchone()
-    if stored and stored[0] != MODEL:
+    if stored and stored[0] != EMBED_MODEL:
         raise SystemExit(
-            f"vector store was built with {stored[0]!r}, now asked for {MODEL!r}.\n"
+            f"vector store was built with {stored[0]!r}, now asked for {EMBED_MODEL!r}.\n"
             "Documents and queries MUST share a model — a mixed store returns nonsense "
             "rather than an error. Delete the file and rebuild, or set JOBFITR_EMBED_MODEL back."
         )
-    con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('model',?)", (MODEL,))
+    con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('model',?)", (EMBED_MODEL,))
     con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('dims',?)", (str(DIMS),))
     con.commit()
     return con
@@ -216,7 +241,7 @@ def main(argv=None) -> int:
     import numpy as np
     from model2vec import StaticModel
 
-    model = StaticModel.from_pretrained(MODEL)
+    model = StaticModel.from_pretrained(EMBED_MODEL)
     t0 = time.perf_counter()
     done = 0
     for i in range(0, len(stale), 500):
