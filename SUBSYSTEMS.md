@@ -126,7 +126,7 @@ answers.
 | --- | --- | --- |
 | **Search log** (`searchlog.py`) | **LIVE** | one JSONL line per search, no identifiers of any kind — asserted by a test that reads the function signature. |
 | **Digest** (`review_searches.py`) | **BUILT** | run by hand. |
-| **Agent observability** | **NONE** | the agent's searches, reads and picks are not logged anywhere. `searchlog.record` has no notion of them. **The real-user signal for the new product does not exist.** |
+| **Agent observability** | **BUILT** | `searchlog.record_search` (one line per `search_jobs`) + `record_delivery` (one per conversation, at BOTH exits of `turn()` incl. budget-exhausted). Shape only — counts, no identifier, no free text — and the privacy constraint made it a better instrument: `in_place` vs `returned` catches an unapplied location filter, `returned` vs `matched` catches a filter skipping an arm, `fetched` catches a dead live lane. All three were real bugs found by hand on 2026-08-20. `fabricated` and measured `usage` are also on the HTTP response, so a harness can score them. **Still off unless `JOBFITR_SEARCH_LOG` is set, and not yet enabled on the box.** |
 | **Application logging** | **PARTIAL** | handler at WARNING, `jobfitr` tree at INFO. Nothing ships logs off the box. |
 
 ## 9. Evaluation

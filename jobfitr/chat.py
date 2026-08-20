@@ -305,6 +305,10 @@ def _shallow(c: dict) -> dict:
         "title": c.get("title", ""),
         "company": c.get("company", ""),
         "location": c.get("location", ""),
+        # `state` is what `_in_place` actually decides on, and it was missing here — so a
+        # harness grading these picks could not reproduce the predicate it was grading,
+        # and had to fall back to substring-matching the city. Two characters per row.
+        "state": c.get("state") or "",
         "remote": c.get("remote") or "",
         "salary": c.get("salary", ""),
         "salary_min": store.annual_salary(c),
@@ -313,7 +317,29 @@ def _shallow(c: dict) -> dict:
     }
 
 
+# A frozen pool for measurement. Set during a bakeoff, never in production.
+#
+# WHY A FLAG AND NOT A PER-CELL DB CLONE: the live lane MUTATES the shared pool — an
+# identical persona-B search measured 22 rows cold and 30 rows on a repeat, a 36% larger
+# candidate set from nothing but running second. Under a live pool "search more" strictly
+# dominates "search better", because every extra search both fetches rows and warms the
+# pool for whoever runs next. Cloning the DB isolates the effect; freezing removes it, and
+# is testable from outside rather than implicit in a filename.
+#
+# The model cannot tell: `_warm_cache` returns None both when it fetched and when the
+# cache was already fresh, so a pre-warmed frozen pool shows the lane's OUTPUT with none
+# of its latency and no free-riding. It is also the only affordable design — Google for
+# Jobs bills one metered SerpApi search per title per page, so 14 models x 2 personas x
+# ~5 searches x ~3 titles is ~420 searches against a MEASURED remaining budget of 88
+# (2026-08-20). A live run would run dry around the fourth model and every later cell
+# would silently lose the lane that carries local non-tech employers — reproducing the
+# very bug this bakeoff exists to re-measure, invisibly, in its own second half.
+FREEZE_POOL = os.environ.get("JOBFITR_FREEZE_POOL") == "1"
+
+
 def _warm_live(titles: list[str], location: str) -> str | None:
+    if FREEZE_POOL:
+        return None
     """One bounded live fetch for this (titles, location), or the fresh cache untouched.
 
     Deliberately imported lazily from the server: the fetch policy, the daily ceiling and
@@ -637,6 +663,7 @@ async def turn(messages: list, model: str | None = None) -> dict:
     nothing_fits = False
     nudged = False
     fabricated = 0
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
     t0 = time.perf_counter()
 
     def _log_delivery() -> None:
@@ -662,6 +689,14 @@ async def turn(messages: list, model: str | None = None) -> dict:
             "model": model_id,
             "messages": convo, "tools": TOOLS, "tool_choice": "auto",
         })
+        # OpenRouter returns per-request usage and it was being thrown away, so the only
+        # cost figures in this repo were MODELLED (chat.MODELS' session_usd) rather than
+        # measured — and the bench's price tiers are, per HANDOFF, actively misleading.
+        # A conversation is many requests; the caller wants the total for the whole loop.
+        u = data.get("usage") or {}
+        usage["prompt_tokens"] += u.get("prompt_tokens") or 0
+        usage["completion_tokens"] += u.get("completion_tokens") or 0
+        usage["cost"] += float(u.get("cost") or 0.0)
         msg = data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
@@ -685,7 +720,12 @@ async def turn(messages: list, model: str | None = None) -> dict:
                 _log_delivery()
             return {"reply": msg.get("content") or "", "trace": trace,
                     "tool_calls": calls, "model": data.get("model"),
-                    "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits}
+                    "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits,
+                    # `fabricated` is in the RESPONSE, not only in searchlog, because
+                    # searchlog is off unless JOBFITR_SEARCH_LOG is set — so a harness
+                    # grading these conversations was structurally blind to the one
+                    # failure the product cannot survive.
+                    "fabricated": fabricated, "usage": usage}
         convo.append(msg)
         for tc in tool_calls:
             calls += 1
@@ -711,4 +751,5 @@ async def turn(messages: list, model: str | None = None) -> dict:
                           "content": json.dumps(result)[:120000]})
     _log_delivery()
     return {"reply": "", "trace": trace, "tool_calls": calls,
-            "error": "tool_budget_exhausted"}
+            "error": "tool_budget_exhausted",
+            "fabricated": fabricated, "usage": usage}
