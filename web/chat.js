@@ -43,8 +43,27 @@
     String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+  // Markdown links out, bold markers out. The model is TOLD not to list the picks again
+  // (chat_system.md) and it does it anyway — verified in a browser on 2026-08-20 with the
+  // rule present in the 19,970-character prompt it was sent. That is the prompt-tuning
+  // ceiling this repo has already hit four times, so this is the structural answer rather
+  // than a fifth attempt at wording: a hundred-character tracking url inside a sentence is
+  // unreadable no matter why it got there, and every one of those jobs is already a
+  // clickable card directly above. Nothing is lost, an unreadable duplicate is.
+  function plainReply(text) {
+    return (text || "")
+      .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, "$1")  // [Title](url) -> Title
+      .replace(/\*\*([^*]+)\*\*/g, "$1")                  // **bold** -> bold
+      .replace(/(^|\s)https?:\/\/\S+/g, "$1")             // any bare url left over
+      .replace(/^#{1,6}\s+/gm, "")                        // ### Heading -> Heading
+      .replace(/\s#{1,6}\s+/g, " ")                       // ...and mid-line, since the
+                                                          // reply arrives as one block
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+  }
+
   function typeInto(text) {
-    if (sayEl) sayEl.textContent = text || "";
+    if (sayEl) sayEl.textContent = plainReply(text);
   }
 
   function enterConversation() {

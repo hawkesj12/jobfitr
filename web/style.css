@@ -858,3 +858,25 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
   to   { opacity: 1; transform: none; }
 }
 @media (prefers-reduced-motion: reduce) { .echo-act li { animation: none; } }
+
+/* ── long text must never widen the page ──────────────────────────────────
+   A model reply that named its picks in prose carried hundred-character
+   tracking urls, and an unbroken url is one long "word": it set the width of
+   the whole document and the body scrolled sideways. Seen 2026-08-20 in a
+   browser, invisible to every test. The prompt no longer asks for that prose,
+   but the layout must not DEPEND on the model behaving — this is the backstop. */
+.chat-say, .echo-q, .echo-a, .pick-why, .pick-caveat {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+/* The question/answer echo had no rules at all — unstyled since 373afcc, which is
+   why the two read as one undifferentiated block of text on screen. */
+.echo-q { opacity: .55; margin: .5rem 0 .1rem; }
+.echo-a { opacity: .85; margin: 0 0 .3rem; }
+
+/* Cap the reply's line length once the board is showing, where the container is wider
+   than the card column and a long answer visibly stepped outside the layout.
+   NOT auto margins: `.sayrow` is a flex row, so auto margins CENTRE the text and the
+   opening question stops being left-aligned with the input under it. Caught in a browser
+   after introducing it — the kind of thing only looking at the page shows. */
+body.board .chat-say { max-width: 62ch; }

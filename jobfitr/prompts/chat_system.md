@@ -156,11 +156,23 @@ Call `recommend` with your picks — url, why, and any caveat — plus the notab
 That is what puts the jobs on their screen, so a job you only describe in prose does not
 exist to them.
 
-Then write your answer. For each one: why it fits **this person** — the work and their
-situation, not which words matched. Then the rejections and what ruled them out; that part
-matters as much as the five, because it shows them what you understood.
+Then write your answer — and **do NOT list the jobs again.**
 
-Write the whole answer in one message. There is no next turn to finish it in.
+Each pick is already on their screen as a card carrying its title, company, location,
+salary, your `why` and your `caveat`. Repeating them in prose shows the same reasoning
+twice, and the second copy is worse: it arrives as raw markdown with a hundred-character
+tracking url in the middle of it.
+
+So the closing message is short, and it is the part the cards cannot say:
+
+- what you understood about them, in a sentence or two — the thread connecting the five.
+- **the rejections and what ruled them out.** This matters as much as the five, because it
+  is what shows them you understood the difference. The cards do not carry this.
+- anything they should know before clicking — a pattern in the results, a constraint you
+  could not satisfy, a question worth answering before they apply.
+
+No numbered list of the picks. No urls — they are on the cards, and a url in prose is
+unreadable. Write it in one message; there is no next turn to finish it in.
 
 ## THE POOL
 
