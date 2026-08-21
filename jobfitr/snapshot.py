@@ -73,6 +73,14 @@ def _clean_row(r: dict) -> dict:
         # len(text)" -- discriminates nothing: 97.3% of ALL rows are already like
         # that.)
         #
+        # RESIDUAL, named rather than coded around: of the 12,714 spans this clamps,
+        # 528 are left under 40 characters and 54 under 5. For those the justification
+        # above does not hold -- a 1-character `eeo_legal` section is the same shape as
+        # the genuine-empty state this fix exists to abolish. It is 4.2% of the clamped
+        # set. A minimum-length threshold is deliberately NOT added: the number would be
+        # a magic one with no measurement behind it, and dropping them re-creates the
+        # ambiguity the clamp removes.
+        #
         # An entry with NO start/end keys is left untouched. That state means "the
         # engine could not locate this section", 4,667 spans across 3,098 rows, and
         # overwriting it would destroy the very signal above.
