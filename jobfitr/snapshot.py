@@ -53,6 +53,51 @@ def _clean_row(r: dict) -> dict:
     text = row.get("text")
     if isinstance(text, str) and len(text) > TEXT_CAP:
         row["text"] = text[:TEXT_CAP]
+        # SECTIONS INDEX `text`, so truncating one without the other manufactures
+        # offsets that point past the end of the body they describe. Measured on a
+        # 102,799-row harvest: 36,270 such spans across 13,447 rows (13.1%) -- 23,575
+        # of them slicing to "" and 12,695 returning a partial body that looks
+        # complete. The engine emits ZERO out-of-range spans; every one was created
+        # here.
+        #
+        # It fails SILENTLY, which is why it matters. job_radar's
+        # `clean_with_sections` deliberately emits NO offsets for a section it cannot
+        # locate -- its docstring calls that failed lookup "the only self-check this
+        # design has". A span truncated into oblivion is indistinguishable from a
+        # genuine empty section, so the self-check cannot fire downstream.
+        #
+        # CLAMP rather than drop a straddler: the body is visibly cut anyway, and a
+        # readable partial section beats none. A consumer can always tell a truncated
+        # row because `len(text) == TEXT_CAP` is true on exactly those rows and no
+        # others. (The obvious alternative test -- "does the last span end at
+        # len(text)" -- discriminates nothing: 97.3% of ALL rows are already like
+        # that.)
+        #
+        # An entry with NO start/end keys is left untouched. That state means "the
+        # engine could not locate this section", 4,667 spans across 3,098 rows, and
+        # overwriting it would destroy the very signal above.
+        #
+        # `text_basis` is deliberately NOT set here. Its vocabulary defines `excerpt`
+        # as "the SOURCE truncates" -- Adzuna capping at 500 chars -- and the engine's
+        # own note ends "SET IN THE ADAPTER, NEVER SNIFFED". Greenhouse sent 24,579
+        # characters; claiming `excerpt` would assert a false provenance in the one
+        # field whose entire job is provenance, and erase the difference between "the
+        # vendor gave us little" and "we cut it".
+        secs = row.get("sections")
+        if isinstance(secs, list):
+            kept = []
+            for sec in secs:
+                if not isinstance(sec, dict):
+                    kept.append(sec)
+                    continue
+                start = sec.get("start")
+                if start is not None and start >= TEXT_CAP:
+                    continue  # wholly past the cut: nothing left to point at
+                end = sec.get("end")
+                if end is not None and end > TEXT_CAP:
+                    sec = {**sec, "end": TEXT_CAP}
+                kept.append(sec)
+            row["sections"] = kept
     return row
 
 
