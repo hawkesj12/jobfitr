@@ -24,6 +24,9 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import json
+
+from fastapi.responses import StreamingResponse
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -568,6 +571,58 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
         log.warning("chat turn failed: %s: %s", type(e).__name__, e)
         return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}"}
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request, payload: dict = Body(...)):
+    """The same turn, as Server-Sent Events — one frame per tool call, then the result.
+
+    WHY A SECOND ENDPOINT rather than streaming /api/chat: that endpoint's dict is read by
+    the 297-test suite and by the model bakeoff harness, and neither wants a stream. The
+    generator underneath is the same one (`chat.turn_events`), so there is exactly one
+    implementation of the loop and the two endpoints cannot drift.
+
+    WHY SSE AND NOT A WEBSOCKET: the data is one-directional and short-lived. SSE is plain
+    HTTP, needs no extra dependency, survives a proxy that speaks only HTTP/1.1, and Caddy
+    disables response buffering automatically for `text/event-stream` — a WebSocket would
+    add an upgrade handshake and a reconnect protocol to carry the same three fields.
+
+    Errors are FRAMES, not status codes. The status line is already sent by the time the
+    model faults, so an upstream failure mid-stream arrives as {"type":"error"} and the
+    client renders it; raising here would truncate the stream and look like a network drop.
+    """
+    if not chatmod.available():
+        raise HTTPException(status_code=503, detail="agent_unavailable")
+    if chatmod.daily_ceiling_reached():
+        raise HTTPException(status_code=503, detail="daily_ceiling")
+    messages = chatmod.sanitize_messages(payload.get("messages"))
+    if not messages:
+        raise HTTPException(status_code=422, detail="messages required")
+    if chatmod.over_turn_cap(messages):
+        raise HTTPException(status_code=429, detail="turn_cap")
+    chatmod.note_request()
+
+    async def frames():
+        try:
+            async for ev in chatmod.turn_events(messages, payload.get("model")):
+                if await request.is_disconnected():
+                    # The person navigated away. Stop paying a metered model to talk to
+                    # nobody — this is the one place the loop can be cut short safely.
+                    log.info("chat stream: client gone, abandoning turn")
+                    return
+                yield f"data: {json.dumps(ev)}\n\n"
+        except Exception as e:  # noqa: BLE001 — a fault is a frame; see the docstring
+            log.warning("chat stream failed: %s: %s", type(e).__name__, e)
+            yield f"data: {json.dumps({'type': 'error', 'error': f'upstream: {type(e).__name__}'})}\n\n"
+
+    return StreamingResponse(frames(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        # Caddy handles text/event-stream on its own, but nginx and several CDNs buffer
+        # until the response closes, which turns a live stream back into the all-at-once
+        # render this exists to remove — and it fails SILENTLY, looking merely slow.
+        "X-Accel-Buffering": "no",
+    })
 
 
 def _code_sha() -> str:

@@ -68,21 +68,44 @@
     if (answer) block("echo-a", esc(answer));
   }
 
-  // What it searched, in its own words. `why` is a required tool argument for exactly this.
+  // What it searched, in its own words, AS IT HAPPENS. `why` is a required tool argument
+  // for exactly this. These used to render all at once after the turn finished, which
+  // meant up to three minutes of spinner and then a summary of things already done — the
+  // work is the interesting part of this product and it was the part nobody could see.
+  let actList = null;
+
+  function actLine(ev) {
+    if (ev.tool === "search_jobs") {
+      // The titles are shown, not just `why`. Watching it pivot to "1st Shift Supervisor"
+      // after someone says they want off nights is what shows the reasoning is real.
+      const terms = (ev.titles || []).map((t) => `<code>${esc(t)}</code>`).join(" ");
+      const where = ev.location ? ` in ${esc(ev.location)}` : "";
+      return `<li><b>searched</b> ${esc(ev.why || "")}${terms ? `<br><span class="act-terms">${terms}${where}</span>` : ""} <span class="act-n">${ev.returned} found</span></li>`;
+    }
+    if (ev.tool === "read_jobs") return `<li><b>read</b> ${ev.returned} postings in full</li>`;
+    if (ev.tool === "recommend") return `<li><b>chose</b> ${ev.returned}</li>`;
+    return "";
+  }
+
+  // One live event. Appends into a single list so the steps stack in order rather than
+  // each becoming its own block.
+  function pushStep(ev) {
+    if (!echo) return;
+    const html = actLine(ev);
+    if (!html) return;
+    if (!actList) {
+      const b = block("echo-act", "<ul></ul>");
+      actList = b.querySelector("ul");
+    }
+    actList.insertAdjacentHTML("beforeend", html);
+    actList.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end" });
+  }
+
+  // The non-streaming fallback still has to work: if the stream is unavailable the turn
+  // completes normally and the whole trace arrives at once, exactly as before.
   function pushActivity(trace) {
     if (!echo || !trace || !trace.length) return;
-    const lines = trace
-      .map((t) => {
-        if (t.tool === "search_jobs")
-          return `<li><b>searched</b> ${esc(t.why || "")} <span class="act-n">${t.returned} found</span></li>`;
-        if (t.tool === "read_jobs")
-          return `<li><b>read</b> ${t.returned} postings in full</li>`;
-        if (t.tool === "recommend") return `<li><b>chose</b> ${t.returned}</li>`;
-        return "";
-      })
-      .filter(Boolean)
-      .join("");
-    if (lines) block("echo-act", `<ul>${lines}</ul>`);
+    trace.forEach((t) => pushStep({ ...t, titles: (t.args && t.args.titles) || [], location: (t.args && t.args.location) || "" }));
   }
 
   function money(job) {
@@ -129,8 +152,9 @@
     typeInto("");
     setBusy(true);
     messages.push({ role: "user", content: text });
+    actList = null; // a new turn starts a new activity list
     try {
-      const r = await fetch("/api/chat", {
+      const r = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages }),
@@ -139,8 +163,12 @@
         typeInto("The assistant is unavailable right now — try again in a minute.");
         return;
       }
-      const d = await r.json();
-      pushActivity(d.trace);
+      const d = await readStream(r, pushStep);
+      if (!d) {
+        typeInto("Something went wrong reaching the model.");
+        return;
+      }
+      if (d.__fallbackTrace) pushActivity(d.trace);
       if (d.picks && d.picks.length) pushPicks(d.picks);
       if (d.nothing_fits && (!d.picks || !d.picks.length))
         block("echo-act", "<ul><li>Nothing in the pool genuinely fits — see below.</li></ul>");
@@ -153,6 +181,48 @@
       setBusy(false);
       input.focus();
     }
+  }
+
+  // Read Server-Sent Events off a POST. EventSource cannot POST, so the frames are
+  // parsed by hand — SSE is line-oriented and a frame ends at a blank line, which is the
+  // whole protocol. A chunk can split mid-frame, so the tail is carried over; forgetting
+  // that yields JSON parse errors only under load, when frames start arriving coalesced.
+  async function readStream(r, onStep) {
+    if (!r.body || !r.ok) {
+      // No stream available — fall back to the plain endpoint so the turn still completes.
+      const d = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages }),
+      }).then((x) => x.json()).catch(() => null);
+      return d ? { ...d, __fallbackTrace: true } : null;
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let result = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) !== -1) {
+        const frame = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (!frame.startsWith("data:")) continue;
+        let ev;
+        try {
+          ev = JSON.parse(frame.slice(5).trim());
+        } catch {
+          continue; // a malformed frame must not kill the turn
+        }
+        if (ev.type === "tool") onStep(ev);
+        else if (ev.type === "done") result = ev.result;
+        else if (ev.type === "error") result = { reply: "", error: ev.error };
+        // Unknown types are ignored on purpose — the server may add more.
+      }
+    }
+    return result;
   }
 
   form.addEventListener("submit", (e) => {

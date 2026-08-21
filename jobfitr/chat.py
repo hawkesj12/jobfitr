@@ -673,7 +673,34 @@ def resolve_model(name: str | None) -> str:
 
 
 async def turn(messages: list, model: str | None = None) -> dict:
-    """Run the model until it produces text for the user, executing its tool calls.
+    """Run a whole turn and return the final dict. THE UNCHANGED API.
+
+    A thin drain over `turn_events()`. It exists so that streaming did not become a
+    breaking change: /api/chat, the 297-test suite and the bakeoff harness all read this
+    dict shape, and a refactor that made them all move at once would be a much larger
+    change than the feature is worth.
+    """
+    final: dict = {}
+    async for ev in turn_events(messages, model):
+        if ev.get("type") == "done":
+            final = ev["result"]
+    return final
+
+
+async def turn_events(messages: list, model: str | None = None):
+    """Run the model until it produces text, yielding an EVENT as each step completes.
+
+    WHY THIS IS A GENERATOR. The work is the interesting part of this product and it was
+    invisible: /api/chat is one blocking POST, so the activity list — "searched X, 37
+    found", "read 3 postings in full" — rendered all at once AFTER the turn finished.
+    Measured 2026-08-20, deepseek-v4-flash takes 180 s for a full conversation, so that is
+    three minutes of spinner followed by a summary of things that already happened. The
+    `why` argument has always been required on `search_jobs` for exactly this ("The person
+    sees this", chat_tools.md) — it just had nowhere to arrive in time.
+
+    Events are dicts with a `type`: `tool` as each tool call returns, then exactly one
+    `done` carrying the same dict `turn()` has always returned. Anything consuming this
+    must ignore unknown types rather than assume the set is closed.
 
     Bounded twice over: MAX_TOOL_CALLS across the loop and MAX_TURNS on the transcript. An
     agent that can choose its own searches can also choose them forever, and this is the
@@ -742,14 +769,16 @@ async def turn(messages: list, model: str | None = None) -> dict:
                 continue
             if picks or nothing_fits:
                 _log_delivery()
-            return {"reply": msg.get("content") or "", "trace": trace,
+            yield {"type": "done", "result": {
+                    "reply": msg.get("content") or "", "trace": trace,
                     "tool_calls": calls, "model": data.get("model"),
                     "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits,
                     # `fabricated` is in the RESPONSE, not only in searchlog, because
                     # searchlog is off unless JOBFITR_SEARCH_LOG is set — so a harness
                     # grading these conversations was structurally blind to the one
                     # failure the product cannot survive.
-                    "fabricated": fabricated, "usage": usage}
+                    "fabricated": fabricated, "usage": usage}}
+            return
         convo.append(msg)
         for tc in tool_calls:
             calls += 1
@@ -766,14 +795,26 @@ async def turn(messages: list, model: str | None = None) -> dict:
                 picks = result.get("picks") or picks
                 rejected = result.get("rejected") or rejected
                 nothing_fits = result.get("nothing_fits") or nothing_fits
-            trace.append({"tool": name, "args": args,
-                          "returned": (result.get("returned") if "returned" in result
-                                       else result.get("read") if "read" in result
-                                       else result.get("delivered", 0)),
-                          "why": args.get("why", "")})
+            step = {"tool": name, "args": args,
+                    "returned": (result.get("returned") if "returned" in result
+                                 else result.get("read") if "read" in result
+                                 else result.get("delivered", 0)),
+                    "why": args.get("why", "")}
+            trace.append(step)
+            # THE LIVE EVENT. Emitted the moment the tool returns, so the person watches
+            # the search happen instead of reading about it three minutes later. It
+            # carries `titles` deliberately: seeing the model pivot to "1st Shift
+            # Supervisor" after someone says they want off nights is the moment that
+            # shows the reasoning is real, and `why` alone does not show it.
+            yield {"type": "tool", "tool": name, "why": step["why"],
+                   "returned": step["returned"],
+                   "titles": (args.get("titles") or [])[:6],
+                   "location": args.get("location") or "",
+                   "n": calls}
             convo.append({"role": "tool", "tool_call_id": tc["id"],
                           "content": json.dumps(result)[:120000]})
     _log_delivery()
-    return {"reply": "", "trace": trace, "tool_calls": calls,
-            "error": "tool_budget_exhausted",
-            "fabricated": fabricated, "usage": usage}
+    yield {"type": "done", "result": {
+        "reply": "", "trace": trace, "tool_calls": calls,
+        "error": "tool_budget_exhausted",
+        "fabricated": fabricated, "usage": usage}}

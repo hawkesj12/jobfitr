@@ -839,3 +839,22 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .pick-caveat { margin: 0 0 .55rem; font-size: .85rem; opacity: .7; font-style: italic; }
 .pick-go { font-size: .85rem; font-weight: 600; text-decoration: none; }
 .pick-go:hover { text-decoration: underline; }
+
+/* ── the live activity list ────────────────────────────────────────────────
+   Steps arrive one at a time now, mid-turn, instead of all at once when the
+   turn ends. The search TERMS are shown alongside the model's own `why`,
+   because watching it pivot to "1st Shift Supervisor" after someone says they
+   want off nights is the moment the reasoning becomes visible; `why` alone
+   tells you that it searched, not what it understood. */
+.act-terms { display: inline-block; margin: .18rem 0 .1rem; opacity: .75; }
+.act-terms code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .74rem; padding: .06rem .3rem; margin-right: .22rem;
+  border-radius: .28rem; background: rgba(127, 127, 127, .14);
+}
+.echo-act li { animation: act-in .28s ease-out both; }
+@keyframes act-in {
+  from { opacity: 0; transform: translateY(.22rem); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .echo-act li { animation: none; } }
