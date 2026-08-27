@@ -162,11 +162,11 @@ fi
 
 for title in engineer nurse driver; do
 	# "probe":true keeps these three out of the quality digest — see searchlog.record.
-	res=$(curl -s --max-time 45 -X POST "${base}/api/score" \
+	res=$(curl -s --max-time 45 -X POST "${base}/api/candidates" \
 		-H 'Content-Type: application/json' \
-		-d "{\"titles\":[\"${title}\"],\"location\":\"\",\"min_score\":\"plenty\",\"probe\":true}" 2>/dev/null)
+		-d "{\"titles\":[\"${title}\"],\"location\":\"\",\"probe\":true}" 2>/dev/null)
 	if [[ -z "$res" ]]; then
-		bad "search: ${title}" "/api/score returned nothing"
+		bad "search: ${title}" "/api/candidates returned nothing"
 		continue
 	fi
 	# The response goes via a FILE, not argv. It used to be passed as a command-line
@@ -202,15 +202,16 @@ tail_desc = sum(1 for j in jobs if (j.get("description") or "").strip())
 ok_n = n > 0
 ok_desc = not head or withdesc >= len(head) * 0.8
 
-# Every card must be able to show its own arithmetic: `parts` has to sum to `points`.
-# This replaced a "no employer holds more than 6 slots" assertion, which encoded the
-# employer cap that step 1.3 deliberately removed — concentration is now something a
-# user SEES and filters, not something the server silently corrects, so the old check
-# gated on a promise the system had stopped making.
-bad_math = [j for j in jobs
-            if not isinstance(j.get("points"), int)
-            or sum(delta for _, delta in (j.get("parts") or [])) != j["points"]]
-ok_math = not bad_math
+# THE DENSE ARM IS LIVE. This replaced a `parts` sums to `points` check, which gated the
+# scoreboard — deleted 2026-08-20 along with /api/score, so it was asserting arithmetic on
+# fields that no longer exist and would have failed every row of a healthy slot.
+#
+# `semantic` is the right successor because its failure is SILENT and was real: the vector
+# builder had no caller at all, so every harvest added rows nothing embedded, and on
+# 2026-08-20 97% of Louisville rows in the pool had no vector while every dashboard read
+# healthy. semantic.available() only proves the FILE is there, so a False here means the
+# extra did not install or the file never shipped — the loud half of that failure.
+ok_math = bool(d.get("semantic"))
 
 # Not a cap — a smoke alarm. One employer owning the ENTIRE board means retrieval or
 # dedup broke, which is a different thing from an employer legitimately dominating a niche.
@@ -220,7 +221,7 @@ good = ok_n and ok_desc and ok_math and ok_sane
 mark = "✓" if good else "✗"
 print(f"{'search: '+t:<40} {mark} {n} results · {len(comp)} companies · "
       f"max {top}/one · {withdesc}/{len(head)} readable in the head, {tail_desc}/{n} overall"
-      + ("" if ok_math else f" · {len(bad_math)} DO NOT RECONCILE"))
+      + ("" if ok_math else " · SEMANTIC ARM DARK"))
 sys.exit(0 if good else 1)
 PY
 	rc=$?
@@ -236,16 +237,54 @@ done
 # that simply stays empty, discovered weeks later when you sit down to review a month of
 # searches and there are none. The three searches above just ran; if the log is
 # configured and did not grow, it is broken NOW, while there is still a gate to fail.
+# THE WRITER MOVED. /api/score wrote these lines and it is gone; `server.py` no longer
+# imports searchlog at all. Only chat.search_jobs and chat.turn do, so the probe has to be
+# a real conversation — and a bare "hi" will not do it, because the model interviews before
+# it searches. One message carrying everything makes it search on the first turn.
+#
+# This costs one metered model call per deploy (~$0.01 on the active bench model) and it is
+# worth more than the three free ones above: it is the ONLY gate that proves the whole
+# product works on this slot — key reachable, tool loop running, retrieval answering, log
+# writing — rather than proving retrieval alone.
+chat_probe=$(curl -s --max-time 180 -X POST "${base}/api/chat" \
+	-H 'Content-Type: application/json' \
+	-d '{"messages":[{"role":"user","content":"Warehouse supervisor in Louisville, six years on nights and I want days. I run a shift of thirty. No pay cut, I make about 68 a year. That is everything, go ahead."}]}' 2>/dev/null)
+chat_verdict=$(printf '%s' "$chat_probe" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("BAD|no answer from /api/chat"); raise SystemExit
+if d.get("error"):
+    print(f"BAD|{d[\"error\"]}"); raise SystemExit
+tr = d.get("trace") or []
+searches = sum(1 for t in tr if t.get("tool") == "search_jobs")
+fab = d.get("fabricated") or 0
+cost = (d.get("usage") or {}).get("cost") or 0
+# Fabrication is the one failure the product cannot survive: a person goes looking for a
+# job that does not exist. recommend() already drops those urls; a non-zero count means the
+# model tried, and a slot that does that must not go live.
+verdict = "BAD" if (searches < 1 or fab) else "OK"
+print(f"{verdict}|{searches} search(es), {len(d.get(\"picks\") or [])} picks, {fab} fabricated, ${cost:.4f}")
+')
+case "${chat_verdict%%|*}" in
+OK) ok "chat loop" "${chat_verdict#*|}" ;;
+*) bad "chat loop" "${chat_verdict#*|} — the conversation IS the product now; a slot that cannot search must not go live" ;;
+esac
+
 if [[ -z "$searchlog" ]]; then
 	ok "search log" "not configured (JOBFITR_SEARCH_LOG unset)"
 else
 	searchlog_after=0
 	[[ -f "$searchlog" ]] && searchlog_after=$(wc -l < "$searchlog")
 	grew=$((searchlog_after - searchlog_before))
-	if [[ "$grew" -ge 3 ]]; then
+	# >=1, not >=3: the three searches above are /api/candidates now, which does NOT log.
+	# The chat probe is the only writer, and one conversation writes one search line per
+	# search plus one delivery line.
+	if [[ "$grew" -ge 1 ]]; then
 		ok "search log" "+${grew} lines at ${searchlog}"
 	else
-		bad "search log" "configured at ${searchlog} but grew ${grew}/3 — check ReadWritePaths in jobfitr-web@.service, then owner"
+		bad "search log" "configured at ${searchlog} and did not grow — check ReadWritePaths in jobfitr-web@.service, then owner"
 	fi
 fi
 
@@ -265,7 +304,7 @@ fi
 # "a change silently removed an entire source from local results", whatever causes it next.
 #
 # Carries "probe":true like the searches above, so it does not pollute the search digest.
-locality=$(curl -s --max-time 90 -X POST "${base}/api/score" \
+locality=$(curl -s --max-time 90 -X POST "${base}/api/candidates" \
 	-H 'Content-Type: application/json' \
 	-d '{"titles":["Warehouse Supervisor"],"location":"Louisville, KY","probe":true}' |
 	python3 -c '
