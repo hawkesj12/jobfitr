@@ -256,7 +256,7 @@ try:
 except Exception:
     print("BAD|no answer from /api/chat"); raise SystemExit
 if d.get("error"):
-    print(f"BAD|{d[\"error\"]}"); raise SystemExit
+    print("BAD|" + str(d["error"])); raise SystemExit
 tr = d.get("trace") or []
 searches = sum(1 for t in tr if t.get("tool") == "search_jobs")
 fab = d.get("fabricated") or 0
@@ -265,7 +265,7 @@ cost = (d.get("usage") or {}).get("cost") or 0
 # job that does not exist. recommend() already drops those urls; a non-zero count means the
 # model tried, and a slot that does that must not go live.
 verdict = "BAD" if (searches < 1 or fab) else "OK"
-print(f"{verdict}|{searches} search(es), {len(d.get(\"picks\") or [])} picks, {fab} fabricated, ${cost:.4f}")
+print("%s|%d search(es), %d picks, %d fabricated, $%.4f" % (verdict, searches, len(d.get("picks") or []), fab, cost))
 ')
 case "${chat_verdict%%|*}" in
 OK) ok "chat loop" "${chat_verdict#*|}" ;;
