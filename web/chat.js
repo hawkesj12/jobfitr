@@ -308,7 +308,7 @@
       if (r.status === 503) {
         const why = await r.json().then((x) => x.detail).catch(() => "");
         stopWorking();
-        say(why === "daily_ceiling"
+        say(why === "daily_ceiling" || why === "daily_spend"
           ? "jobfitr has reached its limit for today. It resets at midnight Eastern."
           : "The assistant is unavailable right now. Try again in a minute.");
         return;
@@ -318,7 +318,10 @@
         stopWorking();
         say(why === "turn_cap"
           ? "This conversation has reached its length limit. Reload the page to start a new one."
-          : "Too many messages at once. Wait a few seconds and send that again.");
+          : why === "address_daily_cap"
+            // Their own limit, not the site's: say so, so nobody thinks it is down.
+            ? "You've used your conversations for today. It's a per-visitor limit that keeps jobfitr free; it resets at midnight Eastern."
+            : "Too many messages at once. Wait a few seconds and send that again.");
         return;
       }
       const d = await readStream(r, onEvent, body);
@@ -331,7 +334,11 @@
       if (d.__fallback) (d.trace || []).forEach((t) => pushStep({ ...t, titles: (t.args && t.args.titles) || [], location: (t.args && t.args.location) || "" }));
       if ((d.picks && d.picks.length) || (d.ruled_out && d.ruled_out.length) || d.nothing_fits) pushAnswer(d);
       pushReceipt(d.receipt);
-      if (d.error === "tool_budget_exhausted")
+      if (d.error === "service_unavailable")
+        // The model provider refused the account (out of credit, or the key). Nothing a
+        // retry from here can fix, and "something went wrong" made it look like a bug.
+        say("The assistant is unavailable right now. Please try again later.");
+      else if (d.error === "tool_budget_exhausted")
         say("I ran out of search budget before I could finish. Anything I had settled on is above; tell me what to narrow and I will try again.");
       else if (d.error && answerEl)
         // The picks arrived and the closing note did not. Say that, not "something went
@@ -399,7 +406,7 @@
     ["ERP implementation consultant · remote",
       "I implement ERP systems for manufacturers and distributors: requirements, configuration, data migration, go-live and training. Eight years of it. I want a remote ERP implementation consultant role in the US paying at least $110,000, and not through a staffing agency. That's everything, search now."],
     ["Forward-deployed AI engineer · remote · $200K+",
-      "I'm an application engineer at a conveyor integrator, and I have built full-stack AI tools on my own. I want forward-deployed or AI implementation engineering work, ideally for manufacturers and distributors. Remote only; I live in Louisville, KY. $200,000 floor. No big consulting firms and no agencies. That's everything, search now."],
+      "I'm a senior backend engineer, ten years in, the last three building LLM features into a logistics company's customer-facing software, and I spend a lot of my week on calls with the customers who use them. I want forward-deployed or AI implementation engineering work, where I sit with a customer's team and get the thing working in their systems. Remote only, anywhere in the US. $200,000 floor. No big consulting firms and no agencies. That's everything, search now."],
   ];
   if (startersEl) {
     STARTERS.forEach(([label, text]) => {

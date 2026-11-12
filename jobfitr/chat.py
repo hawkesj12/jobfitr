@@ -27,6 +27,8 @@ paragraphs, and said so as a flaw. read_jobs serves the whole posting.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -35,6 +37,7 @@ import secrets
 import time
 
 import httpx
+from collections import OrderedDict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -796,7 +799,68 @@ _ET = ZoneInfo("America/New_York")
 # from a visitor; a whole conversation is about five. At roughly $0.40 a conversation, 500
 # turns was $40 a day from one looping script. 100 is about twenty conversations.
 DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "100"))
-_usage = {"date": "", "count": 0}
+
+# THE MONEY CAP. The turn ceiling above counts messages, not dollars, and turns differ by
+# a factor of a hundred. Measured over the four acceptance conversations on sonnet-5.5
+# (2026-11-11): a question turn $0.002-0.03, a turn that searched and read $0.15-0.29, a
+# whole conversation $0.15-0.32. $10 is therefore 30-60 conversations, comfortably above
+# a real day's traffic, and at most $300 in a month of a looping script, which is a bill
+# and not a disaster. Summed from what OpenRouter reports for each MODEL CALL
+# (`usage.cost`), not each finished turn, so a turn that dies or is abandoned halfway
+# still counts what it spent. If a provider stops reporting cost the sum stays at zero
+# and the turn ceiling is the only guard left: that is why both exist.
+DAILY_SPEND_USD = float(os.environ.get("CHAT_DAILY_SPEND_USD", "10"))
+
+# THE PER-ADDRESS CAPS. Without them one address at the 20-a-minute rate limit spends the
+# whole site's 100-turn day in five minutes and every other visitor is told "limit
+# reached". Two of them, because turns and dollars fail differently:
+#
+# 30 TURNS is six conversations of the five turns DAILY_CEILING's note assumes, or ten of
+# the two-to-three-turn scripted acceptance runs. A script hits it in 90 seconds having
+# used under a third of the site's turns.
+#
+# $2.50 is a quarter of DAILY_SPEND_USD. Thirty turns that EACH search would cost about
+# 30 x $0.29 = $9, nearly the whole site's day from one address, and the turn cap alone
+# does not stop that. $2.50 is still eight of the dearest conversations measured ($0.32),
+# and it takes four addresses, not one, to spend the site's day.
+PER_ADDRESS_DAILY = int(os.environ.get("CHAT_PER_ADDRESS_DAILY", "30"))
+PER_ADDRESS_SPEND_USD = float(os.environ.get("CHAT_PER_ADDRESS_SPEND_USD", "2.5"))
+
+# A flood of distinct addresses must not grow the table without limit. At ~250 bytes an
+# entry, 10,000 is about 2.5 MB. Past it the address seen longest ago is forgotten, which
+# resets ITS count: someone with 10,000 addresses has beaten a per-address cap anyway,
+# and the site-wide turn and spend ceilings still hold.
+MAX_ADDRESSES = int(os.environ.get("CHAT_MAX_ADDRESSES", "10000"))
+
+# WHAT THESE COUNTERS ARE NOT. They live in this process's memory: a restart or a deploy
+# resets them, and each of the two slots (blue and green) keeps its own. Only one slot
+# serves the public at a time, so the reset at a flip is the real gap, and it is accepted
+# rather than solved with shared storage. They are checked BEFORE a turn and a turn's
+# cost is known only as it runs, so turns already in flight when a cap is reached finish
+# and can carry the total past it by what they spend.
+#
+# The address table holds a SALTED HASH of the address, never the address, with a salt
+# made fresh in each process. It is never written to disk and never logged; nothing
+# outside this module can turn a key back into an address, and after a restart not even
+# this module can.
+_ADDR_SALT = secrets.token_bytes(16)
+# addrs: salted key -> [turns, spend], the address seen longest ago first.
+_usage: dict = {"date": "", "count": 0, "spend": 0.0, "addrs": OrderedDict()}
+
+
+class UpstreamUnavailable(RuntimeError):
+    """The model provider refused the ACCOUNT, not the request: out of credit (402) or the
+    key rejected (401). Retrying cannot help and nobody's next message will fare better,
+    so the visitor is told the service is unavailable rather than "something went wrong"."""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__("out of credit" if status == 402 else "key rejected")
+
+
+# OpenRouter's documented codes: 401 bad or disabled key, 402 insufficient credits.
+# Everything else (400, 403 moderation, 408, 429, 5xx) is about the request or the moment.
+ACCOUNT_CODES = (401, 402)
 
 
 def available() -> bool:
@@ -828,19 +892,65 @@ def sanitize_messages(raw: list) -> list:
 def _roll_day() -> None:
     today = datetime.now(_ET).date().isoformat()
     if _usage["date"] != today:
-        _usage["date"], _usage["count"] = today, 0
+        _usage.update(date=today, count=0, spend=0.0, addrs=OrderedDict())
+
+
+def _addr_key(addr: str | None) -> str:
+    return hmac.new(_ADDR_SALT, (addr or "").encode(), hashlib.sha256).hexdigest()[:24]
 
 
 def daily_ceiling_reached() -> bool:
-    """True if today's request budget is spent — the endpoint then 503s to the form."""
+    """True if today's turn budget is spent; the endpoint then answers 503."""
     _roll_day()
     return _usage["count"] >= DAILY_CEILING
 
 
-def note_request() -> None:
-    """Count one accepted request against today's ceiling."""
+def daily_spend_reached() -> bool:
+    """True once today's model spend has reached DAILY_SPEND_USD."""
+    _roll_day()
+    return _usage["spend"] >= DAILY_SPEND_USD
+
+
+def address_cap_reached(addr: str | None) -> bool:
+    """True if THIS address has used its turns or its spend for today. Others are unaffected."""
+    _roll_day()
+    turns, spend = _usage["addrs"].get(_addr_key(addr), (0, 0.0))
+    return turns >= PER_ADDRESS_DAILY or spend >= PER_ADDRESS_SPEND_USD
+
+
+def _addr_entry(addr: str) -> list:
+    """The address's [turns, spend], marked most recently seen; the table stays bounded."""
+    addrs: OrderedDict = _usage["addrs"]
+    k = _addr_key(addr)
+    entry = addrs.get(k)
+    if entry is None:
+        entry = addrs[k] = [0, 0.0]
+        while len(addrs) > MAX_ADDRESSES:
+            addrs.popitem(last=False)
+    addrs.move_to_end(k)
+    return entry
+
+
+def note_request(addr: str | None = None) -> None:
+    """Count one accepted turn against today's site ceiling and, given one, the address's."""
     _roll_day()
     _usage["count"] += 1
+    if addr is not None:
+        _addr_entry(addr)[0] += 1
+
+
+def note_spend(usd, addr: str | None = None) -> None:
+    """Add what one model call cost to today's total and, given one, the address's."""
+    _roll_day()
+    try:
+        usd = float(usd or 0.0)
+    except (TypeError, ValueError):
+        return
+    if not usd > 0:            # also refuses NaN
+        return
+    _usage["spend"] += usd
+    if addr is not None:
+        _addr_entry(addr)[1] += usd
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1030,7 +1140,10 @@ async def _model(payload: dict):
                 except ValueError:
                     continue
                 if chunk.get("error"):
-                    raise RuntimeError(str((chunk["error"] or {}).get("message") or chunk["error"]))
+                    err = chunk["error"] if isinstance(chunk["error"], dict) else {}
+                    if err.get("code") in ACCOUNT_CODES:
+                        raise UpstreamUnavailable(err["code"])
+                    raise RuntimeError(str(err.get("message") or chunk["error"]))
                 text = _fold(acc, chunk)
                 if text:
                     yield ("text", text)
@@ -1092,25 +1205,32 @@ def _run_tool(name: str, args: dict, state: dict) -> dict:
     return {"error": f"no tool {name}"}
 
 
-async def turn(messages: list, model: str | None = None, state: dict | None = None) -> dict:
+async def turn(messages: list, model: str | None = None, state: dict | None = None,
+               addr: str | None = None) -> dict:
     """Run a whole turn and return the final dict.
 
     A thin drain over `turn_events()`, so /api/chat, the deploy gate and the bakeoff
     harness read one dict while the page reads the stream.
     """
     final: dict = {}
-    async for ev in turn_events(messages, model, state):
+    async for ev in turn_events(messages, model, state, addr=addr):
         if ev.get("type") == "done":
             final = ev["result"]
     return final
 
 
-async def turn_events(messages: list, model: str | None = None, state: dict | None = None):
+async def turn_events(messages: list, model: str | None = None, state: dict | None = None,
+                      addr: str | None = None):
     """Run the model until it produces its answer, yielding an EVENT at each step.
 
     `messages` is what is NEW this turn (one user message from the page). `state` is the
     conversation's memory; None means a one-off conversation whose whole transcript is
-    `messages` (the deploy gate, the tests).
+    `messages` (the deploy gate, the tests). `addr` is the client address the spend of
+    each model call is counted against (see "cost control"); it is never stored as given,
+    never logged and never passed to the model.
+
+    Raises UpstreamUnavailable when the provider refuses the account (401/402), leaving
+    the conversation exactly as it was before the turn.
 
     Events are dicts with a `type`:
       status      the turn has started; sent before anything slow happens
@@ -1213,7 +1333,20 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                         data = val
                 break
             except (httpx.TransportError, httpx.HTTPStatusError, RuntimeError) as e:
-                code = getattr(getattr(e, "response", None), "status_code", None)
+                code = (e.status if isinstance(e, UpstreamUnavailable)
+                        else getattr(getattr(e, "response", None), "status_code", None))
+                if code in ACCOUNT_CODES:
+                    # Out of credit or the key refused. Until 2026-11-12 this reached the
+                    # page as "Something went wrong" for every visitor, and the journal
+                    # said only `HTTPStatusError`. The conversation is left as it was
+                    # before this turn, so a retry after a top-up starts clean rather
+                    # than on a transcript that ends mid-turn.
+                    log.warning("chat unavailable: the model provider answered HTTP %d (%s); "
+                                "every turn will fail until the account is fixed",
+                                code, "out of credit" if code == 402 else "API key rejected")
+                    if isinstance(e, UpstreamUnavailable):
+                        raise
+                    raise UpstreamUnavailable(code) from e
                 retryable = code is None or code == 429 or code >= 500
                 log.warning("model call failed (attempt %d): %s: %s", attempt, type(e).__name__, e)
                 if attempt == 2 or not retryable:
@@ -1230,6 +1363,7 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
         usage["prompt_tokens"] += u.get("prompt_tokens") or 0
         usage["completion_tokens"] += u.get("completion_tokens") or 0
         usage["cost"] += float(u.get("cost") or 0.0)
+        note_spend(u.get("cost"), addr)       # per CALL, so an abandoned turn still counts
         msg = data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls and force:

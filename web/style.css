@@ -819,7 +819,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 }
 
 /* ── the answer, rendered in the conversation ──────────────────────────────
-   The agent returns five jobs with reasons, not 200 scored rows, so these are
+   The agent returns up to five jobs with reasons, not 200 scored rows, so these are
    cards in the transcript rather than a board you switch to. */
 .echo-act { margin: .6rem 0 .2rem; font-size: .82rem; opacity: .62; }
 .echo-act ul { margin: 0; padding-left: 1.05rem; }
