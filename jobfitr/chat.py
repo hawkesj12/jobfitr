@@ -1,7 +1,7 @@
 """The conversation. A model that interviews, then drives its own search loop.
 
 WHY THIS EXISTS, and it is a different shape from chat.py. The 2026-08-17 experiment that
-produced five jobs Justin called right did NOT fill in a form. Its method, recorded in
+produced five jobs the owner called right did NOT fill in a form. Its method, recorded in
 _private/experiment-runs/: seven interview questions with ZERO tool calls, then **nine
 separate searches**, each one chosen from what the previous returned — an automation lane
 and a controls lane run specifically to test whether his manufacturing background retrieved
@@ -100,7 +100,7 @@ MODELS = {
     "glm-4.7":           {"id": "z-ai/glm-4.7",                "ctx":   204_800, "session_usd": 0.070},
     "kimi-k2.5":         {"id": "moonshotai/kimi-k2.5",        "ctx":   262_144, "session_usd": 0.081},
     "minimax-m3":        {"id": "minimax/minimax-m3",          "ctx": 1_048_576, "session_usd": 0.052},
-    # ── upper: the top of the band Justin drew (above Haiku, below Sonnet) ───
+    # ── upper: the top of the band the owner drew (above Haiku, below Sonnet) ───
     "grok-4.3":          {"id": "x-ai/grok-4.3",               "ctx": 1_000_000, "session_usd": 0.203},
     "grok-4.20":         {"id": "x-ai/grok-4.20",              "ctx": 2_000_000, "session_usd": 0.203},
     "grok-4.6":          {"id": "x-ai/grok-4.6",               "ctx":   500_000, "session_usd": 0.336},
@@ -805,26 +805,57 @@ DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "100"))
 # (2026-11-11): a question turn $0.002-0.03, a turn that searched and read $0.15-0.29, a
 # whole conversation $0.15-0.32. $10 is therefore 30-60 conversations, comfortably above
 # a real day's traffic, and at most $300 in a month of a looping script, which is a bill
-# and not a disaster. Summed from what OpenRouter reports for each MODEL CALL
-# (`usage.cost`), not each finished turn, so a turn that dies or is abandoned halfway
-# still counts what it spent. If a provider stops reporting cost the sum stays at zero
-# and the turn ceiling is the only guard left: that is why both exist.
+# and not a disaster.
+#
+# WHAT IS COUNTED, exactly: the `usage.cost` OpenRouter reports for every model call that
+# RETURNS, added the moment it returns, so the calls a turn made before it died or was
+# abandoned are counted. NOT counted: a streamed call cut off before its last chunk,
+# because that chunk is the only one that carries usage. That happens when the visitor
+# closes the tab mid-sentence, or when a dropped connection is retried (the first,
+# broken attempt is lost). The provider bills those; this sum does not see them. The
+# concurrency and turn caps below bound how many there can be. If a provider stops
+# reporting cost altogether the sum stays at zero and the turn ceiling is the only guard
+# left: that is why both exist.
 DAILY_SPEND_USD = float(os.environ.get("CHAT_DAILY_SPEND_USD", "10"))
 
 # THE PER-ADDRESS CAPS. Without them one address at the 20-a-minute rate limit spends the
 # whole site's 100-turn day in five minutes and every other visitor is told "limit
-# reached". Two of them, because turns and dollars fail differently:
+# reached". Two of them, because turns and dollars fail differently.
 #
-# 30 TURNS is six conversations of the five turns DAILY_CEILING's note assumes, or ten of
-# the two-to-three-turn scripted acceptance runs. A script hits it in 90 seconds having
-# used under a third of the site's turns.
+# An "address" is often a whole NETWORK: an office, a campus, a phone carrier's NAT. The
+# first real audience is several people at one company, likely on one connection, so the
+# caps are sized for a group, not a person:
 #
-# $2.50 is a quarter of DAILY_SPEND_USD. Thirty turns that EACH search would cost about
-# 30 x $0.29 = $9, nearly the whole site's day from one address, and the turn cap alone
-# does not stop that. $2.50 is still eight of the dearest conversations measured ($0.32),
-# and it takes four addresses, not one, to spend the site's day.
-PER_ADDRESS_DAILY = int(os.environ.get("CHAT_PER_ADDRESS_DAILY", "30"))
-PER_ADDRESS_SPEND_USD = float(os.environ.get("CHAT_PER_ADDRESS_SPEND_USD", "2.5"))
+# 50 TURNS is ten conversations of the five turns DAILY_CEILING's note assumes, shared by
+# everyone behind the address. A script at 20 a minute reaches it in 2.5 minutes, having
+# used half the site's 100 turns.
+#
+# $4.00 is two fifths of DAILY_SPEND_USD: 12 of the dearest conversations measured
+# ($0.32), 26 of the cheapest ($0.15). Fifty turns that EACH search would cost about
+# 50 x $0.29 = $14.50, more than the whole site's day, so the turn cap alone stops
+# nothing; the dollar cap is what means three networks, not one, are needed to spend
+# the site's day.
+PER_ADDRESS_DAILY = int(os.environ.get("CHAT_PER_ADDRESS_DAILY", "50"))
+PER_ADDRESS_SPEND_USD = float(os.environ.get("CHAT_PER_ADDRESS_SPEND_USD", "4"))
+
+# TURNS RUNNING AT ONCE, per address. Spend is only known as each call returns, so a
+# cap checked when a turn starts let 20 turns started together run straight past it:
+# $5.80 against a $2.50 cap, measured by the review of the first version (20 parallel
+# requests, a fake model at $0.29 a call). Two lets two people in one office search at
+# the same moment; a third gets "too many at once, wait a few seconds".
+#
+# THE BOUND THIS BUYS, with the spend also re-checked before every model call inside a
+# turn (turn_events): a cap can be overrun only by the calls already in flight when it
+# is reached, one per running turn. Per address that is at most 2 calls; no single call
+# can cost more than the dearest whole turn measured, $0.29, so an address stops within
+# about $0.58 of its cap. Site-wide it is one call per turn running anywhere at that
+# moment, which this does not bound beyond 2 per address.
+PER_ADDRESS_CONCURRENT = int(os.environ.get("CHAT_PER_ADDRESS_CONCURRENT", "2"))
+# An in-flight mark that is never released (a stream the client dropped before it
+# started) must not lock an address out for the day. A turn is bounded by
+# MAX_TOOL_CALLS calls of REQUEST_TIMEOUT each; ten minutes is past any turn measured
+# (the slowest acceptance turn took under two).
+INFLIGHT_TTL = float(os.environ.get("CHAT_INFLIGHT_TTL", "600"))
 
 # A flood of distinct addresses must not grow the table without limit. At ~250 bytes an
 # entry, 10,000 is about 2.5 MB. Past it the address seen longest ago is forgotten, which
@@ -835,9 +866,8 @@ MAX_ADDRESSES = int(os.environ.get("CHAT_MAX_ADDRESSES", "10000"))
 # WHAT THESE COUNTERS ARE NOT. They live in this process's memory: a restart or a deploy
 # resets them, and each of the two slots (blue and green) keeps its own. Only one slot
 # serves the public at a time, so the reset at a flip is the real gap, and it is accepted
-# rather than solved with shared storage. They are checked BEFORE a turn and a turn's
-# cost is known only as it runs, so turns already in flight when a cap is reached finish
-# and can carry the total past it by what they spend.
+# rather than solved with shared storage. The overrun past a dollar cap is bounded as
+# described at PER_ADDRESS_CONCURRENT.
 #
 # The address table holds a SALTED HASH of the address, never the address, with a salt
 # made fresh in each process. It is never written to disk and never logged; nothing
@@ -846,6 +876,9 @@ MAX_ADDRESSES = int(os.environ.get("CHAT_MAX_ADDRESSES", "10000"))
 _ADDR_SALT = secrets.token_bytes(16)
 # addrs: salted key -> [turns, spend], the address seen longest ago first.
 _usage: dict = {"date": "", "count": 0, "spend": 0.0, "addrs": OrderedDict()}
+# salted key -> start times of that address's turns now running. Not reset with the day:
+# a turn that started before midnight is still running after it.
+_inflight: dict[str, list[float]] = {}
 
 
 class UpstreamUnavailable(RuntimeError):
@@ -857,6 +890,10 @@ class UpstreamUnavailable(RuntimeError):
         self.status = status
         super().__init__("out of credit" if status == 402 else "key rejected")
 
+
+# The error a turn reports when the provider refuses the account. The page shows
+# "unavailable right now" for it, not "something went wrong".
+UNAVAILABLE = "service_unavailable"
 
 # OpenRouter's documented codes: 401 bad or disabled key, 402 insufficient credits.
 # Everything else (400, 403 moderation, 408, 429, 5xx) is about the request or the moment.
@@ -937,6 +974,67 @@ def note_request(addr: str | None = None) -> None:
     _usage["count"] += 1
     if addr is not None:
         _addr_entry(addr)[0] += 1
+
+
+def refund_request(addr: str | None = None) -> None:
+    """Give back a turn that never got an answer (the provider refused the account).
+
+    Without it an outage spent everyone's allowance: visitors retrying as the page told
+    them to hit their daily cap on turns that did nothing, and after a top-up the site
+    still said "limit reached" until midnight (found in review of the first version).
+    """
+    _roll_day()
+    _usage["count"] = max(0, _usage["count"] - 1)
+    if addr is not None:
+        entry = _usage["addrs"].get(_addr_key(addr))
+        if entry:
+            entry[0] = max(0, entry[0] - 1)
+
+
+def spend_cap_reached(addr: str | None = None) -> str | None:
+    """Which dollar cap is reached now, if any: "daily_spend" (the site's) or
+    "address_daily_cap" (this address's). Checked before every model call in a turn."""
+    if daily_spend_reached():
+        return "daily_spend"
+    if addr is not None:
+        _, spend = _usage["addrs"].get(_addr_key(addr), (0, 0.0))
+        if spend >= PER_ADDRESS_SPEND_USD:
+            return "address_daily_cap"
+    return None
+
+
+def _running(k: str, now: float) -> list[float]:
+    for key in [key for key, ts in _inflight.items() if all(now - t > INFLIGHT_TTL for t in ts)]:
+        _inflight.pop(key, None)
+    ts = [t for t in _inflight.get(k, []) if now - t <= INFLIGHT_TTL]
+    if ts:
+        _inflight[k] = ts
+    return ts
+
+
+def too_many_running(addr: str | None) -> bool:
+    """True if this address already has PER_ADDRESS_CONCURRENT turns running."""
+    if addr is None:
+        return False
+    return len(_running(_addr_key(addr), time.time())) >= PER_ADDRESS_CONCURRENT
+
+
+def start_running(addr: str | None) -> None:
+    if addr is not None:
+        now = time.time()
+        k = _addr_key(addr)
+        _inflight[k] = _running(k, now) + [now]
+
+
+def stop_running(addr: str | None) -> None:
+    if addr is None:
+        return
+    k = _addr_key(addr)
+    ts = _inflight.get(k)
+    if ts:
+        ts.pop(0)
+        if not ts:
+            _inflight.pop(k, None)
 
 
 def note_spend(usd, addr: str | None = None) -> None:
@@ -1229,8 +1327,11 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
     each model call is counted against (see "cost control"); it is never stored as given,
     never logged and never passed to the model.
 
-    Raises UpstreamUnavailable when the provider refuses the account (401/402), leaving
-    the conversation exactly as it was before the turn.
+    When the provider refuses the account (401/402): if picks were already delivered this
+    turn, the turn ENDS with them and `error: "service_unavailable"`; otherwise it raises
+    UpstreamUnavailable. The transcript keeps whatever tools ran (as on any other
+    fault); if none ran it is not written at all. `seen`/`read` keep the postings met.
+    A daily spend cap reached mid-turn ends the turn the same way, `error` naming the cap.
 
     Events are dicts with a `type`:
       status      the turn has started; sent before anything slow happens
@@ -1320,6 +1421,18 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
         # then lost the connection during the closing sentence (`httpx.ReadError`): the
         # person saw "something went wrong" under a finished answer. A turn costs a
         # minute and real money by then; one dropped socket must not void it.
+        # THE DOLLAR CAPS, again, before EVERY call: checked only when a turn started,
+        # turns already running sailed past them (see PER_ADDRESS_CONCURRENT). Whatever
+        # is on screen stays there and in the transcript; the turn just stops here.
+        capped = spend_cap_reached(addr)
+        if capped:
+            log.info("chat turn stopped at a daily spend cap (%s)", capped)
+            if trace:
+                state["convo"] = _compact(convo[1:])
+            if delivered:
+                _log_delivery()
+            yield {"type": "done", "result": _result("", None, error=capped)}
+            return
         for attempt in (1, 2):
             try:
                 async for kind, val in _model({
@@ -1338,12 +1451,23 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                 if code in ACCOUNT_CODES:
                     # Out of credit or the key refused. Until 2026-11-12 this reached the
                     # page as "Something went wrong" for every visitor, and the journal
-                    # said only `HTTPStatusError`. The conversation is left as it was
-                    # before this turn, so a retry after a top-up starts clean rather
-                    # than on a transcript that ends mid-turn.
+                    # said only `HTTPStatusError`.
                     log.warning("chat unavailable: the model provider answered HTTP %d (%s); "
                                 "every turn will fail until the account is fixed",
                                 code, "out of credit" if code == 402 else "API key rejected")
+                    # Once a tool has run, keep what happened, exactly as the generic path
+                    # below does: credit runs out during the EXPENSIVE turn, typically on
+                    # the closing note after the picks are already on screen, and a
+                    # follow-up after a top-up must find them. Before any tool ran there is
+                    # nothing to keep, and the transcript is left without the unanswered
+                    # message so a retry does not read it twice.
+                    if trace:
+                        state["convo"] = _compact(convo[1:])
+                    if delivered:
+                        # An answer exists: return it, not an error page.
+                        _log_delivery()
+                        yield {"type": "done", "result": _result("", None, error=UNAVAILABLE)}
+                        return
                     if isinstance(e, UpstreamUnavailable):
                         raise
                     raise UpstreamUnavailable(code) from e

@@ -29,6 +29,12 @@
   if (!form || !input) return;
 
   const OPENER = "What kind of work are you looking for?";
+  const DAY_LIMIT = "jobfitr has reached its limit for today. It resets at midnight Eastern.";
+  // The per-address cap is shared by everyone on one connection: an office, a campus, a
+  // phone carrier. Someone who has never typed a word can meet it, so it must not read
+  // as their fault.
+  const NETWORK_LIMIT =
+    "jobfitr has reached today's limit for your network. The limit is shared by everyone on the same connection and keeps the service free; it resets at midnight Eastern.";
   let session = null;
   let busy = false;
 
@@ -309,7 +315,7 @@
         const why = await r.json().then((x) => x.detail).catch(() => "");
         stopWorking();
         say(why === "daily_ceiling" || why === "daily_spend"
-          ? "jobfitr has reached its limit for today. It resets at midnight Eastern."
+          ? DAY_LIMIT
           : "The assistant is unavailable right now. Try again in a minute.");
         return;
       }
@@ -319,8 +325,7 @@
         say(why === "turn_cap"
           ? "This conversation has reached its length limit. Reload the page to start a new one."
           : why === "address_daily_cap"
-            // Their own limit, not the site's: say so, so nobody thinks it is down.
-            ? "You've used your conversations for today. It's a per-visitor limit that keeps jobfitr free; it resets at midnight Eastern."
+            ? NETWORK_LIMIT
             : "Too many messages at once. Wait a few seconds and send that again.");
         return;
       }
@@ -334,10 +339,17 @@
       if (d.__fallback) (d.trace || []).forEach((t) => pushStep({ ...t, titles: (t.args && t.args.titles) || [], location: (t.args && t.args.location) || "" }));
       if ((d.picks && d.picks.length) || (d.ruled_out && d.ruled_out.length) || d.nothing_fits) pushAnswer(d);
       pushReceipt(d.receipt);
-      if (d.error === "service_unavailable")
+      // A turn can now END on a limit or an account refusal after its picks are on
+      // screen. Those cases fall through to "the closing note did not come through"
+      // below, so a delivered answer is never captioned as a failure.
+      if (d.error === "service_unavailable" && !answerEl)
         // The model provider refused the account (out of credit, or the key). Nothing a
         // retry from here can fix, and "something went wrong" made it look like a bug.
         say("The assistant is unavailable right now. Please try again later.");
+      else if (d.error === "daily_spend" && !answerEl)
+        say(DAY_LIMIT);
+      else if (d.error === "address_daily_cap" && !answerEl)
+        say(NETWORK_LIMIT);
       else if (d.error === "tool_budget_exhausted")
         say("I ran out of search budget before I could finish. Anything I had settled on is above; tell me what to narrow and I will try again.");
       else if (d.error && answerEl)

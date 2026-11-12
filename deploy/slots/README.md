@@ -214,6 +214,11 @@ sudo bash deploy-slot.sh <branch-or-tag>    # now targets blue (the inactive slo
 Running it against **live blue today fails on two of these**, which is the honest
 measure of why this release exists.
 
+The gate's chat probes reach the slot from `127.0.0.1`, so they all count against that one
+address's daily chat caps (turns and dollars): re-running `verify-slot.sh` many times on a
+slot that has not restarted can hit them and report a healthy slot's chat loop as BAD,
+while `deploy-slot.sh`'s restart clears them.
+
 ### Rollback
 
 - **After the flip:** `sudo bash flip.sh` again. Each slot keeps its own `jobs.db`, so

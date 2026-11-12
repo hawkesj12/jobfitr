@@ -217,7 +217,8 @@ button { font: inherit; cursor: pointer; }
 .proof b { color: var(--ink); font-weight: 600; }
 .proof .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); }
 .proof .sep { opacity: 0.4; }
-/* the interview progress dots — four questions, so show where you are */
+/* the row the assistant speaks in. `.steps` held the old fixed interview's progress dots;
+   the model now asks as many questions as it needs, and chat.js removes the element. */
 .sayrow { display: flex; align-items: baseline; gap: 10px; width: 100%; }
 .sayrow:has(.chat-say:empty) { display: none; } /* nothing said yet → no empty row */
 .steps { display: inline-flex; gap: 5px; flex: none; transform: translateY(-3px); }
@@ -716,29 +717,6 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .gcard.flying { animation: fly 460ms cubic-bezier(0.5, 0, 0.75, 0) forwards; z-index: 30; }
 .gcard.dismissing { transition: opacity 260ms ease, transform 260ms ease; opacity: 0; transform: scale(0.94); }
 
-/* ── the fallback form (glassed) ────────────────────────────────────────────── */
-.form-view { min-height: 62vh; display: flex; align-items: center; }
-.search-form { padding: 26px 26px 24px; display: flex; flex-direction: column; gap: 20px; width: 100%; }
-.form-head { display: flex; flex-direction: column; gap: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--card-brd); }
-.form-head h2 { font-size: 20px; font-weight: 660; letter-spacing: -0.02em; }
-.form-sub { font-size: 13px; color: var(--sub); }
-.field legend { padding: 0; }
-.field { display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 0; }
-.field label, .field legend, .field .label { font-weight: 600; font-size: 14px; }
-.field .sub { font-weight: 500; font-size: 12.5px; color: var(--sub); }
-.hint { color: var(--sub); font-size: 12px; }
-.field input { border: 1px solid var(--card-brd); background: var(--field-bg); color: var(--ink); border-radius: 9px; padding: 9px 11px; font-size: 14px; outline: none; }
-.field input::placeholder { color: var(--sub); }
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.with-suffix { display: flex; align-items: center; gap: 6px; }
-.with-suffix input { width: 80px; }
-.suffix { color: var(--sub); font-size: 13px; }
-.segmented { display: flex; flex-wrap: wrap; gap: 6px; }
-.segmented input { position: absolute; opacity: 0; pointer-events: none; }
-.segmented label { font-size: 12.5px; color: var(--sub); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; }
-.segmented input:checked + label { color: #fff; background: color-mix(in srgb, var(--accent) 78%, var(--ink)); border-color: transparent; }
-.form-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-
 /* ── narrow screens: the fit gutter shrinks, the chevron goes (the whole row is
    already tappable), and the detail block spans the full width. ───────────────── */
 @media (max-width: 620px) {
@@ -782,7 +760,6 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 
 @media (max-width: 560px) {
   :root { --masthead: 68px; }
-  .split { grid-template-columns: 1fr; }
   .drawer { top: auto; bottom: 0; width: 100%; max-width: 100%; }
   .drawer-body { transform: translateY(100%); border-radius: var(--radius) var(--radius) 0 0; }
   .drawer:hover .drawer-body, .drawer.open .drawer-body { transform: translateY(0); }

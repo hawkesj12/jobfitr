@@ -260,12 +260,12 @@ def test_no_log_line_carries_the_address(model, monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG):
         fake = chat._call
         monkeypatch.setattr(chat, "_call", _raise_402)
-        assert _say(c).json()["error"] == "service_unavailable"     # turn 1
+        assert _say(c).json()["error"] == "service_unavailable"     # refused, so given back
         monkeypatch.setattr(chat, "_call", fake)
-        first = [_say(c).status_code for _ in range(3)]            # 2, 3, then the cap
+        first = [_say(c).status_code for _ in range(4)]            # 1, 2, 3, then the cap
         monkeypatch.setattr(chat, "PER_ADDRESS_DAILY", 1000)
         statuses = [_say(c).status_code for _ in range(25)]        # past CHAT_RATE_LIMIT
-    assert first == [200, 200, 429]
+    assert first == [200, 200, 200, 429]
     assert 429 in statuses
     assert any("exceeded" in r.getMessage() for r in caplog.records), \
         "the rate limiter's line was not captured, so this test proved nothing about it"
@@ -286,3 +286,196 @@ def test_the_request_log_line_has_its_address_blanked(caplog):
             '%s - "%s %s HTTP/%s" %d', "203.0.113.99:51234", "POST", "/api/chat", "1.1", 200)
     msg = caplog.records[-1].getMessage()
     assert "203.0.113.99" not in msg and '"POST /api/chat HTTP/1.1" 200' in msg
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Second round: what the review of the first version broke (parallel turns past the
+# dollar caps, a 402 forgetting delivered picks, an outage spending allowances).
+# ═══════════════════════════════════════════════════════════════════════════════════
+def _call_reply(content=None, cost=0.0, tool=None):
+    m = {"role": "assistant", "content": content}
+    if tool:
+        name, args, tid = tool
+        m["tool_calls"] = [{"id": tid, "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)}}]
+    return {"choices": [{"message": m}], "model": "test", "usage": {"cost": cost}}
+
+
+def _fake_tools(name, args, state):
+    """search finds one posting; recommend delivers it. Stands in for the real tools,
+    whose own checks are tested in test_chat.py."""
+    if name == "search_jobs":
+        return {"returned": 1, "jobs": [{"url": "https://ex.test/j1", "title": "Driver"}]}
+    if name == "recommend":
+        return {"delivered": 1, "picks": [{"url": "https://ex.test/j1", "title": "Driver"}],
+                "ruled_out": [], "brief": []}
+    return {"error": "no tool"}
+
+
+def _script(monkeypatch, steps):
+    """`_call` answers from `steps`; the string "402" raises an account refusal."""
+    it = iter(steps)
+
+    async def fake(payload):
+        x = next(it)
+        if x == "402":
+            await _raise_402(payload)
+        return x
+
+    monkeypatch.setattr(chat, "_call", fake)
+    monkeypatch.setattr(chat, "_run_tool", _fake_tools)
+
+
+_SEARCH = _call_reply(cost=0.29, tool=("search_jobs", {"titles": ["Driver"]}, "t1"))
+_RECOMMEND = _call_reply(cost=0.29, tool=("recommend", {"picks": [{"url": "https://ex.test/j1"}]}, "t2"))
+
+
+# ── finding 1: parallel turns ──────────────────────────────────────────────────────────
+def test_parallel_turns_from_one_address_cannot_run_past_its_dollar_cap(model, monkeypatch):
+    # The review's repro: 20 at once, a model at $0.29 a call taking 0.2 s. It was $5.80
+    # against a $2.50 cap.
+    monkeypatch.setattr(chat, "PER_ADDRESS_SPEND_USD", 2.5)
+    monkeypatch.setattr(chat, "DAILY_SPEND_USD", 100.0)
+    monkeypatch.setattr(chat, "PER_ADDRESS_DAILY", 1000)
+
+    async def slow(payload):
+        await asyncio.sleep(0.2)
+        return _reply("ok", 0.29)
+
+    monkeypatch.setattr(chat, "_call", slow)
+    monkeypatch.setattr(server.limiter, "enabled", False)   # 20+ requests: the cap under test is not the rate limit
+    addr = "203.0.113.110"
+
+    async def burst(n):
+        tr = httpx.ASGITransport(app=server.app, client=(addr, 1))
+        async with httpx.AsyncClient(transport=tr, base_url="http://t") as c:
+            return await asyncio.gather(*[
+                c.post("/api/chat", json={"session": None, "message": "hi"}) for _ in range(n)])
+
+    rs = asyncio.run(burst(20))
+    codes = [r.status_code for r in rs]
+    assert codes.count(200) == chat.PER_ADDRESS_CONCURRENT == 2
+    assert {r.json()["detail"] for r in rs if r.status_code == 429} == {"address_busy"}
+    assert chat._inflight == {}                 # every running mark was released
+    # Burst after burst, the address stops within one call per running turn of its cap.
+    for _ in range(9):                          # 9 x 2 = 18 more chances
+        asyncio.run(burst(2))
+    spend = chat._usage["addrs"][chat._addr_key(addr)][1]
+    assert 2.5 <= spend <= 2.5 + chat.PER_ADDRESS_CONCURRENT * 0.29 + 1e-9
+
+
+def test_a_second_address_can_run_while_the_first_is_at_its_limit(model, monkeypatch):
+    for _ in range(chat.PER_ADDRESS_CONCURRENT):
+        chat.start_running("203.0.113.111")
+    r = _say(_client("203.0.113.111"))
+    assert r.status_code == 429 and r.json()["detail"] == "address_busy"
+    assert _say(_client("203.0.113.112")).status_code == 200
+
+
+def test_a_running_mark_that_is_never_released_expires(monkeypatch):
+    # A stream dropped before it started never reaches its `finally`.
+    addr = "203.0.113.113"
+    for _ in range(chat.PER_ADDRESS_CONCURRENT):
+        chat.start_running(addr)
+    assert chat.too_many_running(addr)
+    real = chat.time.time
+    monkeypatch.setattr(chat.time, "time", lambda: real() + chat.INFLIGHT_TTL + 1)
+    assert not chat.too_many_running(addr)
+    assert chat._inflight == {}
+
+
+def test_the_dollar_cap_is_rechecked_before_every_model_call(model, monkeypatch):
+    # Search ($0.29) then recommend ($0.29) delivers; the closing note's call would take
+    # the address past $0.50, so the turn stops there and keeps the picks.
+    monkeypatch.setattr(chat, "PER_ADDRESS_SPEND_USD", 0.5)
+    _script(monkeypatch, [_SEARCH, _RECOMMEND, _call_reply("closing", 0.29)])
+    c = _client("203.0.113.114")
+    d = _say(c, "I drive a forklift, that's everything, search now").json()
+    assert d["error"] == "address_daily_cap"
+    assert [p["url"] for p in d["picks"]] == ["https://ex.test/j1"]
+    assert chat._usage["addrs"][chat._addr_key("203.0.113.114")][1] == pytest.approx(0.58)
+    st = chat._sessions[d["session"]]
+    assert any(m.get("role") == "tool" and "ex.test/j1" in m["content"] for m in st["convo"])
+
+
+def test_the_site_cap_reached_mid_turn_stops_it_on_the_stream_too(model, monkeypatch):
+    monkeypatch.setattr(chat, "DAILY_SPEND_USD", 0.3)
+    _script(monkeypatch, [_SEARCH, _RECOMMEND])
+    frames = _frames(_say(_client("203.0.113.115"), "drive, search now", stream=True))
+    assert frames[-1]["type"] == "done" and frames[-1]["result"]["error"] == "daily_spend"
+
+
+# ── finding 2: a 402 after picks were delivered ───────────────────────────────────────
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_402_after_delivery_keeps_the_answer_and_a_follow_up_sees_it(model, monkeypatch, stream):
+    _script(monkeypatch, [_SEARCH, _RECOMMEND, "402"])
+    c = _client(f"203.0.113.{120 + stream}")
+    r = _say(c, "I drive a forklift, that's everything, search now", stream=stream)
+    if stream:
+        frames = _frames(r)
+        assert "picks" in [f["type"] for f in frames]
+        assert frames[-1]["type"] == "done"     # it ENDS with the answer, not an error frame
+        d = frames[-1]["result"]
+    else:
+        d = r.json()
+    assert d["error"] == "service_unavailable"
+    assert [p["url"] for p in d["picks"]] == ["https://ex.test/j1"]
+    sid = d["session"]
+    assert chat._sessions[sid]["turns"] == 1     # an answer was given: the turn counts
+    # After a top-up the next message reaches the model with the earlier picks in it.
+    seen = []
+
+    async def topped_up(payload):
+        seen.append(payload)
+        return _reply("The Driver job is the closest.")
+
+    monkeypatch.setattr(chat, "_call", topped_up)
+    d2 = c.post("/api/chat", json={"session": sid, "message": "tell me more about that one"}).json()
+    assert d2["reply"] == "The Driver job is the closest."
+    sent = json.dumps(seen[0]["messages"])
+    assert "ex.test/j1" in sent and "recommend" in sent
+
+
+def test_a_402_after_a_search_but_before_delivery_keeps_the_search(model, monkeypatch):
+    _script(monkeypatch, [_SEARCH, "402"])
+    d = _say(_client("203.0.113.123"), "drive, search now").json()
+    assert d["error"] == "service_unavailable"
+    st = chat._sessions[d["session"]]
+    assert any(m.get("role") == "tool" for m in st["convo"])   # as the generic path keeps it
+    assert st["turns"] == 0                                    # nothing delivered: given back
+
+
+# ── finding 3: an outage must not spend anyone's allowance ────────────────────────────
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_outage_gives_back_the_address_and_site_turns(model, monkeypatch, stream):
+    monkeypatch.setattr(chat, "PER_ADDRESS_DAILY", 3)
+    monkeypatch.setattr(chat, "_call", _raise_402)
+    addr = f"203.0.113.{130 + stream}"
+    c = _client(addr)
+    for _ in range(6):                          # twice the cap, all refused upstream
+        assert _say(c, stream=stream).status_code == 200
+    assert chat._usage["count"] == 0
+    assert chat._usage["addrs"][chat._addr_key(addr)][0] == 0
+    monkeypatch.setattr(chat, "_call", lambda p: asyncio.sleep(0, result=_reply("Hi")))
+    assert _say(c).status_code == 200           # after the top-up they are not locked out
+
+
+def test_a_turn_that_delivered_before_the_402_is_not_given_back(model, monkeypatch):
+    _script(monkeypatch, [_SEARCH, _RECOMMEND, "402"])
+    _say(_client("203.0.113.132"), "drive, search now")
+    assert chat._usage["count"] == 1
+
+
+# ── finding 4: the defaults, and the arithmetic they rest on ──────────────────────────
+def test_the_defaults_are_sized_for_a_shared_network():
+    import math
+    import os
+    if any(os.environ.get(v) for v in ("CHAT_PER_ADDRESS_DAILY", "CHAT_PER_ADDRESS_SPEND_USD",
+                                       "CHAT_DAILY_SPEND_USD", "CHAT_PER_ADDRESS_CONCURRENT")):
+        pytest.skip("overridden in this environment")
+    assert (chat.PER_ADDRESS_DAILY, chat.PER_ADDRESS_SPEND_USD, chat.DAILY_SPEND_USD) == (50, 4.0, 10.0)
+    assert chat.PER_ADDRESS_DAILY // 5 == 10                      # ten five-turn conversations
+    assert int(chat.PER_ADDRESS_SPEND_USD // 0.32) == 12          # dearest measured conversation
+    assert math.ceil(chat.DAILY_SPEND_USD / chat.PER_ADDRESS_SPEND_USD) == 3   # networks per site day
+    # Fifty turns that each search would outspend the site; the dollar cap is what binds.
+    assert chat.PER_ADDRESS_DAILY * 0.29 > chat.DAILY_SPEND_USD

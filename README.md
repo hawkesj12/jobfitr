@@ -176,23 +176,36 @@ cp .env.example .env
 | `CHAT_MODEL` | `anthropic/claude-sonnet-5.5` | The OpenRouter model id. Must support tool calls. About $0.10-0.40 a conversation on the default; cheaper models run it for a cent and follow the interview less well. |
 | `CHAT_DAILY_SPEND_USD` | `10` | **The spend cap.** Model dollars per day (Eastern), summed from the cost the provider reports for each model call. Once reached, new turns get a 503 and the page says the day's limit is reached. |
 | `CHAT_DAILY_CEILING` | `100` | Turns per day, site-wide, before the chat answers 503. A turn is one message; a conversation is about five. A second guard, for a model that does not report its cost. |
-| `CHAT_PER_ADDRESS_DAILY` | `30` | Turns per day from one client address. Past it that visitor gets a 429 and a message that it is their own limit; everyone else carries on. |
-| `CHAT_PER_ADDRESS_SPEND_USD` | `2.5` | Model dollars per day from one client address, so no single visitor can spend the whole day's cap. |
+| `CHAT_PER_ADDRESS_DAILY` | `50` | Turns per day from one client address. An address is often a whole office or carrier network, so this is sized for a group: ten five-turn conversations. Past it that address gets a 429 and a message that its network's limit is reached; everyone else carries on. |
+| `CHAT_PER_ADDRESS_SPEND_USD` | `4` | Model dollars per day from one client address: 12 to 26 conversations at the measured $0.15–0.32 each. It takes three addresses to spend the site's $10. |
+| `CHAT_PER_ADDRESS_CONCURRENT` | `2` | Turns one address may have running at once. A third gets a 429 and "wait a few seconds". This is what keeps parallel requests from running past the dollar caps. |
 | `CHAT_MAX_ADDRESSES` | `10000` | How many addresses the per-address counters remember (about 2.5 MB); past it the one seen longest ago is forgotten. |
 | `CHAT_RATE_LIMIT` | `20/minute` | Per-address limit on both chat endpoints. |
-
-**What those limits are and are not.** Every counter above is held in the server process's
-memory. A restart or a deploy resets them, and each of the two blue-green slots keeps its own,
-so the real ceiling is "per process, per day". Turns already running when a cap is reached
-finish, and can carry the total a little past it. If the provider refuses the account (out
-of credit, or the key rejected), the page says the assistant is unavailable and the server
-logs the reason at WARNING.
 | `CHAT_MAX_SEARCHES` | `4` | Searches per answer. Past this the search tool refuses and the model has to read and decide. |
 | `CHAT_WARM_WAIT` | `12` | Seconds a search waits for the live job sources before answering from what is stored. The fetch finishes in the background and the next search sees it. |
 | `CHAT_CHECK_LIVE` | `1` | Ask each chosen posting whether it is still up before showing it. `0` turns it off. |
 | `CHAT_STREAM` | `1` | Stream the model's words as they are written. |
 | `CHAT_SESSION_TTL` | `7200` | Seconds a conversation is kept in memory after its last message. |
 | `CHAT_ALLOW_CLIENT_HISTORY`, `CHAT_ALLOW_MODEL_OVERRIDE` | off | For a local measurement harness only: accept a client-supplied transcript, and let the caller pick the model. Never set these on a public box. |
+
+**What those limits are and are not.**
+
+- **Per process, per day.** Every counter above is held in the server process's memory. A
+  restart or a deploy resets them, and each of the two blue-green slots keeps its own.
+- **How far past a dollar cap a day can go.** Both dollar caps are checked when a turn
+  starts and again before every model call inside it, so the only spending that can land
+  after a cap is reached is the model calls already in flight at that moment, one per
+  running turn. With two turns per address that is at most two calls, about $0.58 at the
+  dearest turn measured. Site-wide it is one call for each turn running anywhere.
+- **What the spend total counts.** The cost the provider reports for each model call that
+  completes. A streamed call cut off before its last chunk (the visitor closed the tab
+  mid-sentence, or a dropped connection was retried) is billed by the provider but never
+  reported, so it is not in the total.
+- **Running out of credit.** If the provider refuses the account (out of credit, or the
+  key rejected), the server logs the reason at WARNING and the page says the assistant is
+  unavailable. A turn that had already delivered its picks keeps them, on screen and in the
+  conversation. A turn that delivered nothing gives back the turn it counted, so an outage
+  does not use up anyone's daily allowance.
 
 ## Commands
 
@@ -249,7 +262,7 @@ Every response also tells you what it took: searches run, postings read, seconds
 model, and the model spend for that answer. It is printed under the results on purpose.
 
 **One thing is counted per address: how many chat turns, and how many model dollars, it
-has used today.** That is what lets one visitor be stopped without stopping everyone. The
+has used today, and how many of its turns are running right now.** That is what lets one visitor be stopped without stopping everyone. The
 counter is kept in the server's memory only, under a salted hash of the address rather than
 the address itself, with a salt that is made new every time the server starts. It is never
 written to disk, never logged, and it is cleared at midnight Eastern and on every restart.

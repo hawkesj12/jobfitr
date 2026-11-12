@@ -263,7 +263,7 @@ app.add_middleware(_SecurityHeaders)
 # X-Forwarded-For cannot choose their key. (Read from uvicorn 0.52's ProxyHeadersMiddleware;
 # not observed on the box, where nothing logs the address to look at.) If that ever
 # stopped holding, every visitor would share one key and the per-address cap would act as
-# a 30-turn site-wide ceiling.
+# a 50-turn, $4 site-wide ceiling with two turns running at a time.
 client_address = get_remote_address
 limiter = Limiter(key_func=client_address)
 app.state.limiter = limiter
@@ -629,9 +629,7 @@ def candidates_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     }
 
 
-# The error a turn reports when the model provider refuses the ACCOUNT (out of credit, key
-# rejected). The page shows "unavailable right now" for it, not "something went wrong".
-UNAVAILABLE = "service_unavailable"
+UNAVAILABLE = chatmod.UNAVAILABLE
 
 
 def _chat_input(payload: dict, addr: str | None = None) -> tuple[str | None, dict | None, list]:
@@ -656,6 +654,9 @@ def _chat_input(payload: dict, addr: str | None = None) -> tuple[str | None, dic
     # 429, not 503: the site is up, THIS address is done for the day. The page says so.
     if chatmod.address_cap_reached(addr):
         raise HTTPException(status_code=429, detail="address_daily_cap")
+    # Parallel turns from one address overran its dollar cap 2x (chat.PER_ADDRESS_CONCURRENT).
+    if chatmod.too_many_running(addr):
+        raise HTTPException(status_code=429, detail="address_busy")
     message = payload.get("message")
     if isinstance(message, str) and message.strip():
         sid, state = chatmod.session(payload.get("session"))
@@ -692,7 +693,10 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     """
     addr = client_address(request)
     sid, state, messages = _chat_input(payload, addr)
+    # Counted and marked running with no `await` since the checks, so concurrent requests
+    # cannot both pass a check that only one of them should.
     chatmod.note_request(addr)
+    chatmod.start_running(addr)
     try:
         if state is None:
             return await chatmod.turn(messages, payload.get("model"), addr=addr)
@@ -705,11 +709,15 @@ async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
                 raise
         return {**out, "session": sid}
     except chatmod.UpstreamUnavailable:
-        # Already logged at WARNING, with the reason, where it was caught.
+        # Already logged at WARNING, with the reason, where it was caught. Nothing was
+        # delivered (a turn that delivered returns normally), so the day's counts go back.
+        chatmod.refund_request(addr)
         return {"reply": "", "trace": [], "error": UNAVAILABLE, "session": sid}
     except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
         log.warning("chat turn failed: %s: %s", type(e).__name__, e)
         return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}", "session": sid}
+    finally:
+        chatmod.stop_running(addr)
 
 
 @app.post("/api/chat/stream")
@@ -736,6 +744,9 @@ async def chat_stream(request: Request, payload: dict = Body(...)):
     addr = client_address(request)
     sid, state, messages = _chat_input(payload, addr)
     chatmod.note_request(addr)
+    # Released in frames()' `finally`. A stream the client drops before it ever starts
+    # never runs that; chat.INFLIGHT_TTL expires the mark instead.
+    chatmod.start_running(addr)
 
     async def run():
         async for ev in chatmod.turn_events(messages, payload.get("model"), state, addr=addr):
@@ -766,11 +777,15 @@ async def chat_stream(request: Request, payload: dict = Body(...)):
                         state["turns"] -= 1   # nothing was answered; do not spend their turn
                         raise
         except chatmod.UpstreamUnavailable:
-            # Already logged at WARNING, with the reason, where it was caught.
+            # Already logged at WARNING, with the reason, where it was caught. Nothing was
+            # delivered (a turn that delivered ends with `done`), so the counts go back.
+            chatmod.refund_request(addr)
             yield f"data: {json.dumps({'type': 'error', 'error': UNAVAILABLE})}\n\n"
         except Exception as e:  # noqa: BLE001 — a fault is a frame; see the docstring
             log.warning("chat stream failed: %s: %s", type(e).__name__, e)
             yield f"data: {json.dumps({'type': 'error', 'error': f'upstream: {type(e).__name__}'})}\n\n"
+        finally:
+            chatmod.stop_running(addr)
 
     return StreamingResponse(frames(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",

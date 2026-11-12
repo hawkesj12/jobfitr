@@ -9,8 +9,9 @@ quietly rather than loudly:
   which the streaming path never calls, so a test would pass its fake and then dial out.
 * `chat._sessions` is module state. A conversation left behind by one test is a transcript
   the next one inherits.
-* `chat._usage` holds the day's turn, spend and per-address counts. Left alone, every
-  test client shares one address and the suite would trip the per-address cap on its own.
+* `chat._usage` holds the day's turn, spend and per-address counts, and `chat._inflight`
+  the turns running per address. Left alone, every test client shares one address and
+  the suite would trip the per-address caps on its own.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ def _no_network_no_leftovers(monkeypatch):
     monkeypatch.setattr(chat, "STREAM", False)
     chat._sessions.clear()
     chat._usage["date"] = ""     # the daily caps: an empty date makes the next check roll the day
+    chat._inflight.clear()
     yield
     chat._sessions.clear()
     chat._usage["date"] = ""
+    chat._inflight.clear()
