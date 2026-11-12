@@ -9,7 +9,15 @@ import json
 
 import pytest
 
-from bakeoff import client, scoring
+# `bakeoff/` scores the config-filling chat that was deleted on 2026-08-20: it imports
+# `CONFIG_FIELDS` / `TURN_SCHEMA` from jobfitr.chat, which no longer exist, so this module
+# has failed at COLLECTION since then and taken the whole `pytest` run down with it. The
+# current model comparison lives in the private lab. Skipped with the reason rather than
+# deleted, because removing the package is a decision, not a cleanup.
+try:
+    from bakeoff import client, scoring
+except ImportError as e:  # pragma: no cover
+    pytest.skip(f"bakeoff/ targets the retired config-filling chat ({e})", allow_module_level=True)
 
 
 # ── scorer: schema validity ───────────────────────────────────────────────────

@@ -217,7 +217,8 @@ button { font: inherit; cursor: pointer; }
 .proof b { color: var(--ink); font-weight: 600; }
 .proof .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); }
 .proof .sep { opacity: 0.4; }
-/* the interview progress dots — four questions, so show where you are */
+/* the row the assistant speaks in. `.steps` held the old fixed interview's progress dots;
+   the model now asks as many questions as it needs, and chat.js removes the element. */
 .sayrow { display: flex; align-items: baseline; gap: 10px; width: 100%; }
 .sayrow:has(.chat-say:empty) { display: none; } /* nothing said yet → no empty row */
 .steps { display: inline-flex; gap: 5px; flex: none; transform: translateY(-3px); }
@@ -716,29 +717,6 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .gcard.flying { animation: fly 460ms cubic-bezier(0.5, 0, 0.75, 0) forwards; z-index: 30; }
 .gcard.dismissing { transition: opacity 260ms ease, transform 260ms ease; opacity: 0; transform: scale(0.94); }
 
-/* ── the fallback form (glassed) ────────────────────────────────────────────── */
-.form-view { min-height: 62vh; display: flex; align-items: center; }
-.search-form { padding: 26px 26px 24px; display: flex; flex-direction: column; gap: 20px; width: 100%; }
-.form-head { display: flex; flex-direction: column; gap: 4px; padding-bottom: 4px; border-bottom: 1px solid var(--card-brd); }
-.form-head h2 { font-size: 20px; font-weight: 660; letter-spacing: -0.02em; }
-.form-sub { font-size: 13px; color: var(--sub); }
-.field legend { padding: 0; }
-.field { display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 0; }
-.field label, .field legend, .field .label { font-weight: 600; font-size: 14px; }
-.field .sub { font-weight: 500; font-size: 12.5px; color: var(--sub); }
-.hint { color: var(--sub); font-size: 12px; }
-.field input { border: 1px solid var(--card-brd); background: var(--field-bg); color: var(--ink); border-radius: 9px; padding: 9px 11px; font-size: 14px; outline: none; }
-.field input::placeholder { color: var(--sub); }
-.split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.with-suffix { display: flex; align-items: center; gap: 6px; }
-.with-suffix input { width: 80px; }
-.suffix { color: var(--sub); font-size: 13px; }
-.segmented { display: flex; flex-wrap: wrap; gap: 6px; }
-.segmented input { position: absolute; opacity: 0; pointer-events: none; }
-.segmented label { font-size: 12.5px; color: var(--sub); background: var(--field-bg); border: 1px solid var(--card-brd); border-radius: 100px; padding: 6px 12px; }
-.segmented input:checked + label { color: #fff; background: color-mix(in srgb, var(--accent) 78%, var(--ink)); border-color: transparent; }
-.form-actions { display: flex; gap: 10px; flex-wrap: wrap; }
-
 /* ── narrow screens: the fit gutter shrinks, the chevron goes (the whole row is
    already tappable), and the detail block spans the full width. ───────────────── */
 @media (max-width: 620px) {
@@ -782,7 +760,6 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 
 @media (max-width: 560px) {
   :root { --masthead: 68px; }
-  .split { grid-template-columns: 1fr; }
   .drawer { top: auto; bottom: 0; width: 100%; max-width: 100%; }
   .drawer-body { transform: translateY(100%); border-radius: var(--radius) var(--radius) 0 0; }
   .drawer:hover .drawer-body, .drawer.open .drawer-body { transform: translateY(0); }
@@ -819,7 +796,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 }
 
 /* ── the answer, rendered in the conversation ──────────────────────────────
-   The agent returns five jobs with reasons, not 200 scored rows, so these are
+   The agent returns up to five jobs with reasons, not 200 scored rows, so these are
    cards in the transcript rather than a board you switch to. */
 .echo-act { margin: .6rem 0 .2rem; font-size: .82rem; opacity: .62; }
 .echo-act ul { margin: 0; padding-left: 1.05rem; }
@@ -836,9 +813,76 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .pick-pay { font-variant-numeric: tabular-nums; }
 .pick-tag { text-transform: capitalize; opacity: .8; }
 .pick-why { margin: 0 0 .5rem; font-size: .92rem; line-height: 1.5; }
-.pick-caveat { margin: 0 0 .55rem; font-size: .85rem; opacity: .7; font-style: italic; }
 .pick-go { font-size: .85rem; font-weight: 600; text-decoration: none; }
 .pick-go:hover { text-decoration: underline; }
+
+/* Links inside the answer. They had no colour rule at all, so every card title rendered
+   in the browser's default blue (rgb(0,0,238)) over the sky. Ink, with the accent as the
+   underline, so a link reads as part of the page and still reads as a link. */
+.echo a { color: var(--ink); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 80%, var(--ink)); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+.echo a:hover { text-decoration-color: var(--ink); }
+.echo a:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
+.echo a.pick-title { text-decoration: none; }
+.echo a.pick-title:hover { text-decoration: underline; }
+
+/* The card body is read, not scanned: the system face, not the transcript's mono. */
+.pick, .ruled, .none-fit { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); }
+.pick-age { opacity: .85; }
+
+/* The quote: the employer's words, found in the posting by the server. Set apart so it
+   cannot be mistaken for the model's. */
+.pick-quote { margin: 0 0 .6rem; padding: .1rem 0 .1rem .8rem; border-left: 2px solid color-mix(in srgb, var(--accent) 85%, var(--ink)); font-size: .88rem; line-height: 1.5; opacity: .88; }
+.pick-quote-lab { display: block; font-family: var(--mono); font-size: var(--t-micro); letter-spacing: .04em; text-transform: uppercase; opacity: .65; margin-bottom: .15rem; }
+
+/* Warnings: what to know before clicking. Not italic grey, which is how the old caveat
+   was styled and why nobody read it. */
+.pick-warn { list-style: none; margin: 0 0 .65rem; padding: .5rem .7rem; border-radius: 9px; font-size: .86rem; line-height: 1.45; background: color-mix(in srgb, #b4462e 9%, transparent); border: 1px solid color-mix(in srgb, #b4462e 30%, transparent); }
+.pick-warn li { margin: .12rem 0; padding-left: 1.05rem; position: relative; }
+.pick-warn li::before { content: "!"; position: absolute; left: 0; font-weight: 700; color: #b4462e; }
+
+/* The ruled-out list, promised on the front page since August and rendered nowhere. */
+.ruled { margin: .4rem 0 1.1rem; }
+.ruled h3 { font-family: var(--mono); font-size: var(--t-micro); font-weight: 700; letter-spacing: .05em; text-transform: uppercase; opacity: .7; margin-bottom: .45rem; }
+.ruled ul { list-style: none; margin: 0; padding: 0; display: grid; gap: .55rem; }
+.ruled li { font-size: .88rem; line-height: 1.45; padding-left: .8rem; border-left: 2px solid var(--card-brd); }
+.ruled-co { opacity: .7; margin-left: .35rem; }
+.ruled-by { font-family: var(--mono); font-size: 10.5px; margin-left: .4rem; padding: 1px 6px; border-radius: 100px; border: 1px solid color-mix(in srgb, #b4462e 40%, transparent); color: color-mix(in srgb, #b4462e 80%, var(--ink)); white-space: nowrap; }
+.ruled-why, .ruled-quote { display: block; }
+.ruled-quote { opacity: .7; font-size: .84rem; }
+.none-fit { margin: .8rem 0; font-size: .95rem; font-weight: 600; }
+
+/* The receipt: what the answer cost to produce, stated on purpose. */
+.receipt { margin: .2rem 0 1rem; font-size: var(--t-micro); opacity: .7; }
+.receipt-lab { text-transform: uppercase; letter-spacing: .05em; font-weight: 700; margin-right: .4rem; }
+
+.chat-say.long { font-size: var(--t-body); font-weight: 480; line-height: 1.55; text-wrap: pretty; }
+/* The working line, on screen the moment a message is sent. */
+.chat-say.working { font-weight: 500; opacity: .8; }
+.chat-say .dots::after { content: "…"; display: inline-block; animation: dots 1.2s steps(4, end) infinite; clip-path: inset(0 100% 0 0); }
+@keyframes dots { to { clip-path: inset(0 -10% 0 0); } }
+.chat-say .work-s { font-family: var(--mono); font-size: var(--t-micro); opacity: .7; }
+@media (prefers-reduced-motion: reduce) { .chat-say .dots::after { animation: none; clip-path: none; } }
+
+/* The reply, as paragraphs and list items rather than one block. Spans, because the
+   reply lives in a <p> and block elements cannot nest in one. */
+.say-p, .say-li { display: block; }
+.say-p + .say-p, .say-li + .say-p, .say-p + .say-li { margin-top: .55em; }
+.say-li { padding-left: 1.1em; position: relative; }
+.say-li::before { content: "–"; position: absolute; left: 0; opacity: .6; }
+.say-h { font-weight: 700; }
+
+/* Once the conversation is long enough to scroll, the transcript passed straight under
+   the sticky masthead and the logo sat on top of the text. A full-width blur behind the
+   masthead, fading out at its lower edge, so text dissolves as it passes under. A solid
+   band was tried first and showed as a flat stripe across a sky that is a gradient. */
+.site-header::before {
+  content: ""; position: fixed; top: 0; left: 0; right: 0; height: calc(var(--masthead) + 10px);
+  z-index: -1; pointer-events: none;
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent);
+}
+/* the explainer's paragraphs */
+.doornotes p + p { margin-top: .7em; }
 
 /* ── the live activity list ────────────────────────────────────────────────
    Steps arrive one at a time now, mid-turn, instead of all at once when the
@@ -865,7 +909,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
    the whole document and the body scrolled sideways. Seen 2026-08-20 in a
    browser, invisible to every test. The prompt no longer asks for that prose,
    but the layout must not DEPEND on the model behaving — this is the backstop. */
-.chat-say, .echo-q, .echo-a, .pick-why, .pick-caveat {
+.chat-say, .echo-q, .echo-a, .pick-why, .pick-quote, .pick-warn, .ruled li, .receipt {
   overflow-wrap: anywhere;
   word-break: break-word;
 }

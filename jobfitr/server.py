@@ -68,6 +68,35 @@ log = logging.getLogger("jobfitr")
 logging.basicConfig(level=logging.WARNING)
 log.setLevel(os.environ.get("JOBFITR_LOG_LEVEL", "INFO").upper())
 
+
+class _NoAddress(logging.Filter):
+    """Blank the client address in the two third-party log lines that print one.
+
+    Found 2026-11-12 while adding the per-address chat caps, by reading the two libraries'
+    source (uvicorn 0.52, slowapi), not the box's journal: uvicorn's access log, on by
+    default under `jobfitr-serve`, opens every request line with `ip:port`, and slowapi
+    logs `ratelimit 20/minute (<ip>) exceeded` at WARNING. Both went to the journal, under
+    a README that says nothing identifying is kept. The lines are still useful (traffic,
+    status codes, a client being throttled), so they stay and only the address goes.
+    """
+
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = index
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and len(record.args) > self.index:
+            args = list(record.args)
+            args[self.index] = "-"
+            record.args = tuple(args)
+        return True
+
+
+# uvicorn.access: (client_addr, method, path, http_version, status).
+# slowapi: ("ratelimit %s (%s) exceeded at endpoint: %s", limit, key, endpoint).
+logging.getLogger("uvicorn.access").addFilter(_NoAddress(0))
+logging.getLogger("slowapi").addFilter(_NoAddress(1))
+
 # Build the SQLite store schema + pull in the current harvest snapshot.
 store.init()
 
@@ -175,8 +204,68 @@ app = FastAPI(title="jobfitr", version="0.1.0", lifespan=lifespan)
 # makes a bigger board cheap enough to hand a phone on cell data.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-# Per-IP rate limiting.
-limiter = Limiter(key_func=get_remote_address)
+# ── security headers ─────────────────────────────────────────────────────────
+# None were sent until 2026-11-11 (a tester read the network tab as a CTO would). They are
+# set HERE and not in deploy/Caddyfile for one reason: `deploy-slot.sh` never installs
+# Caddy config or unit files, so a header that lives there ships only if someone
+# remembers a manual step. Here it ships with the code and the test suite asserts it.
+#
+# The policy is as tight as the page allows. Everything is same-origin: two script files,
+# one stylesheet, no CDN, no inline script. `data:` images are the favicon and the grain
+# texture in style.css. Inline STYLE stays allowed because atmosphere.js paints the sky
+# through style attributes.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; "
+        "form-action 'self'; frame-ancestors 'none'"),
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+class _SecurityHeaders:
+    """Pure ASGI, not BaseHTTPMiddleware: this wraps `send` and touches only the response
+    start, so the SSE stream passes through frame by frame with nothing in between."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                have = {k.lower() for k, _ in message.get("headers") or []}
+                message.setdefault("headers", [])
+                for k, v in SECURITY_HEADERS.items():
+                    if k.lower().encode() not in have:
+                        message["headers"].append((k.lower().encode(), v.encode()))
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(_SecurityHeaders)
+
+
+# Per-IP rate limiting, and the per-address daily chat caps (chat.py, "cost control"), read
+# the address from ONE function so the two cannot drift apart.
+#
+# It is the REAL client behind Caddy, not 127.0.0.1, without any setting here: uvicorn
+# applies X-Forwarded-For by default when the peer is in FORWARDED_ALLOW_IPS, which
+# defaults to 127.0.0.1, and Caddy's reverse_proxy is that peer and sets the header. It
+# takes the rightmost address not in that trusted set, so a visitor who sends their own
+# X-Forwarded-For cannot choose their key. (Read from uvicorn 0.52's ProxyHeadersMiddleware;
+# not observed on the box, where nothing logs the address to look at.) If that ever
+# stopped holding, every visitor would share one key and the per-address cap would act as
+# a 50-turn, $4 site-wide ceiling with two turns running at a time.
+client_address = get_remote_address
+limiter = Limiter(key_func=client_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -540,80 +629,163 @@ def candidates_endpoint(request: Request, payload: dict = Body(...)) -> dict:
     }
 
 
+UNAVAILABLE = chatmod.UNAVAILABLE
+
+
+def _chat_input(payload: dict, addr: str | None = None) -> tuple[str | None, dict | None, list]:
+    """(session id, state, the new messages) for a chat request, or an HTTP error.
+
+    THE PAGE SENDS `{"session": id-or-null, "message": "..."}`. The transcript is held by
+    the server (see chat.py, "the conversation's memory lives HERE"), so there is nothing
+    for a visitor to forge.
+
+    The older `{"messages": [...]}` shape is still read, for the deploy gate, which sends
+    exactly one user message and wants one dict back. More than that is a client-supplied
+    history, and it is refused unless CHAT_ALLOW_CLIENT_HISTORY=1 (the bakeoff harness,
+    locally). Refused with a 422 and a reason, not silently trimmed: a caller who believes
+    their history was read should find out it was not.
+    """
+    if not chatmod.available():
+        raise HTTPException(status_code=503, detail="agent_unavailable")
+    if chatmod.daily_spend_reached():
+        raise HTTPException(status_code=503, detail="daily_spend")
+    if chatmod.daily_ceiling_reached():
+        raise HTTPException(status_code=503, detail="daily_ceiling")
+    # 429, not 503: the site is up, THIS address is done for the day. The page says so.
+    if chatmod.address_cap_reached(addr):
+        raise HTTPException(status_code=429, detail="address_daily_cap")
+    # Parallel turns from one address overran its dollar cap 2x (chat.PER_ADDRESS_CONCURRENT).
+    if chatmod.too_many_running(addr):
+        raise HTTPException(status_code=429, detail="address_busy")
+    message = payload.get("message")
+    if isinstance(message, str) and message.strip():
+        sid, state = chatmod.session(payload.get("session"))
+        if state["turns"] >= chatmod.MAX_TURNS:
+            raise HTTPException(status_code=429, detail="turn_cap")
+        if state["lock"].locked():
+            # One turn at a time per conversation; a double-submit must not run two
+            # metered loops over the same transcript.
+            raise HTTPException(status_code=409, detail="turn_in_progress")
+        return sid, state, [{"role": "user", "content": message.strip()[:4000]}]
+    messages = chatmod.sanitize_messages(payload.get("messages"))
+    if not messages:
+        raise HTTPException(status_code=422, detail="message required")
+    if not chatmod.ALLOW_CLIENT_HISTORY and (len(messages) != 1 or messages[0]["role"] != "user"):
+        raise HTTPException(status_code=422, detail="client_history_not_accepted")
+    if chatmod.over_turn_cap(messages):
+        raise HTTPException(status_code=429, detail="turn_cap")
+    return None, None, messages
+
+
 @app.post("/api/chat")
 @limiter.limit(CHAT_RATE_LIMIT)
 async def chat_endpoint(request: Request, payload: dict = Body(...)) -> dict:
-    """THE conversation. A model interviews, then drives its own search loop.
+    """THE conversation, as one blocking call. A model interviews, then drives its own
+    search loop, and every pick is checked against what the person asked for.
 
-    This replaced a structured turn that filled a CONFIG (titles, boosts, exclude,
-    rank_down) which ran ONE keyword search against a scoreboard. The run that produced
-    five jobs Justin confirmed were right ran NINE searches, each chosen from what the
-    previous returned — and that difference, one query versus an adaptive loop, is the
-    product. The old design is deleted, not deprecated: it is in git if it is ever wanted.
+    The page uses /api/chat/stream; this is what the deploy gate and scripts read.
 
     Bounded by the TOOL budget rather than the turn count, because a model that picks its
     own searches can pick them forever.
 
-    Fails CLOSED: no key or ceiling reached returns 503 and the UI says so.
+    Fails CLOSED: no key or a daily ceiling reached returns 503, this address's own daily
+    cap returns 429, and the UI says which.
     """
-    if not chatmod.available():
-        raise HTTPException(status_code=503, detail="agent_unavailable")
-    if chatmod.daily_ceiling_reached():
-        raise HTTPException(status_code=503, detail="daily_ceiling")
-    messages = chatmod.sanitize_messages(payload.get("messages"))
-    if not messages:
-        raise HTTPException(status_code=422, detail="messages required")
-    if chatmod.over_turn_cap(messages):
-        raise HTTPException(status_code=429, detail="turn_cap")
-    chatmod.note_request()
+    addr = client_address(request)
+    sid, state, messages = _chat_input(payload, addr)
+    # Counted and marked running with no `await` since the checks, so concurrent requests
+    # cannot both pass a check that only one of them should.
+    chatmod.note_request(addr)
+    chatmod.start_running(addr)
     try:
-        return await chatmod.turn(messages, payload.get("model"))
+        if state is None:
+            return await chatmod.turn(messages, payload.get("model"), addr=addr)
+        async with state["lock"]:
+            state["turns"] += 1
+            try:
+                out = await chatmod.turn(messages, payload.get("model"), state, addr=addr)
+            except chatmod.UpstreamUnavailable:
+                state["turns"] -= 1       # nothing was answered; do not spend their turn
+                raise
+        return {**out, "session": sid}
+    except chatmod.UpstreamUnavailable:
+        # Already logged at WARNING, with the reason, where it was caught. Nothing was
+        # delivered (a turn that delivered returns normally), so the day's counts go back.
+        chatmod.refund_request(addr)
+        return {"reply": "", "trace": [], "error": UNAVAILABLE, "session": sid}
     except Exception as e:  # noqa: BLE001 — upstream fault must not 500 the UI
         log.warning("chat turn failed: %s: %s", type(e).__name__, e)
-        return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}"}
+        return {"reply": "", "trace": [], "error": f"upstream: {type(e).__name__}", "session": sid}
+    finally:
+        chatmod.stop_running(addr)
 
 
 @app.post("/api/chat/stream")
+@limiter.limit(CHAT_RATE_LIMIT)
 async def chat_stream(request: Request, payload: dict = Body(...)):
-    """The same turn, as Server-Sent Events — one frame per tool call, then the result.
+    """The same turn, as Server-Sent Events: a frame as each thing happens, then the result.
 
     WHY A SECOND ENDPOINT rather than streaming /api/chat: that endpoint's dict is read by
-    the 297-test suite and by the model bakeoff harness, and neither wants a stream. The
-    generator underneath is the same one (`chat.turn_events`), so there is exactly one
-    implementation of the loop and the two endpoints cannot drift.
+    the test suite, the deploy gate and the bakeoff harness, and none of them wants a
+    stream. The generator underneath is the same one (`chat.turn_events`), so there is
+    exactly one implementation of the loop and the two endpoints cannot drift.
 
     WHY SSE AND NOT A WEBSOCKET: the data is one-directional and short-lived. SSE is plain
     HTTP, needs no extra dependency, survives a proxy that speaks only HTTP/1.1, and Caddy
-    disables response buffering automatically for `text/event-stream` — a WebSocket would
-    add an upgrade handshake and a reconnect protocol to carry the same three fields.
+    disables response buffering automatically for `text/event-stream`.
 
     Errors are FRAMES, not status codes. The status line is already sent by the time the
     model faults, so an upstream failure mid-stream arrives as {"type":"error"} and the
     client renders it; raising here would truncate the stream and look like a network drop.
+
+    RATE-LIMITED like /api/chat. It was not until 2026-11-11: the decorator sat on the
+    blocking endpoint only, so the one the page actually calls had no per-address limit.
     """
-    if not chatmod.available():
-        raise HTTPException(status_code=503, detail="agent_unavailable")
-    if chatmod.daily_ceiling_reached():
-        raise HTTPException(status_code=503, detail="daily_ceiling")
-    messages = chatmod.sanitize_messages(payload.get("messages"))
-    if not messages:
-        raise HTTPException(status_code=422, detail="messages required")
-    if chatmod.over_turn_cap(messages):
-        raise HTTPException(status_code=429, detail="turn_cap")
-    chatmod.note_request()
+    addr = client_address(request)
+    sid, state, messages = _chat_input(payload, addr)
+    chatmod.note_request(addr)
+    # Released in frames()' `finally`. A stream the client drops before it ever starts
+    # never runs that; chat.INFLIGHT_TTL expires the mark instead.
+    chatmod.start_running(addr)
+
+    async def run():
+        async for ev in chatmod.turn_events(messages, payload.get("model"), state, addr=addr):
+            if await request.is_disconnected():
+                # The person navigated away. Stop paying a metered model to talk to
+                # nobody — this is the one place the loop can be cut short safely.
+                log.info("chat stream: client gone, abandoning turn")
+                return
+            if ev.get("type") == "done" and sid:
+                ev = {**ev, "result": {**ev["result"], "session": sid}}
+            yield f"data: {json.dumps(ev)}\n\n"
 
     async def frames():
         try:
-            async for ev in chatmod.turn_events(messages, payload.get("model")):
-                if await request.is_disconnected():
-                    # The person navigated away. Stop paying a metered model to talk to
-                    # nobody — this is the one place the loop can be cut short safely.
-                    log.info("chat stream: client gone, abandoning turn")
-                    return
-                yield f"data: {json.dumps(ev)}\n\n"
+            # The session id goes first, so a turn that dies halfway can still be continued.
+            if sid:
+                yield f"data: {json.dumps({'type': 'session', 'id': sid})}\n\n"
+            if state is None:
+                async for frame in run():
+                    yield frame
+            else:
+                async with state["lock"]:
+                    state["turns"] += 1
+                    try:
+                        async for frame in run():
+                            yield frame
+                    except chatmod.UpstreamUnavailable:
+                        state["turns"] -= 1   # nothing was answered; do not spend their turn
+                        raise
+        except chatmod.UpstreamUnavailable:
+            # Already logged at WARNING, with the reason, where it was caught. Nothing was
+            # delivered (a turn that delivered ends with `done`), so the counts go back.
+            chatmod.refund_request(addr)
+            yield f"data: {json.dumps({'type': 'error', 'error': UNAVAILABLE})}\n\n"
         except Exception as e:  # noqa: BLE001 — a fault is a frame; see the docstring
             log.warning("chat stream failed: %s: %s", type(e).__name__, e)
             yield f"data: {json.dumps({'type': 'error', 'error': f'upstream: {type(e).__name__}'})}\n\n"
+        finally:
+            chatmod.stop_running(addr)
 
     return StreamingResponse(frames(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",

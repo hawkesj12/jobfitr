@@ -1,7 +1,7 @@
 """The conversation. A model that interviews, then drives its own search loop.
 
 WHY THIS EXISTS, and it is a different shape from chat.py. The 2026-08-17 experiment that
-produced five jobs Justin called right did NOT fill in a form. Its method, recorded in
+produced five jobs the owner called right did NOT fill in a form. Its method, recorded in
 _private/experiment-runs/: seven interview questions with ZERO tool calls, then **nine
 separate searches**, each one chosen from what the previous returned — an automation lane
 and a controls lane run specifically to test whether his manufacturing background retrieved
@@ -26,16 +26,22 @@ paragraphs, and said so as a flaw. read_jobs serves the whole posting.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import json
 import logging
-import time
 import os
+import re
+import secrets
+import time
 
 import httpx
+from collections import OrderedDict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import prompts, searchlog, semantic, store
+from . import checks, prompts, searchlog, semantic, store
 
 log = logging.getLogger("jobfitr.chat")
 
@@ -94,7 +100,7 @@ MODELS = {
     "glm-4.7":           {"id": "z-ai/glm-4.7",                "ctx":   204_800, "session_usd": 0.070},
     "kimi-k2.5":         {"id": "moonshotai/kimi-k2.5",        "ctx":   262_144, "session_usd": 0.081},
     "minimax-m3":        {"id": "minimax/minimax-m3",          "ctx": 1_048_576, "session_usd": 0.052},
-    # ── upper: the top of the band Justin drew (above Haiku, below Sonnet) ───
+    # ── upper: the top of the band the owner drew (above Haiku, below Sonnet) ───
     "grok-4.3":          {"id": "x-ai/grok-4.3",               "ctx": 1_000_000, "session_usd": 0.203},
     "grok-4.20":         {"id": "x-ai/grok-4.20",              "ctx": 2_000_000, "session_usd": 0.203},
     "grok-4.6":          {"id": "x-ai/grok-4.6",               "ctx":   500_000, "session_usd": 0.336},
@@ -102,16 +108,30 @@ MODELS = {
     #    fault is the tools or the prompt, not the model. That is what it is here for.
     "sonnet-5":          {"id": "anthropic/claude-sonnet-5",   "ctx": 1_000_000, "session_usd": 0.360},
     "gemini-3.5-flash":  {"id": "google/gemini-3.5-flash",     "ctx": 1_048_576, "session_usd": 0.279},
+    # ── added 2026-11-11 for the exec-readiness runs; ids and prices read off the live
+    #    OpenRouter catalog that day ($/M in, $/M out): haiku-5.5 0.10/0.50, sonnet-5.5
+    #    2/10, gpt-4o-mini is what the box had been running through CHAT_MODEL.
+    "haiku-5.5":         {"id": "anthropic/claude-haiku-5.5",  "ctx": 1_000_000, "session_usd": 0.020},
+    "sonnet-5.5":        {"id": "anthropic/claude-sonnet-5.5", "ctx": 1_000_000, "session_usd": 0.400,
+                          "label": "Claude Sonnet 5.5"},
+    "gpt-4o-mini":       {"id": "openai/gpt-4o-mini",          "ctx":   128_000, "session_usd": 0.025},
     # NOTE grok-4.3 carries TWICE the context of grok-4.6 at 60% of the cost, and grok-4.20
     # carries four times it for the same price. If the reason for reaching for Grok is
     # capability rather than the specific 4.6 build, 4.3 is the better entry point.
 }
 
 # ↓↓↓ THE ONE LINE TO CHANGE ↓↓↓
-ACTIVE_MODEL = "deepseek-v4-flash"   # measured 2026-08-20; see the bench note
+# sonnet-5.5 since 2026-11-11, and the reason is the tester runs, not the bench above: on
+# gpt-4o-mini (what the box ran) and on deepseek the interview ignored "just search",
+# re-asked what it had been told, and wrote "aligns well" over jobs that did not fit. The
+# checks in checks.py now catch what a model gets wrong about the brief; this choice is
+# about the parts no check can do: asking sensible questions, reading a posting, and
+# saying plainly why it fits. About $0.40 a conversation against $0.01, with the daily
+# ceiling lowered to match.
+ACTIVE_MODEL = "sonnet-5.5"
 
 DEFAULT_MODEL = os.environ.get("CHAT_MODEL") or MODELS[ACTIVE_MODEL]["id"]
-MAX_TOOL_CALLS = int(os.environ.get("CHAT_MAX_TOOL_CALLS", "12"))
+MAX_TOOL_CALLS = int(os.environ.get("CHAT_MAX_TOOL_CALLS", "16"))
 MAX_TURNS = int(os.environ.get("CHAT_MAX_TURNS", "24"))
 REQUEST_TIMEOUT = float(os.environ.get("CHAT_TIMEOUT", "90"))
 SHALLOW_CHARS = int(os.environ.get("CHAT_SHALLOW_CHARS", "320"))
@@ -267,41 +287,69 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "recommend",
-            "description": "Deliver the final picks. Call this ONCE, after reading, with the jobs you are recommending. Then write your answer to the person in your own words.",
+            "description": "Deliver the picks. The server checks every pick against `brief` and against the posting's own text before the person sees anything, and tells you what it removed. Then write a short closing message.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "brief": {
+                        "type": "object",
+                        "description": "What the person said they need, as data. Only what they actually said; leave a field out when they did not say it. The server removes any pick that clearly breaks it.",
+                        "properties": {
+                            "remote_only": {"type": "boolean", "description": "True only if they said the job must be remote."},
+                            "location": {"type": "string", "description": "Where they live or want to work, e.g. 'Louisville, KY'. '' if never said."},
+                            "salary_floor": {"type": "integer", "description": "The lowest annual USD pay they will take. Omit if never said."},
+                            "exclude": {"type": "array", "items": {"type": "string"},
+                                        "description": "NAMES of employers they ruled out. Turn a category into names: 'no big consulting' becomes Accenture, Deloitte, PwC, KPMG, EY, McKinsey, BCG, Bain, Capgemini, Cognizant, Infosys, Wipro, TCS, IBM Consulting, Slalom, Booz Allen. The person is shown this list."},
+                            "no_agencies": {"type": "boolean", "description": "True if they ruled out recruiters or staffing agencies."},
+                            "must_mention": {
+                                "type": "array",
+                                "description": "Things the work should involve, each as a label plus the words a posting would use for it. A pick that never uses any of the words gets a warning on its card. Use it for the industry or the key skill they named.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string", "description": "e.g. 'manufacturing or distribution'"},
+                                        "any_of": {"type": "array", "items": {"type": "string"},
+                                                   "description": "e.g. manufacturing, manufacturer, distribution, distributor, warehouse, supply chain, industrial, factory, plant"},
+                                    },
+                                    "required": ["label", "any_of"],
+                                },
+                            },
+                            "experience_years": {"type": "integer", "description": "Years they have done THIS kind of work. 0 if they are changing fields. Omit if unknown."},
+                        },
+                    },
                     "picks": {
                         "type": "array",
-                        "description": "The jobs you are recommending, best first. Five unless you genuinely cannot justify five.",
+                        "description": "The jobs you recommend, best first. Up to five. Fewer is fine; never pad.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "url": {"type": "string", "description": "Must be a url a tool returned in this conversation."},
-                                "why": {"type": "string", "description": "One or two sentences: why this job fits THIS person. The work, not the words that matched."},
-                                "caveat": {"type": "string", "description": "Anything about it that conflicts with what they told you, or '' if nothing does."},
+                                "url": {"type": "string", "description": "A url you passed to read_jobs in this conversation."},
+                                "why": {"type": "string", "description": "One or two plain sentences: what this person would be doing in this job and why that suits what they told you. Name the work. Never 'aligns well' or 'great fit'."},
+                                "quote": {"type": "string", "description": "One sentence copied WORD FOR WORD from the posting that backs up `why`. It is checked against the posting."},
+                                "warning": {"type": "string", "description": "Anything in the posting that conflicts with what they told you, or that they are missing (a required skill, more seniority). '' only if there is truly nothing."},
                             },
-                            "required": ["url", "why"],
+                            "required": ["url", "why", "quote"],
                         },
                     },
-                    "rejected": {
+                    "ruled_out": {
                         "type": "array",
-                        "description": "Jobs they would expect to see, and what ruled each one out.",
+                        "description": "Jobs you looked at that they would expect to see, and what ruled each one out. Only urls a tool returned.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "url": {"type": "string"},
-                                "why_not": {"type": "string"},
+                                "why_not": {"type": "string", "description": "One plain sentence."},
+                                "quote": {"type": "string", "description": "Optional: the words in the posting that ruled it out, copied exactly."},
                             },
                             "required": ["url", "why_not"],
                         },
                     },
                     "nothing_fits": {
                         "type": "boolean",
-                        "description": "True if the pool genuinely holds nothing worth applying to. Say so rather than padding.",
+                        "description": "True if nothing you found is worth applying to. Say so rather than padding.",
                     },
                 },
-                "required": ["picks"],
+                "required": ["brief", "picks"],
             },
         },
     },
@@ -361,49 +409,56 @@ def _shallow(c: dict) -> dict:
 FREEZE_POOL = os.environ.get("JOBFITR_FREEZE_POOL") == "1"
 
 
+# How long a search waits for the live fetch before answering from what the store holds.
+#
+# MEASURED 2026-11-11, first full run on the new loop: 343 s for one answer, and 291 s of
+# it was six searches each waiting on this fetch (17, 18, 63, 49, 55 and 72 s). The model
+# calls between them took about 5 s each. Google for Jobs is queried one title at a time,
+# so five titles is five sequential round trips.
+#
+# The fetch is not cancelled when the wait runs out. It finishes on its own thread and
+# lands in the store, so the NEXT search in the same conversation sees its rows. The
+# search that gave up waiting is told so (`still_fetching`) and says so to the model.
+WARM_WAIT = float(os.environ.get("CHAT_WARM_WAIT", "12"))
+# Titles sent to the live lane per search. The lexical and dense arms still use them all.
+WARM_TITLES = int(os.environ.get("CHAT_WARM_TITLES", "3"))
+
+
 def _warm_live(titles: list[str], location: str) -> str | None:
-    if FREEZE_POOL:
-        return None
     """One bounded live fetch for this (titles, location), or the fresh cache untouched.
 
     Deliberately imported lazily from the server: the fetch policy, the daily ceiling and
     the load-shed all live there with the endpoints, and duplicating them here is how the
     two paths would drift into disagreeing about what "fresh" means.
     """
-    try:
-        from .server import _warm_cache
-
-        return _warm_cache(titles, location)
-    except Exception as e:  # noqa: BLE001 — a dead live lane must not kill the search
-        log.warning("live warm failed (%s: %s) — serving the cache", type(e).__name__, e)
-        return "fetch_error"
-
-
-def _place_filter(location: str) -> tuple[str, str] | None:
-    """A requested place -> (city_lower, STATE) to test rows against. None means anywhere."""
-    loc = (location or "").strip()
-    if not loc or loc.lower() in ("remote", "anywhere", "any", "us", "usa", "united states"):
+    if FREEZE_POOL:
         return None
-    parts = [x.strip() for x in loc.split(",")]
-    city = parts[0].lower() if parts else ""
-    state = parts[1].upper()[:2] if len(parts) > 1 else ""
-    return (city, state)
+    import threading
+
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            from .server import _warm_cache
+
+            box["out"] = _warm_cache(titles[:WARM_TITLES], location)
+        except Exception as e:  # noqa: BLE001 — a dead live lane must not kill the search
+            log.warning("live warm failed (%s: %s) — serving the cache", type(e).__name__, e)
+            box["out"] = "fetch_error"
+
+    t = threading.Thread(target=work, name="jobfitr-warm", daemon=True)
+    t.start()
+    t.join(WARM_WAIT)
+    if t.is_alive():
+        return "still_fetching"
+    return box.get("out")
 
 
-def _in_place(row: dict, place: tuple[str, str]) -> bool:
-    """Is this row available to someone in `place`?
-
-    A REMOTE row is available everywhere — that is the point of remote, and dropping it
-    would delete most of what a location search should surface. Otherwise the row has to
-    name the state or the city.
-    """
-    if (row.get("remote") or "") == "remote":
-        return True
-    city, state = place
-    if state and (row.get("state") or "").upper() == state:
-        return True
-    text = f"{row.get('location') or ''} {row.get('city') or ''}".lower()
-    return bool(city) and city in text
+# The place tests live in checks.py, because the search filter and the per-pick check must
+# agree on what "in Louisville" means. `_place_filter` used to take `parts[1].upper()[:2]`
+# for the state, which read "Minneapolis, Minnesota" as MI (Michigan).
+_place_filter = checks.place_filter
+_in_place = checks.in_place
 
 
 def search_jobs(args: dict) -> dict:
@@ -503,8 +558,13 @@ def search_jobs(args: dict) -> dict:
         fetched=degraded is None and bool(titles), degraded=degraded,
         elapsed_ms=(time.perf_counter() - _t0) * 1000,
     )
+    out_note = None
+    if degraded == "still_fetching":
+        out_note = ("More postings for these titles are still being fetched from the live "
+                    "sources. These rows are what the store holds now; a later search for "
+                    "the same titles will include the rest.")
     return {"searched": {"titles": titles, "probes": probes, "why": args.get("why", "")},
-            "degraded": degraded,
+            "degraded": degraded, "note": out_note,
             "matched_before_fusion": len(keep), "returned": len(out),
             "semantic": semantic.available(), "jobs": out}
 
@@ -547,53 +607,303 @@ def read_jobs(args: dict) -> dict:
     return result
 
 
-def recommend(args: dict) -> dict:
-    """The final picks, as DATA rather than as prose the client has to parse.
+# Searches per answer. The first full run made six and took 343 s; the fourth, fifth and
+# sixth found 53, 22 and 30 new rows and changed none of the picks. Past this the tool
+# refuses, which a model notices, where a sentence in the prompt asking it to stop is one
+# more thing to weigh.
+MAX_SEARCHES = int(os.environ.get("CHAT_MAX_SEARCHES", "4"))
+MAX_PICKS = 5
+MAX_RULED_OUT = int(os.environ.get("CHAT_MAX_RULED_OUT", "8"))
+# Ask each chosen posting whether it is still up before showing it. Off in tests (no
+# network) via tests/conftest.py; `CHAT_CHECK_LIVE=0` turns it off on a box.
+CHECK_LIVE = os.environ.get("CHAT_CHECK_LIVE", "1") != "0"
 
-    A third tool rather than a parse of the closing message, for one reason: the front end
-    has to render cards, and pulling five urls out of free text is the kind of thing that
-    works in testing and fails on the first answer written slightly differently. This also
-    lets the server VERIFY every url actually came from the pool before it reaches anyone —
-    a hallucinated listing is the one failure the whole product cannot survive, because the
-    person goes looking for a job that does not exist.
-    """
-    picks = args.get("picks") or []
-    urls = [p.get("url", "") for p in picks if p.get("url")]
-    rejected = args.get("rejected") or []
-    known = {r["url"]: r for r in store.rows_by_url(urls + [r.get("url", "") for r in rejected]) if r.get("url")}
-    out, dropped = [], []
-    for p in picks:
-        row = known.get(p.get("url", ""))
-        if not row:                       # not in the pool = invented, or long evicted
-            dropped.append(p.get("url", ""))
-            continue
-        out.append({**_shallow(row), "why": p.get("why", ""), "caveat": p.get("caveat", "")})
-    if dropped:
-        log.warning("recommended %d url(s) not in the store: %s", len(dropped), dropped)
+
+def _card(row: dict, check: dict, why: str, quote: str, warning: str) -> dict:
+    """One pick, as the page renders it. Every field is the store's or a check's, except
+    `why` and `warning`, which are the model's words, and `quote`, which is the model's
+    choice of the employer's words and has been found in the posting."""
+    warnings = list(check["flags"])
+    if check["asks"]:
+        warnings.append(check["asks"])
     return {
-        "delivered": len(out),
-        "picks": out,
-        "rejected": [{**_shallow(known[r["url"]]), "why_not": r.get("why_not", "")}
-                     for r in rejected if r.get("url") in known],
-        "nothing_fits": bool(args.get("nothing_fits")),
-        # Told back to the MODEL so it can correct itself in the closing message rather
-        # than describing a job the person will never see on screen.
-        "rejected_by_server": dropped or None,
+        "url": row.get("url", ""),
+        "title": row.get("title", ""),
+        "company": checks.company_name(row),
+        "location": row.get("location", ""),
+        "state": row.get("state") or "",
+        # The CHECKED tag, not the stored one: a "Remote" chip above a body that says
+        # five days in the office is the card contradicting itself.
+        "remote": check["tag"],
+        "salary": checks.pay_label(row),
+        # The checks' figure: none for an Adzuna estimate, hourly pay annualised.
+        "salary_min": checks.pay_range(row)[0],
+        "posted": row.get("posted", ""),
+        "age_days": checks.age_days(row),
+        "link": checks.link_kind(row),
+        "why": why,
+        "quote": quote,
+        "warning": warning,
+        "warnings": warnings,
     }
+
+
+def _ruled(row: dict, why_not: str, by: str, quote: str = "") -> dict:
+    return {"url": row.get("url", ""), "title": row.get("title", ""),
+            "company": checks.company_name(row), "location": row.get("location", ""),
+            "why_not": why_not, "quote": quote, "by": by}
+
+
+def recommend(args: dict, state: dict | None = None) -> dict:
+    """The picks, as DATA, checked before anyone sees them.
+
+    A tool rather than a parse of the closing message, for two reasons. The front end has
+    to render cards, and pulling five urls out of free text works in testing and fails on
+    the first answer written slightly differently. And it is the one place the server can
+    stand between the model and the person:
+
+      1. every url must be in the pool (an invented listing is the failure the product
+         cannot survive, because the person goes looking for a job that does not exist);
+      2. every pick must have been READ in this conversation, and its `quote` must be in
+         the posting word for word. A reason that cannot point at the employer's own
+         words is an opinion ("aligns well with your B2B SaaS experience", on a hardware
+         job, 2026-11-11);
+      3. every pick is tested against the brief by `checks.check_pick`. A dealbreaker
+         broken means the job is RULED OUT and listed with the reason, never shown as a
+         pick. Silence or a mismatch of degree becomes a warning on the card;
+      4. each survivor is asked whether it is still up.
+
+    Problems the model can fix (2) are sent back ONCE per turn with nothing delivered.
+    After that they are settled here by removal, because a loop that bounces forever is a
+    conversation that never answers.
+
+    `state` is the conversation's memory: which urls a tool returned and which were read.
+    Without it (a direct call, a test) the read and seen rules are skipped.
+    """
+    brief = checks.clean_brief(args.get("brief"))
+    raw_picks = [p for p in (args.get("picks") or []) if isinstance(p, dict) and p.get("url")]
+    raw_out = [r for r in (args.get("ruled_out") or args.get("rejected") or [])
+               if isinstance(r, dict) and r.get("url")]
+    urls = list(dict.fromkeys([p["url"] for p in raw_picks] + [r["url"] for r in raw_out]))
+    known = {r["url"]: r for r in store.rows_by_url(urls) if r.get("url")}
+    invented = list(dict.fromkeys(p["url"] for p in raw_picks if p["url"] not in known))
+    if invented:
+        log.warning("recommended %d url(s) not in the store: %s", len(invented), invented)
+    seen = state["seen"] if state is not None else None
+    read = state["read"] if state is not None else None
+
+    def text_of(row: dict) -> str:
+        return f"{row.get('title') or ''}\n{store.plain(row.get('body') or '')}"
+
+    # ── what the model can fix: sent back once ───────────────────────────────
+    if state is not None and not state.get("bounced"):
+        fix = []
+        for p in raw_picks:
+            row = known.get(p["url"])
+            if not row:
+                fix.append(f"{p['url']} is not a url any tool returned. Remove it.")
+            elif p["url"] not in read:
+                fix.append(f"{row.get('title')}: you have not read this posting. Call read_jobs "
+                           "on it before recommending it.")
+            elif not checks.quote_in(str(p.get("quote") or ""), text_of(row)):
+                fix.append(f"{row.get('title')}: `quote` is not in the posting word for word. "
+                           "Copy one full sentence exactly as the posting writes it.")
+            elif checks.FLATTERY.search(str(p.get("why") or "")):
+                fix.append(f"{row.get('title')}: `why` says nothing specific "
+                           f"(“{checks.FLATTERY.search(p['why']).group(0)}”). Say what the "
+                           "person would be doing in this job, in plain words.")
+        if fix:
+            state["bounced"] = True
+            return {"delivered": 0, "not_delivered": True, "fix": fix,
+                    "rejected_by_server": invented or None,
+                    "note": "NOTHING has been shown to the person yet. Fix these and call "
+                            "recommend again with the complete list."}
+
+    # ── settle everything else here ──────────────────────────────────────────
+    chosen: list[tuple[dict, dict]] = []      # (row, card)
+    ruled: list[dict] = []
+    removed: list[dict] = []                  # told back to the model
+    for p in raw_picks:
+        row = known.get(p["url"])
+        if not row:
+            continue
+        if read is not None and p["url"] not in read:
+            removed.append({"title": row.get("title", ""), "reason": "never read, so not shown"})
+            continue
+        if any(r["url"] == row["url"] or checks.same_job(r, row) for r, _ in chosen):
+            continue                          # one job posted twice is one pick
+        verdict = checks.check_pick(row, brief)
+        if verdict["reject"]:
+            ruled.append(_ruled(row, verdict["reject"], "check"))
+            removed.append({"title": row.get("title", ""), "reason": verdict["reject"]})
+            continue
+        quote = str(p.get("quote") or "").strip()
+        if not checks.quote_in(quote, text_of(row)):
+            quote = ""                        # an unverified quote is never printed
+        chosen.append((row, _card(row, verdict, str(p.get("why") or "").strip(), quote,
+                                  str(p.get("warning") or p.get("caveat") or "").strip())))
+    chosen = chosen[:MAX_PICKS]
+
+    if CHECK_LIVE and chosen:
+        dead = checks.dead_urls([r["url"] for r, _ in chosen])
+        for row, _ in [c for c in chosen if c[0]["url"] in dead]:
+            why_not = "The posting has been taken down since it was collected."
+            ruled.append(_ruled(row, why_not, "check"))
+            removed.append({"title": row.get("title", ""), "reason": why_not})
+        chosen = [c for c in chosen if c[0]["url"] not in dead]
+
+    for r in raw_out:
+        row = known.get(r["url"])
+        if not row or (seen is not None and r["url"] not in seen):
+            continue                          # only postings this conversation looked at
+        if any(c["url"] == row["url"] or checks.same_job(c, row) for c, _ in chosen):
+            continue                          # never both a pick and ruled out
+        if any(x["url"] == row["url"] for x in ruled):
+            continue
+        quote = str(r.get("quote") or "").strip()
+        ruled.append(_ruled(row, str(r.get("why_not") or "").strip(), "model",
+                            quote if checks.quote_in(quote, text_of(row)) else ""))
+
+    cards = [card for _, card in chosen]
+    out = {
+        "delivered": len(cards),
+        "picks": cards,
+        "ruled_out": ruled[:MAX_RULED_OUT],
+        "nothing_fits": bool(args.get("nothing_fits")) or not cards,
+        "brief": checks.brief_lines(brief),
+        # Told back to the MODEL so its closing message describes what is on screen.
+        "rejected_by_server": invented or None,
+        "removed": removed or None,
+    }
+    notes = [f"{len(cards)} pick(s) are now on the person's screen."]
+    if removed:
+        notes.append(f"{len(removed)} of yours were removed and are listed for them as ruled "
+                     "out, with the reason. Do not describe a removed job as a pick.")
+    if any(c["warnings"] for c in cards):
+        notes.append("Some cards carry warnings the server added; they can see them.")
+    if len(cards) < 3 and removed:
+        notes.append("If another search could find better ones, search, read, and call "
+                     "recommend again with the full list. Otherwise say plainly that few passed.")
+    out["note"] = " ".join(notes)
+    return out
 
 
 
 # ═══════════════════════════════════════════════════════════════
 # cost control and message hygiene
 # ═══════════════════════════════════════════════════════════════
-# Carried over from the retired config-filling chat. These were never part of that
-# design — they are what stops a metered endpoint from being an open tap, and what
-# refuses a malformed or smuggled turn before it reaches a model. They outlived the
-# thing they were written for.
+# What stops a metered endpoint from being an open tap, and what refuses a malformed or
+# smuggled turn before it reaches a model.
 # ═══════════════════════════════════════════════════════════════
 _ET = ZoneInfo("America/New_York")
-DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "500"))
-_usage = {"date": "", "count": 0}
+# 100, down from 500, when the model became sonnet-5.5 (2026-11-11). A turn is one message
+# from a visitor; a whole conversation is about five. At roughly $0.40 a conversation, 500
+# turns was $40 a day from one looping script. 100 is about twenty conversations.
+DAILY_CEILING = int(os.environ.get("CHAT_DAILY_CEILING", "100"))
+
+# THE MONEY CAP. The turn ceiling above counts messages, not dollars, and turns differ by
+# a factor of a hundred. Measured over the four acceptance conversations on sonnet-5.5
+# (2026-11-11): a question turn $0.002-0.03, a turn that searched and read $0.15-0.29, a
+# whole conversation $0.15-0.32. $10 is therefore 30-60 conversations, comfortably above
+# a real day's traffic, and at most $300 in a month of a looping script, which is a bill
+# and not a disaster.
+#
+# WHAT IS COUNTED, exactly: the `usage.cost` OpenRouter reports for every model call that
+# RETURNS, added the moment it returns, so the calls a turn made before it died or was
+# abandoned are counted. NOT counted: a streamed call cut off before its last chunk,
+# because that chunk is the only one that carries usage. That happens when the visitor
+# closes the tab mid-sentence, or when a dropped connection is retried (the first,
+# broken attempt is lost). The provider bills those; this sum does not see them. The
+# concurrency and turn caps below bound how many there can be. If a provider stops
+# reporting cost altogether the sum stays at zero and the turn ceiling is the only guard
+# left: that is why both exist.
+DAILY_SPEND_USD = float(os.environ.get("CHAT_DAILY_SPEND_USD", "10"))
+
+# THE PER-ADDRESS CAPS. Without them one address at the 20-a-minute rate limit spends the
+# whole site's 100-turn day in five minutes and every other visitor is told "limit
+# reached". Two of them, because turns and dollars fail differently.
+#
+# An "address" is often a whole NETWORK: an office, a campus, a phone carrier's NAT. The
+# first real audience is several people at one company, likely on one connection, so the
+# caps are sized for a group, not a person:
+#
+# 50 TURNS is ten conversations of the five turns DAILY_CEILING's note assumes, shared by
+# everyone behind the address. A script at 20 a minute reaches it in 2.5 minutes, having
+# used half the site's 100 turns.
+#
+# $4.00 is two fifths of DAILY_SPEND_USD: 12 of the dearest conversations measured
+# ($0.32), 26 of the cheapest ($0.15). Fifty turns that EACH search would cost about
+# 50 x $0.29 = $14.50, more than the whole site's day, so the turn cap alone stops
+# nothing; the dollar cap is what means three networks, not one, are needed to spend
+# the site's day.
+PER_ADDRESS_DAILY = int(os.environ.get("CHAT_PER_ADDRESS_DAILY", "50"))
+PER_ADDRESS_SPEND_USD = float(os.environ.get("CHAT_PER_ADDRESS_SPEND_USD", "4"))
+
+# TURNS RUNNING AT ONCE, per address. Spend is only known as each call returns, so a
+# cap checked when a turn starts let 20 turns started together run straight past it:
+# $5.80 against a $2.50 cap, measured by the review of the first version (20 parallel
+# requests, a fake model at $0.29 a call). Two lets two people in one office search at
+# the same moment; a third gets "too many at once, wait a few seconds".
+#
+# THE BOUND THIS BUYS, with the spend also re-checked before every model call inside a
+# turn (turn_events): a cap can be overrun only by the calls already in flight when it
+# is reached, one per running turn. Per address that is at most 2 calls; no single call
+# can cost more than the dearest whole turn measured, $0.29, so an address stops within
+# about $0.58 of its cap. Site-wide it is one call per turn running anywhere at that
+# moment, which this does not bound beyond 2 per address.
+PER_ADDRESS_CONCURRENT = int(os.environ.get("CHAT_PER_ADDRESS_CONCURRENT", "2"))
+# An in-flight mark that is never released (a stream the client dropped before it
+# started) must not lock an address out for the day. A turn is bounded by
+# MAX_TOOL_CALLS calls of REQUEST_TIMEOUT each; ten minutes is past any turn measured
+# (the slowest acceptance turn took under two).
+INFLIGHT_TTL = float(os.environ.get("CHAT_INFLIGHT_TTL", "600"))
+
+# A flood of distinct addresses must not grow the table without limit. At ~250 bytes an
+# entry, 10,000 is about 2.5 MB. Past it the address seen longest ago is forgotten, which
+# resets ITS count: someone with 10,000 addresses has beaten a per-address cap anyway,
+# and the site-wide turn and spend ceilings still hold.
+MAX_ADDRESSES = int(os.environ.get("CHAT_MAX_ADDRESSES", "10000"))
+
+# WHAT THESE COUNTERS ARE NOT. They live in this process's memory: a restart or a deploy
+# resets them, and each of the two slots (blue and green) keeps its own. Only one slot
+# serves the public at a time, so the reset at a flip is the real gap, and it is accepted
+# rather than solved with shared storage. The overrun past a dollar cap is bounded as
+# described at PER_ADDRESS_CONCURRENT.
+#
+# The address table holds a SALTED HASH of the address, never the address, with a salt
+# made fresh in each process. It is never written to disk and never logged; nothing
+# outside this module can turn a key back into an address, and after a restart not even
+# this module can.
+_ADDR_SALT = secrets.token_bytes(16)
+# addrs: salted key -> [turns, spend], the address seen longest ago first.
+_usage: dict = {"date": "", "count": 0, "spend": 0.0, "addrs": OrderedDict()}
+# salted key -> start times of that address's turns now running. Not reset with the day:
+# a turn that started before midnight is still running after it.
+_inflight: dict[str, list[float]] = {}
+
+
+class UpstreamUnavailable(RuntimeError):
+    """The model provider refused the ACCOUNT, not the request: out of credit (402) or the
+    key rejected (401). Retrying cannot help and nobody's next message will fare better,
+    so the visitor is told the service is unavailable rather than "something went wrong"."""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__("out of credit" if status == 402 else "key rejected")
+
+
+# The error a turn reports when the provider refuses the account. The page shows
+# "unavailable right now" for it, not "something went wrong".
+UNAVAILABLE = "service_unavailable"
+
+# OpenRouter's documented codes: 401 bad or disabled key, 402 insufficient credits.
+# Everything else (400, 403 moderation, 408, 429, 5xx) is about the request or the moment.
+ACCOUNT_CODES = (401, 402)
+# Waits before attempts 2-4 on a 429/5xx/transport fault. On 2026-11-12 the provider's 429s
+# came in bursts of about a minute and one retry after a second lost two of three
+# conversations. A `Retry-After` header wins, capped. Tests set this to zeros.
+RETRY_WAITS = (3.0, 8.0, 20.0)
+RETRY_AFTER_CAP = 30.0
 
 
 def available() -> bool:
@@ -609,9 +919,8 @@ def over_turn_cap(messages: list) -> bool:
 def sanitize_messages(raw: list) -> list:
     """Keep only well-formed user/assistant turns with string content.
 
-    The client holds the transcript, so this is the boundary where anything odd is
-    refused — a smuggled `system` role, a non-string content, an over-long blob —
-    before it reaches the model.
+    Used for the legacy `{"messages": [...]}` payload. A smuggled `system` role, a
+    non-string content and an over-long blob are all refused here.
     """
     out: list[dict] = []
     for m in raw or []:
@@ -626,195 +935,703 @@ def sanitize_messages(raw: list) -> list:
 def _roll_day() -> None:
     today = datetime.now(_ET).date().isoformat()
     if _usage["date"] != today:
-        _usage["date"], _usage["count"] = today, 0
+        _usage.update(date=today, count=0, spend=0.0, addrs=OrderedDict())
+
+
+def _addr_key(addr: str | None) -> str:
+    return hmac.new(_ADDR_SALT, (addr or "").encode(), hashlib.sha256).hexdigest()[:24]
 
 
 def daily_ceiling_reached() -> bool:
-    """True if today's request budget is spent — the endpoint then 503s to the form."""
+    """True if today's turn budget is spent; the endpoint then answers 503."""
     _roll_day()
     return _usage["count"] >= DAILY_CEILING
 
 
-def note_request() -> None:
-    """Count one accepted request against today's ceiling."""
+def daily_spend_reached() -> bool:
+    """True once today's model spend has reached DAILY_SPEND_USD."""
+    _roll_day()
+    return _usage["spend"] >= DAILY_SPEND_USD
+
+
+def address_cap_reached(addr: str | None) -> bool:
+    """True if THIS address has used its turns or its spend for today. Others are unaffected."""
+    _roll_day()
+    turns, spend = _usage["addrs"].get(_addr_key(addr), (0, 0.0))
+    return turns >= PER_ADDRESS_DAILY or spend >= PER_ADDRESS_SPEND_USD
+
+
+def _addr_entry(addr: str) -> list:
+    """The address's [turns, spend], marked most recently seen; the table stays bounded."""
+    addrs: OrderedDict = _usage["addrs"]
+    k = _addr_key(addr)
+    entry = addrs.get(k)
+    if entry is None:
+        entry = addrs[k] = [0, 0.0]
+        while len(addrs) > MAX_ADDRESSES:
+            addrs.popitem(last=False)
+    addrs.move_to_end(k)
+    return entry
+
+
+def note_request(addr: str | None = None) -> None:
+    """Count one accepted turn against today's site ceiling and, given one, the address's."""
     _roll_day()
     _usage["count"] += 1
+    if addr is not None:
+        _addr_entry(addr)[0] += 1
 
 
-DISPATCH = {"search_jobs": search_jobs, "read_jobs": read_jobs, "recommend": recommend}
+def refund_request(addr: str | None = None) -> None:
+    """Give back a turn that never got an answer (the provider refused the account).
+
+    Without it an outage spent everyone's allowance: visitors retrying as the page told
+    them to hit their daily cap on turns that did nothing, and after a top-up the site
+    still said "limit reached" until midnight (found in review of the first version).
+    """
+    _roll_day()
+    _usage["count"] = max(0, _usage["count"] - 1)
+    if addr is not None:
+        entry = _usage["addrs"].get(_addr_key(addr))
+        if entry:
+            entry[0] = max(0, entry[0] - 1)
 
 
+def spend_cap_reached(addr: str | None = None) -> str | None:
+    """Which dollar cap is reached now, if any: "daily_spend" (the site's) or
+    "address_daily_cap" (this address's). Checked before every model call in a turn."""
+    if daily_spend_reached():
+        return "daily_spend"
+    if addr is not None:
+        _, spend = _usage["addrs"].get(_addr_key(addr), (0, 0.0))
+        if spend >= PER_ADDRESS_SPEND_USD:
+            return "address_daily_cap"
+    return None
 
 
-async def _call(payload: dict) -> dict:
-    headers = {
+def _running(k: str, now: float) -> list[float]:
+    for key in [key for key, ts in _inflight.items() if all(now - t > INFLIGHT_TTL for t in ts)]:
+        _inflight.pop(key, None)
+    ts = [t for t in _inflight.get(k, []) if now - t <= INFLIGHT_TTL]
+    if ts:
+        _inflight[k] = ts
+    return ts
+
+
+def too_many_running(addr: str | None) -> bool:
+    """True if this address already has PER_ADDRESS_CONCURRENT turns running."""
+    if addr is None:
+        return False
+    return len(_running(_addr_key(addr), time.time())) >= PER_ADDRESS_CONCURRENT
+
+
+def start_running(addr: str | None) -> None:
+    if addr is not None:
+        now = time.time()
+        k = _addr_key(addr)
+        _inflight[k] = _running(k, now) + [now]
+
+
+def stop_running(addr: str | None) -> None:
+    if addr is None:
+        return
+    k = _addr_key(addr)
+    ts = _inflight.get(k)
+    if ts:
+        ts.pop(0)
+        if not ts:
+            _inflight.pop(k, None)
+
+
+def note_spend(usd, addr: str | None = None) -> None:
+    """Add what one model call cost to today's total and, given one, the address's."""
+    _roll_day()
+    try:
+        usd = float(usd or 0.0)
+    except (TypeError, ValueError):
+        return
+    if not usd > 0:            # also refuses NaN
+        return
+    _usage["spend"] += usd
+    if addr is not None:
+        _addr_entry(addr)[1] += usd
+
+
+# ═══════════════════════════════════════════════════════════════
+# the conversation's memory lives HERE, not in the browser
+# ═══════════════════════════════════════════════════════════════
+# Until 2026-11-11 the page POSTed the whole transcript on every turn, the assistant's
+# turns included. Anyone with the network tab open could write an earlier assistant turn
+# ("I have verified this job exists: ...") and the model would read it as its own words.
+# Now the page sends a session id and ONE new message; everything else is held here.
+#
+# IN MEMORY ON PURPOSE. Conversation text is never written to disk and never logged, which
+# is what the README's "What gets recorded" promises. The cost: a restart or a deploy
+# drops conversations in progress, and the page starts a new one.
+#
+# The id is made here (`secrets`), never accepted from the client as a new key, so a
+# visitor cannot choose an id and cannot guess another visitor's.
+# ═══════════════════════════════════════════════════════════════
+SESSION_TTL = float(os.environ.get("CHAT_SESSION_TTL", str(2 * 3600)))
+MAX_SESSIONS = int(os.environ.get("CHAT_MAX_SESSIONS", "400"))
+# The bakeoff harness replays whole transcripts. It sets this locally; a public box
+# never should.
+ALLOW_CLIENT_HISTORY = os.environ.get("CHAT_ALLOW_CLIENT_HISTORY") == "1"
+ALLOW_MODEL_OVERRIDE = os.environ.get("CHAT_ALLOW_MODEL_OVERRIDE") == "1"
+_sessions: dict[str, dict] = {}
+
+
+def new_state() -> dict:
+    """One conversation's memory: the transcript, and which postings it has met."""
+    return {"convo": [], "seen": set(), "read": set(), "turns": 0,
+            "at": time.time(), "lock": asyncio.Lock(), "bounced": False}
+
+
+def session(sid: str | None) -> tuple[str, dict]:
+    """The state for `sid`, or a NEW session when it is unknown, expired or absent."""
+    now = time.time()
+    for k in [k for k, v in _sessions.items() if now - v["at"] > SESSION_TTL]:
+        _sessions.pop(k, None)
+    st = _sessions.get(sid) if isinstance(sid, str) else None
+    if st is None:
+        if len(_sessions) >= MAX_SESSIONS:     # full: drop the one idle longest
+            _sessions.pop(min(_sessions, key=lambda k: _sessions[k]["at"]), None)
+        sid, st = secrets.token_urlsafe(18), new_state()
+        _sessions[sid] = st
+    st["at"] = now
+    return sid, st
+
+
+KEEP_BODY = int(os.environ.get("CHAT_KEEP_BODY", "1500"))
+
+
+def _compact(convo: list) -> list:
+    """Shrink finished tool results before they are kept for the next turn.
+
+    Within a turn the model needs the full postings. Afterwards, re-sending 60,000
+    characters of bodies with every follow-up question is paying again for text it has
+    already judged. Snippets go and bodies are cut to KEEP_BODY; `read_jobs` still works
+    if it wants one back.
+    """
+    out = []
+    for m in convo:
+        if m.get("role") != "tool":
+            out.append(m)
+            continue
+        try:
+            d = json.loads(m["content"])
+            for j in d.get("jobs") or []:
+                j.pop("snippet", None)
+                if len(j.get("body") or "") > KEEP_BODY:
+                    j["body"] = j["body"][:KEEP_BODY] + " …[trimmed; read_jobs again for the rest]"
+            out.append({**m, "content": json.dumps(d)})
+        except (ValueError, AttributeError, TypeError):
+            out.append({**m, "content": str(m.get("content"))[:2000]})
+    return out
+
+
+# "Just search." Six questions later it was still asking (2026-11-11, twice). The prompt
+# has always said "go when told". Now the server notices the phrase itself, says so in the
+# transcript, and if the model answers with another question anyway, throws that answer
+# away and tells it once more. The person never sees the question.
+#
+# NOT `tool_choice`. That was the first design and the obvious one, and Anthropic refuses
+# it: `tool_choice: type "tool" and "any" are not supported for this model` (measured on
+# claude-sonnet-5.5, 2026-11-11). A retry in the transcript works on every model.
+_GO = re.compile(
+    r"\b(?:just search|search now|go ahead(?: and search)?|just show me|show me (?:the )?(?:jobs|results)"
+    r"|start (?:the )?search(?:ing)?|run (?:the|a) search|skip the questions|no more questions"
+    r"|that'?s everything|that is everything|that'?s all|busca ya|solo busca|busca ahora)\b", re.I)
+# ...but only when there is something to search FOR. A bare "search now" as the first
+# message carries nothing, and forcing it would make the model invent a job title.
+GO_MIN_CHARS = 60
+# Below this, a lone first message (search-now phrases removed) is too thin to search on.
+FIRST_ASK_CHARS = 200
+_GO_NOTE = ("(From jobfitr, not the person: they have told you to search now. Call "
+            "`search_jobs` in this reply with what you already know. Do not ask another "
+            "question and do not ask them to confirm.)")
+_GO_AGAIN = ("You answered with a question. They told you to search. Call `search_jobs` "
+             "now with what you have; anything you still do not know, leave out of the search.")
+
+
+def told_to_search(convo: list) -> bool:
+    users = [m.get("content") or "" for m in convo
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    if not users or not _GO.search(users[-1]):
+        return False
+    return sum(len(_GO.sub("", u)) for u in users) >= GO_MIN_CHARS
+
+
+# ═══════════════════════════════════════════════════════════════
+# talking to the model
+# ═══════════════════════════════════════════════════════════════
+STREAM = os.environ.get("CHAT_STREAM", "1") != "0"
+
+
+def _headers() -> dict:
+    return {
         "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://jobfitr.app",
         "X-Title": "jobfitr",
     }
+
+
+def _raise_for(r: httpx.Response) -> None:
+    # The body names WHICH limit was hit; on 2026-11-12 the log had only "429".
+    if r.status_code >= 400:
+        log.warning("model provider answered HTTP %d: %s", r.status_code, r.text[:300])
+    r.raise_for_status()
+
+
+async def _call(payload: dict) -> dict:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        r = await client.post(OPENROUTER_URL, headers=headers, json=payload)
-        r.raise_for_status()
+        r = await client.post(OPENROUTER_URL, headers=_headers(), json=payload)
+        _raise_for(r)
         return r.json()
 
 
-def resolve_model(name: str | None) -> str:
-    """A caller-supplied model, but only from the bench.
+def _fold(acc: dict, chunk: dict) -> str:
+    """Fold one streamed chunk into the message being assembled; return its new text.
 
-    The bakeoff needs to vary the model per request; a public endpoint must not let a
-    caller name an arbitrary one, because "model" is the field that decides what a request
-    COSTS. Restricting it to MODELS keys makes the worst case a known entry on a curated
-    list rather than whatever is most expensive in the catalogue today.
+    A streamed tool call arrives in pieces keyed by `index`: the id and name once, the
+    arguments as fragments of a JSON string. Pure, so the assembly is testable without a
+    network.
     """
-    if name and name in MODELS:
+    if chunk.get("usage"):
+        acc["usage"] = chunk["usage"]
+    if chunk.get("model"):
+        acc["model"] = chunk["model"]
+    delta = ((chunk.get("choices") or [{}])[0] or {}).get("delta") or {}
+    text = delta.get("content") or ""
+    acc["content"] += text
+    for tc in delta.get("tool_calls") or []:
+        slot = acc["tool_calls"].setdefault(
+            tc.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+        if tc.get("id"):
+            slot["id"] = tc["id"]
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            slot["function"]["name"] = fn["name"]
+        slot["function"]["arguments"] += fn.get("arguments") or ""
+    return text
+
+
+def _folded(acc: dict) -> dict:
+    """The assembled stream, in the shape `_call` returns."""
+    msg: dict = {"role": "assistant", "content": acc["content"] or None}
+    if acc["tool_calls"]:
+        msg["tool_calls"] = [acc["tool_calls"][i] for i in sorted(acc["tool_calls"])]
+    return {"choices": [{"message": msg}], "model": acc["model"], "usage": acc["usage"] or {}}
+
+
+async def _model(payload: dict):
+    """One model call. Yields ("text", fragment) as words arrive, then ("final", data).
+
+    Streamed because a question turn used to be 10-17 s of nothing. With the words
+    arriving as they are written the first ones are on screen in about a second.
+    `STREAM` off (tests, or CHAT_STREAM=0) falls back to one blocking `_call`.
+    """
+    if not STREAM:
+        yield ("final", await _call(payload))
+        return
+    acc = {"content": "", "tool_calls": {}, "model": None, "usage": None}
+    body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        async with client.stream("POST", OPENROUTER_URL, headers=_headers(), json=body) as r:
+            if r.status_code >= 400:
+                await r.aread()
+                _raise_for(r)
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
+                    continue                  # keep-alive comments, blank lines
+                raw = line[5:].strip()
+                if raw == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(raw)
+                except ValueError:
+                    continue
+                if chunk.get("error"):
+                    err = chunk["error"] if isinstance(chunk["error"], dict) else {}
+                    if err.get("code") in ACCOUNT_CODES:
+                        raise UpstreamUnavailable(err["code"])
+                    raise RuntimeError(str(err.get("message") or chunk["error"]))
+                text = _fold(acc, chunk)
+                if text:
+                    yield ("text", text)
+    yield ("final", _folded(acc))
+
+
+def _cached(convo: list, model_id: str) -> list:
+    """Mark cache breakpoints for Anthropic models; everyone else gets `convo` untouched.
+
+    The loop re-sends the whole transcript on every call, and by the last call that is
+    the system prompt plus every search result and every posting read. Anthropic bills a
+    cached read at a tenth of the input price, so two breakpoints (the system prompt, and
+    the newest tool result or user message) make each call pay full price only for what
+    is new.
+    """
+    if not model_id.startswith("anthropic/"):
+        return convo
+
+    def mark(m: dict) -> dict:
+        return {**m, "content": [{"type": "text", "text": m["content"],
+                                  "cache_control": {"type": "ephemeral"}}]}
+
+    out = list(convo)
+    if isinstance(out[0].get("content"), str):
+        out[0] = mark(out[0])
+    for i in range(len(out) - 1, 0, -1):
+        if out[i].get("role") in ("user", "tool") and isinstance(out[i].get("content"), str) and out[i]["content"]:
+            out[i] = mark(out[i])
+            break
+    return out
+
+
+def resolve_model(name: str | None) -> str:
+    """The model for this request. A caller may choose one only where that is allowed.
+
+    "model" is the field that decides what a request COSTS. Until 2026-11-11 any visitor
+    could name any bench entry in the payload, including the dearest. Now the override
+    needs CHAT_ALLOW_MODEL_OVERRIDE=1, which the bakeoff sets locally and the box does not.
+    """
+    if ALLOW_MODEL_OVERRIDE and name and name in MODELS:
         return MODELS[name]["id"]
     return DEFAULT_MODEL
 
 
-async def turn(messages: list, model: str | None = None) -> dict:
-    """Run a whole turn and return the final dict. THE UNCHANGED API.
+def model_label(model_id: str) -> str:
+    for m in MODELS.values():
+        if m["id"] == model_id:
+            return m.get("label") or model_id
+    return model_id
 
-    A thin drain over `turn_events()`. It exists so that streaming did not become a
-    breaking change: /api/chat, the 297-test suite and the bakeoff harness all read this
-    dict shape, and a refactor that made them all move at once would be a much larger
-    change than the feature is worth.
+
+def _run_tool(name: str, args: dict, state: dict) -> dict:
+    """Looked up by NAME at call time, so a test that replaces `chat.search_jobs` is
+    actually exercised (a dict built at import kept pointing at the original)."""
+    if name == "recommend":
+        return recommend(args, state)
+    if name in ("search_jobs", "read_jobs"):
+        return globals()[name](args)
+    return {"error": f"no tool {name}"}
+
+
+async def turn(messages: list, model: str | None = None, state: dict | None = None,
+               addr: str | None = None) -> dict:
+    """Run a whole turn and return the final dict.
+
+    A thin drain over `turn_events()`, so /api/chat, the deploy gate and the bakeoff
+    harness read one dict while the page reads the stream.
     """
     final: dict = {}
-    async for ev in turn_events(messages, model):
+    async for ev in turn_events(messages, model, state, addr=addr):
         if ev.get("type") == "done":
             final = ev["result"]
     return final
 
 
-async def turn_events(messages: list, model: str | None = None):
-    """Run the model until it produces text, yielding an EVENT as each step completes.
+async def turn_events(messages: list, model: str | None = None, state: dict | None = None,
+                      addr: str | None = None):
+    """Run the model until it produces its answer, yielding an EVENT at each step.
 
-    WHY THIS IS A GENERATOR. The work is the interesting part of this product and it was
-    invisible: /api/chat is one blocking POST, so the activity list — "searched X, 37
-    found", "read 3 postings in full" — rendered all at once AFTER the turn finished.
-    Measured 2026-08-20, deepseek-v4-flash takes 180 s for a full conversation, so that is
-    three minutes of spinner followed by a summary of things that already happened. The
-    `why` argument has always been required on `search_jobs` for exactly this ("The person
-    sees this", chat_tools.md) — it just had nowhere to arrive in time.
+    `messages` is what is NEW this turn (one user message from the page). `state` is the
+    conversation's memory; None means a one-off conversation whose whole transcript is
+    `messages` (the deploy gate, the tests). `addr` is the client address the spend of
+    each model call is counted against (see "cost control"); it is never stored as given,
+    never logged and never passed to the model.
 
-    Events are dicts with a `type`: `tool` as each tool call returns, then exactly one
-    `done` carrying the same dict `turn()` has always returned. Anything consuming this
-    must ignore unknown types rather than assume the set is closed.
+    When the provider refuses the account (401/402): if picks were already delivered this
+    turn, the turn ENDS with them and `error: "service_unavailable"`; otherwise it raises
+    UpstreamUnavailable. The transcript keeps whatever tools ran (as on any other
+    fault); if none ran it is not written at all. `seen`/`read` keep the postings met.
+    A daily spend cap reached mid-turn ends the turn the same way, `error` naming the cap.
 
-    Bounded twice over: MAX_TOOL_CALLS across the loop and MAX_TURNS on the transcript. An
-    agent that can choose its own searches can also choose them forever, and this is the
-    only thing standing between a curious model and the token bill.
+    Events are dicts with a `type`:
+      status      the turn has started; sent before anything slow happens
+      text        a fragment of the model's words, as they are written
+      reset       throw away the text so far (it turned out to precede a tool call)
+      tool_start  a tool is about to run, with what it is searching for
+      tool        that tool returned
+      picks       the checked picks and the ruled-out list, the moment they exist
+      done        exactly one, carrying the same dict `turn()` returns
+    Anything consuming this must ignore unknown types rather than assume the set is closed.
+
+    Tools run in a worker thread. They used to run inline, and they are synchronous (a
+    live fetch can take 20 s), so one visitor's search froze every other request on the
+    process. That, not the model, was most of the "10-17 s for a plain question" measured
+    on 2026-11-11 while four testers ran at once.
+
+    Bounded twice over: MAX_TOOL_CALLS across the loop and MAX_TURNS on the transcript.
     """
     model_id = resolve_model(model)
-    convo = [{"role": "system", "content": system_prompt()}, *messages]
+    if state is None:
+        state = new_state()
+    state["bounced"] = False
+    convo = [{"role": "system", "content": system_prompt()}, *state["convo"], *messages]
     trace, calls = [], 0
     picks: list = []
-    rejected: list = []
+    ruled_out: list = []
+    brief_shown: list = []
     nothing_fits = False
+    delivered = False
     nudged = False
     fabricated = 0
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
     t0 = time.perf_counter()
+    force = told_to_search(convo)
+    # NO SEARCH BEFORE A QUESTION. One short first line ("I'm the president of a software
+    # company, curious what's out there") got `search_jobs("placeholder")` and an empty
+    # `recommend` as the first thing on screen (2026-11-12, 1 of ~25 conversations).
+    said = [m["content"] for m in convo if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    too_soon = not force and len(said) == 1 and len(_GO.sub("", said[0]).strip()) < FIRST_ASK_CHARS
+    if force:
+        convo.append({"role": "user", "content": _GO_NOTE})
+    yield {"type": "status", "text": "thinking"}
 
     def _log_delivery() -> None:
         """Shape only — counts, never content. See searchlog.record_delivery.
 
         Called on BOTH exits, including the budget-exhausted one: a conversation that ran
-        out of tool calls without delivering is exactly the failure worth counting, and it
-        is the exit that returns no reply at all, so nothing else would ever notice it.
+        out of tool calls without delivering is exactly the failure worth counting.
         """
         searchlog.record_delivery(
-            turns=len(messages),
+            turns=sum(1 for m in convo if m.get("role") == "user"),
             searches=sum(1 for t in trace if t["tool"] == "search_jobs"),
             reads=sum(1 for t in trace if t["tool"] == "read_jobs"),
             picks=len(picks),
-            rejected=len(rejected),
+            rejected=len(ruled_out),
             fabricated=fabricated,
             nothing_fits=nothing_fits,
             model=model_id,
             elapsed_ms=(time.perf_counter() - t0) * 1000,
         )
+
+    def _result(reply: str, model_name, error: str | None = None) -> dict:
+        searches = sum(1 for t in trace if t["tool"] == "search_jobs")
+        out = {
+            "reply": reply, "trace": trace, "tool_calls": calls, "model": model_name,
+            "picks": picks, "ruled_out": ruled_out, "rejected": ruled_out,
+            "nothing_fits": nothing_fits, "brief": brief_shown,
+            # `fabricated` is in the RESPONSE, not only in searchlog, because searchlog is
+            # off unless JOBFITR_SEARCH_LOG is set.
+            "fabricated": fabricated, "usage": usage,
+            # THE RECEIPT. The model name, the cost and the trace were already visible in
+            # the network tab; printing them on the page turns an exposure into a
+            # statement. Only a turn that searched gets one.
+            "receipt": {
+                "searches": searches,
+                "read": len({u for t in trace if t["tool"] == "read_jobs"
+                             for u in (t["args"].get("urls") or [])}),
+                "seconds": round(time.perf_counter() - t0),
+                "cost": round(usage["cost"], 4),
+                "model": model_label(model_id),
+            } if searches else None,
+        }
+        if error:
+            out["error"] = error
+        return out
+
     while calls <= MAX_TOOL_CALLS:
-        data = await _call({
-            "model": model_id,
-            "messages": convo, "tools": TOOLS, "tool_choice": "auto",
-        })
-        # OpenRouter returns per-request usage and it was being thrown away, so the only
-        # cost figures in this repo were MODELLED (chat.MODELS' session_usd) rather than
-        # measured — and the bench's price tiers are, per HANDOFF, actively misleading.
+        data: dict = {}
+        streamed = False
+        # RETRIES (RETRY_WAITS) on a transport fault or an upstream 429/5xx. The first full run on
+        # sonnet (2026-11-11) searched four times, read thirteen postings, delivered, and
+        # then lost the connection during the closing sentence (`httpx.ReadError`): the
+        # person saw "something went wrong" under a finished answer. A turn costs a
+        # minute and real money by then; one dropped socket must not void it.
+        # THE DOLLAR CAPS, again, before EVERY call: checked only when a turn started,
+        # turns already running sailed past them (see PER_ADDRESS_CONCURRENT). Whatever
+        # is on screen stays there and in the transcript; the turn just stops here.
+        capped = spend_cap_reached(addr)
+        if capped:
+            log.info("chat turn stopped at a daily spend cap (%s)", capped)
+            if trace:
+                state["convo"] = _compact(convo[1:])
+            if delivered:
+                _log_delivery()
+            yield {"type": "done", "result": _result("", None, error=capped)}
+            return
+        for attempt in range(1, len(RETRY_WAITS) + 2):
+            try:
+                async for kind, val in _model({
+                    "model": model_id, "messages": _cached(convo, model_id), "tools": TOOLS,
+                    "tool_choice": "auto",
+                }):
+                    if kind == "text":
+                        streamed = True
+                        yield {"type": "text", "delta": val}
+                    else:
+                        data = val
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError, RuntimeError) as e:
+                code = (e.status if isinstance(e, UpstreamUnavailable)
+                        else getattr(getattr(e, "response", None), "status_code", None))
+                if code in ACCOUNT_CODES:
+                    # Out of credit or the key refused. Until 2026-11-12 this reached the
+                    # page as "Something went wrong" for every visitor, and the journal
+                    # said only `HTTPStatusError`.
+                    log.warning("chat unavailable: the model provider answered HTTP %d (%s); "
+                                "every turn will fail until the account is fixed",
+                                code, "out of credit" if code == 402 else "API key rejected")
+                    # Once a tool has run, keep what happened, exactly as the generic path
+                    # below does: credit runs out during the EXPENSIVE turn, typically on
+                    # the closing note after the picks are already on screen, and a
+                    # follow-up after a top-up must find them. Before any tool ran there is
+                    # nothing to keep, and the transcript is left without the unanswered
+                    # message so a retry does not read it twice.
+                    if trace:
+                        state["convo"] = _compact(convo[1:])
+                    if delivered:
+                        # An answer exists: return it, not an error page.
+                        _log_delivery()
+                        yield {"type": "done", "result": _result("", None, error=UNAVAILABLE)}
+                        return
+                    if isinstance(e, UpstreamUnavailable):
+                        raise
+                    raise UpstreamUnavailable(code) from e
+                retryable = code is None or code == 429 or code >= 500
+                log.warning("model call failed (attempt %d): %s: %s", attempt, type(e).__name__, e)
+                if attempt > len(RETRY_WAITS) or not retryable:
+                    # Keep what happened so far: the picks are already on screen, and a
+                    # follow-up should not find the conversation has forgotten them.
+                    state["convo"] = _compact(convo[1:])
+                    raise
+                if streamed:
+                    streamed = False
+                    yield {"type": "reset"}
+                wait = RETRY_WAITS[attempt - 1]
+                try:
+                    after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+                    wait = min(float(after), RETRY_AFTER_CAP) if after else wait
+                except (TypeError, ValueError):
+                    pass                      # an HTTP-date or junk: keep the ladder's wait
+                yield {"type": "status", "text": "waiting on the model"}
+                await asyncio.sleep(wait)
         # A conversation is many requests; the caller wants the total for the whole loop.
         u = data.get("usage") or {}
         usage["prompt_tokens"] += u.get("prompt_tokens") or 0
         usage["completion_tokens"] += u.get("completion_tokens") or 0
         usage["cost"] += float(u.get("cost") or 0.0)
+        note_spend(u.get("cost"), addr)       # per CALL, so an abandoned turn still counts
         msg = data["choices"][0]["message"]
         tool_calls = msg.get("tool_calls") or []
+        if not tool_calls and force:
+            # Told to search, and it asked something instead. Once.
+            force = False
+            if streamed:
+                yield {"type": "reset"}
+            convo.append({"role": "assistant", "content": msg.get("content") or "(no text)"})
+            convo.append({"role": "user", "content": _GO_AGAIN})
+            continue
+        force = False
         if not tool_calls:
             # THE NUDGE, and it is load-bearing rather than defensive. Measured: a model
-            # that has searched and read will write five jobs into its prose and never call
-            # `recommend` — the answer reads fine and the screen shows no cards at all.
-            # Asking politely in the prompt did not fix it. So if it tries to finish after
-            # searching without ever delivering, it gets told once, in the transcript,
-            # which is the only place a model reliably notices anything.
+            # that has searched and read will write five jobs into its prose and never
+            # call `recommend` — the answer reads fine and the screen shows no cards. So
+            # if it tries to finish after searching without delivering, it is told once,
+            # in the transcript, which is the only place a model reliably notices anything.
             searched = any(t["tool"] == "search_jobs" for t in trace)
-            if searched and not picks and not nudged:
+            if searched and not delivered and not nudged:
                 nudged = True
-                convo.append(msg)
+                if streamed:
+                    yield {"type": "reset"}
+                convo.append({"role": "assistant", "content": msg.get("content") or "(no text)"})
                 convo.append({"role": "user", "content":
-                    "You have not called `recommend`, so the person's screen is empty — "
+                    "You have not delivered with `recommend`, so the person's screen is empty — "
                     "whatever you wrote is invisible to them. Call `recommend` now with the "
-                    "jobs you chose (url, why, caveat) and the rejections worth naming, "
-                    "using only urls a tool returned. Then write your answer."})
+                    "brief, the jobs you chose (url, why, quote, warning) and the ones worth "
+                    "naming as ruled out, using only urls a tool returned. If nothing is "
+                    "worth recommending, call it with no picks and nothing_fits true. Then "
+                    "write your closing message."})
                 continue
-            if picks or nothing_fits:
+            reply = msg.get("content") or ""
+            if delivered:
                 _log_delivery()
-            yield {"type": "done", "result": {
-                    "reply": msg.get("content") or "", "trace": trace,
-                    "tool_calls": calls, "model": data.get("model"),
-                    "picks": picks, "rejected": rejected, "nothing_fits": nothing_fits,
-                    # `fabricated` is in the RESPONSE, not only in searchlog, because
-                    # searchlog is off unless JOBFITR_SEARCH_LOG is set — so a harness
-                    # grading these conversations was structurally blind to the one
-                    # failure the product cannot survive.
-                    "fabricated": fabricated, "usage": usage}}
+            # Remember the turn. Only now, at the end: a turn abandoned halfway (the
+            # person closed the tab) leaves the conversation exactly as it was.
+            state["convo"] = _compact(convo[1:]) + [{"role": "assistant", "content": reply or "(no text)"}]
+            yield {"type": "done", "result": _result(reply, data.get("model"))}
             return
-        convo.append(msg)
+        if streamed:
+            yield {"type": "reset"}
+        convo.append({"role": "assistant", "content": msg.get("content"), "tool_calls": tool_calls})
         for tc in tool_calls:
+            if too_soon and tc["function"]["name"] in ("search_jobs", "recommend"):
+                # Refused before it runs: no step on the page, no search counted, no banner.
+                calls += 1                    # still bounds the loop if the model insists
+                convo.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(
+                    {"error": "not yet", "note": "You have not asked the person anything yet. "
+                     "Ask your first question now, in plain text, and do not search."})})
+                continue
             calls += 1
             name = tc["function"]["name"]
             args: dict = {}
             try:
                 args = json.loads(tc["function"]["arguments"] or "{}")
-                result = DISPATCH[name](args) if name in DISPATCH else {"error": f"no tool {name}"}
+                if not isinstance(args, dict):
+                    args = {}
+                yield {"type": "tool_start", "tool": name, "why": args.get("why", ""),
+                       "titles": (args.get("titles") or [])[:6] if isinstance(args.get("titles"), list) else [],
+                       "count": len(args.get("urls") or args.get("picks") or []), "n": calls}
+                if name == "search_jobs" and sum(1 for t in trace if t["tool"] == "search_jobs") >= MAX_SEARCHES:
+                    result = {"error": "search limit reached",
+                              "note": f"You have used all {MAX_SEARCHES} searches for this answer. "
+                                      "Read what you have found and call recommend."}
+                else:
+                    result = await asyncio.to_thread(_run_tool, name, args, state)
             except Exception as e:  # a tool fault is a RESULT the model can react to,
                 log.warning("chat tool %s failed: %s", name, e)  # never a dead conversation
                 result = {"error": f"{type(e).__name__}: {e}"}
-            if name == "recommend" and isinstance(result, dict):
+            fresh = None
+            jobs = result.get("jobs") if isinstance(result.get("jobs"), list) else []
+            got = [j.get("url") for j in jobs if isinstance(j, dict) and j.get("url")]
+            if name == "search_jobs":
+                # "37 found" on two different searches read as a stuck counter. How many
+                # of them are NEW to this conversation is the number that shows a second
+                # search did something.
+                fresh = sum(1 for g in got if g not in state["seen"])
+                state["seen"].update(got)
+            elif name == "read_jobs":
+                state["seen"].update(got)
+                state["read"].update(got)
+            bounced = bool(result.get("not_delivered"))
+            if name == "recommend":
                 fabricated += len(result.get("rejected_by_server") or [])
-                picks = result.get("picks") or picks
-                rejected = result.get("rejected") or rejected
-                nothing_fits = result.get("nothing_fits") or nothing_fits
+                if not bounced and "picks" in result:
+                    delivered = True
+                    picks = result.get("picks") or []
+                    ruled_out = result.get("ruled_out") or []
+                    nothing_fits = bool(result.get("nothing_fits"))
+                    brief_shown = result.get("brief") or []
             step = {"tool": name, "args": args,
                     "returned": (result.get("returned") if "returned" in result
                                  else result.get("read") if "read" in result
                                  else result.get("delivered", 0)),
                     "why": args.get("why", "")}
             trace.append(step)
-            # THE LIVE EVENT. Emitted the moment the tool returns, so the person watches
-            # the search happen instead of reading about it three minutes later. It
-            # carries `titles` deliberately: seeing the model pivot to "1st Shift
-            # Supervisor" after someone says they want off nights is the moment that
-            # shows the reasoning is real, and `why` alone does not show it.
-            yield {"type": "tool", "tool": name, "why": step["why"],
-                   "returned": step["returned"],
-                   "titles": (args.get("titles") or [])[:6],
-                   "location": args.get("location") or "",
-                   "n": calls}
+            # THE LIVE EVENT, emitted the moment the tool returns. It carries `titles`
+            # deliberately: seeing the model pivot to "1st Shift Supervisor" after someone
+            # says they want off nights is the moment that shows the reasoning is real.
+            ev = {"type": "tool", "tool": name, "why": step["why"],
+                  "returned": step["returned"],
+                  "titles": (args.get("titles") or [])[:6] if isinstance(args.get("titles"), list) else [],
+                  "location": args.get("location") or "",
+                  "remote_only": bool(args.get("remote_only")),
+                  "n": calls}
+            if fresh is not None:
+                ev["new"] = fresh
+            if name == "recommend":
+                ev["sent_back"] = len(result.get("fix") or []) if bounced else 0
+                ev["removed"] = len(result.get("removed") or [])
+                ev["brief"] = result.get("brief") or []
+            yield ev
+            if name == "recommend" and not bounced and "picks" in result:
+                yield {"type": "picks", "picks": picks, "ruled_out": ruled_out,
+                       "nothing_fits": nothing_fits}
             convo.append({"role": "tool", "tool_call_id": tc["id"],
                           "content": json.dumps(result)[:120000]})
     _log_delivery()
-    yield {"type": "done", "result": {
-        "reply": "", "trace": trace, "tool_calls": calls,
-        "error": "tool_budget_exhausted",
-        "fabricated": fabricated, "usage": usage}}
+    state["convo"] = _compact(convo[1:])
+    yield {"type": "done", "result": _result("", None, "tool_budget_exhausted")}
