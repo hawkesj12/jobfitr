@@ -507,6 +507,46 @@ def test_a_tool_fault_is_a_result_not_a_dead_conversation(monkeypatch):
     assert out["trace"][0]["tool"] == "search_jobs"
 
 
+def test_searches_per_answer_are_capped(monkeypatch):
+    # The first full run made six searches and took 343 s; the last three changed nothing.
+    ran = {"n": 0}
+
+    def search(a):
+        ran["n"] += 1
+        return {"returned": 0, "jobs": []}
+
+    calls = {"n": 0}
+
+    async def fake(payload):
+        calls["n"] += 1
+        if calls["n"] <= chat.MAX_SEARCHES + 2:
+            return _tool("search_jobs", '{"titles":["X"],"probes":["p"],"why":"w"}')
+        return _reply("done")
+
+    monkeypatch.setattr(chat, "_call", fake)
+    monkeypatch.setattr(chat, "search_jobs", search)
+    out = asyncio.run(chat.turn([{"role": "user", "content": "go"}]))
+    assert ran["n"] == chat.MAX_SEARCHES
+    assert out["receipt"]["searches"] == chat.MAX_SEARCHES + 2, "the refused attempts stay visible in the trace"
+
+
+def test_a_slow_live_fetch_does_not_hold_the_search(monkeypatch):
+    # 291 of 343 seconds were searches waiting on the live lane.
+    import threading
+    import time as _time
+
+    from jobfitr import server
+
+    release = threading.Event()
+    monkeypatch.setattr(server, "_warm_cache", lambda titles, loc: (release.wait(5), None)[1])
+    monkeypatch.setattr(chat, "FREEZE_POOL", False)
+    monkeypatch.setattr(chat, "WARM_WAIT", 0.05)
+    t0 = _time.perf_counter()
+    assert chat._warm_live(["Warehouse Supervisor"], "Louisville, KY") == "still_fetching"
+    assert _time.perf_counter() - t0 < 1
+    release.set()
+
+
 def test_the_tool_budget_is_bounded(monkeypatch):
     monkeypatch.setattr(chat, "MAX_TOOL_CALLS", 2)
     monkeypatch.setattr(chat, "search_jobs", lambda a: {"returned": 0, "jobs": []})

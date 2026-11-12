@@ -50,7 +50,7 @@ def test_the_wrong_town_warns_and_never_removes():
     row = _row(location="New Albany, IN", state="IN", city="New Albany", remote="onsite")
     v = checks.check_pick(row, _brief(location="Louisville, KY"))
     assert v["reject"] == ""
-    assert any("New Albany, IN, not Louisville, KY" in f for f in v["flags"])
+    assert any("Listed in New Albany, IN; you asked for Louisville, KY" in f for f in v["flags"])
 
 
 # ── remote ───────────────────────────────────────────────────────────────────
@@ -103,6 +103,20 @@ def test_no_salary_against_a_floor_is_said_on_the_card():
     assert checks.check_pick(_row(), _brief())["flags"] == []
 
 
+def test_a_salary_that_is_only_in_the_display_string_still_counts():
+    # 9 of 12 picks that printed a salary had no structured figure, so their cards read
+    # "$199,000 - $235,000" with "No salary listed" underneath.
+    row = _row(salary="$199,000 - $235,000")
+    assert checks.pay_range(row) == (199000.0, 235000.0)
+    assert checks.check_pick(row, _brief(salary_floor=180000))["flags"] == []
+    assert "up to $130,000" in checks.check_pick(_row(salary="$110,000-130,000"),
+                                                 _brief(salary_floor=200000))["reject"]
+    assert checks.pay_range(_row(salary="$213,000 to $246,000")) == (213000.0, 246000.0)
+    # Not plainly annual dollars: left as "not stated" rather than guessed.
+    for s in ("$22 an hour", "$33–$41", "£60,000 - £70,000", "$6,000 per month", "CAD 120,000"):
+        assert checks.pay_range(_row(salary=s)) == (None, None), s
+
+
 def test_a_range_of_one_number_prints_as_a_number():
     assert checks.pay_label(_row(salary="$61,630–$61,630")) == "$61,630"
     assert checks.pay_label(_row(salary="$61,630 - $61,630 a year")) == "$61,630 a year"
@@ -122,10 +136,12 @@ def test_a_subsidiary_that_names_its_parent_is_removed():
     assert "Part of Accenture" in v["reject"]
 
 
-def test_working_beside_an_excluded_firm_only_warns():
-    row = _row(body="You will work alongside Accenture and Deloitte teams at the customer.")
-    v = checks.check_pick(row, _brief(exclude=["Accenture"]))
-    assert v["reject"] == "" and any("Accenture" in f for f in v["flags"])
+def test_a_passing_mention_of_an_excluded_name_says_nothing_about_the_employer():
+    # "No crypto" became a list including Block; a posting naming where its engineers had
+    # worked ("Meta, Palantir, Block, Affirm") got a warning the model then apologised for.
+    row = _row(body="Our team brings experience from Meta, Palantir, Block, Affirm and Google.")
+    v = checks.check_pick(row, _brief(exclude=["Block", "Accenture"]))
+    assert v["reject"] == "" and v["flags"] == []
 
 
 def test_exclusion_is_whole_word():

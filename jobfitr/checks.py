@@ -123,6 +123,11 @@ _K = re.compile(r"([\d,]+(?:\.\d+)?)\s*[kK]\b")
 _PLAIN = re.compile(r"[\d,]{3,}")
 
 
+_NOT_ANNUAL_USD = re.compile(
+    r"[€£¥₹]|\b(?:CAD|EUR|GBP|INR|JPY|AUD|CHF)\b|/\s*(?:h|mo|wk|week|day)|\b(?:per|an?)\s+(?:hour|month|week|day)\b"
+    r"|\b(?:hourly|monthly|weekly|daily)\b", re.I)
+
+
 def _money(n: float) -> str:
     return f"${int(round(n)):,}"
 
@@ -135,6 +140,19 @@ def pay_range(row: dict) -> tuple[float | None, float | None]:
     period, and falls back to the display string's largest figure.
     """
     lo = store.annual_salary(row)
+    if lo is None:
+        # THE DISPLAY STRING, when the structured figure is absent. Measured on the first
+        # acceptance runs (2026-11-11): 9 of 12 picks that PRINTED a salary carried no
+        # `salary_min`, so cards read "$199,000 - $235,000" with "No salary listed"
+        # directly underneath. Live-lane rows often arrive with only the string.
+        # Only a string that is plainly annual US dollars is read; anything hourly,
+        # monthly or in another currency stays "not stated" rather than being guessed.
+        raw = str(row.get("salary") or "")
+        structured = isinstance(row.get("salary_min"), (int, float)) and row["salary_min"] > 0
+        if raw and not structured and not _NOT_ANNUAL_USD.search(raw):
+            first = store._first_figure(raw)
+            if first and first >= store.ANNUAL_FLOOR:
+                lo = float(first)
     if lo is None:
         return (None, None)
     hi = None
@@ -337,7 +355,9 @@ def check_pick(row: dict, brief: dict) -> dict:
             if tag == "remote":
                 flags.append(f"Remote, not based in {where}.")
             elif (row.get("location") or "").strip():
-                flags.append(f"In {row.get('location')}, not {where}.")
+                # Worded as what the posting says, not as a verdict: "Strathmoor Manor,
+                # Jefferson County" is inside Louisville, and the store cannot know that.
+                flags.append(f"Listed in {row.get('location')}; you asked for {where}.")
             else:
                 flags.append(f"The posting does not say where it is; you asked for {where}.")
 
@@ -371,9 +391,10 @@ def check_pick(row: dict, brief: dict) -> dict:
                     q = _sentence(body, own.start(), own.end(), 140)
                     reject = f"You ruled out “{term}”, and the posting says: “{q}”"
                     break
-                i = body.lower().find(term.lower())
-                q = _sentence(body, max(i, 0), max(i, 0) + len(term), 140)
-                flags.append(f"Mentions “{term}”, which you ruled out: “{q}”")
+                # Any OTHER mention says nothing about who the employer is. It warned at
+                # first, and the first real run printed "Mentions Block, which you ruled
+                # out" on a card whose posting listed where its engineers used to work.
+                # The model apologised for the warning in its closing message.
 
     if brief["no_agencies"]:
         aq = agency_language(body)

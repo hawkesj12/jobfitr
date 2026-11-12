@@ -191,7 +191,8 @@ You send three things:
 `recommend` answers with what was actually shown: which picks were removed and why, and
 which warnings the server added. Read it. Your closing message has to match the screen.
 
-**Then write a short closing message. Two to four sentences. Do NOT list the jobs.**
+**Then write a short closing message: two to four sentences, about 60 words, one
+paragraph. Do NOT list the jobs or describe them one by one.**
 
 Every pick is already on their screen as a card with its title, company, pay, your reason,
 the quote and the warnings. The ruled-out jobs are listed under them with the reasons.

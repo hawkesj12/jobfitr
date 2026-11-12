@@ -406,22 +406,49 @@ def _shallow(c: dict) -> dict:
 FREEZE_POOL = os.environ.get("JOBFITR_FREEZE_POOL") == "1"
 
 
+# How long a search waits for the live fetch before answering from what the store holds.
+#
+# MEASURED 2026-11-11, first full run on the new loop: 343 s for one answer, and 291 s of
+# it was six searches each waiting on this fetch (17, 18, 63, 49, 55 and 72 s). The model
+# calls between them took about 5 s each. Google for Jobs is queried one title at a time,
+# so five titles is five sequential round trips.
+#
+# The fetch is not cancelled when the wait runs out. It finishes on its own thread and
+# lands in the store, so the NEXT search in the same conversation sees its rows. The
+# search that gave up waiting is told so (`still_fetching`) and says so to the model.
+WARM_WAIT = float(os.environ.get("CHAT_WARM_WAIT", "12"))
+# Titles sent to the live lane per search. The lexical and dense arms still use them all.
+WARM_TITLES = int(os.environ.get("CHAT_WARM_TITLES", "3"))
+
+
 def _warm_live(titles: list[str], location: str) -> str | None:
-    if FREEZE_POOL:
-        return None
     """One bounded live fetch for this (titles, location), or the fresh cache untouched.
 
     Deliberately imported lazily from the server: the fetch policy, the daily ceiling and
     the load-shed all live there with the endpoints, and duplicating them here is how the
     two paths would drift into disagreeing about what "fresh" means.
     """
-    try:
-        from .server import _warm_cache
+    if FREEZE_POOL:
+        return None
+    import threading
 
-        return _warm_cache(titles, location)
-    except Exception as e:  # noqa: BLE001 — a dead live lane must not kill the search
-        log.warning("live warm failed (%s: %s) — serving the cache", type(e).__name__, e)
-        return "fetch_error"
+    box: dict = {}
+
+    def work() -> None:
+        try:
+            from .server import _warm_cache
+
+            box["out"] = _warm_cache(titles[:WARM_TITLES], location)
+        except Exception as e:  # noqa: BLE001 — a dead live lane must not kill the search
+            log.warning("live warm failed (%s: %s) — serving the cache", type(e).__name__, e)
+            box["out"] = "fetch_error"
+
+    t = threading.Thread(target=work, name="jobfitr-warm", daemon=True)
+    t.start()
+    t.join(WARM_WAIT)
+    if t.is_alive():
+        return "still_fetching"
+    return box.get("out")
 
 
 # The place tests live in checks.py, because the search filter and the per-pick check must
@@ -528,8 +555,13 @@ def search_jobs(args: dict) -> dict:
         fetched=degraded is None and bool(titles), degraded=degraded,
         elapsed_ms=(time.perf_counter() - _t0) * 1000,
     )
+    out_note = None
+    if degraded == "still_fetching":
+        out_note = ("More postings for these titles are still being fetched from the live "
+                    "sources. These rows are what the store holds now; a later search for "
+                    "the same titles will include the rest.")
     return {"searched": {"titles": titles, "probes": probes, "why": args.get("why", "")},
-            "degraded": degraded,
+            "degraded": degraded, "note": out_note,
             "matched_before_fusion": len(keep), "returned": len(out),
             "semantic": semantic.available(), "jobs": out}
 
@@ -572,6 +604,11 @@ def read_jobs(args: dict) -> dict:
     return result
 
 
+# Searches per answer. The first full run made six and took 343 s; the fourth, fifth and
+# sixth found 53, 22 and 30 new rows and changed none of the picks. Past this the tool
+# refuses, which a model notices, where a sentence in the prompt asking it to stop is one
+# more thing to weigh.
+MAX_SEARCHES = int(os.environ.get("CHAT_MAX_SEARCHES", "4"))
 MAX_PICKS = 5
 MAX_RULED_OUT = int(os.environ.get("CHAT_MAX_RULED_OUT", "8"))
 # Ask each chosen posting whether it is still up before showing it. Off in tests (no
@@ -1246,7 +1283,12 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                 yield {"type": "tool_start", "tool": name, "why": args.get("why", ""),
                        "titles": (args.get("titles") or [])[:6] if isinstance(args.get("titles"), list) else [],
                        "count": len(args.get("urls") or args.get("picks") or []), "n": calls}
-                result = await asyncio.to_thread(_run_tool, name, args, state)
+                if name == "search_jobs" and sum(1 for t in trace if t["tool"] == "search_jobs") >= MAX_SEARCHES:
+                    result = {"error": "search limit reached",
+                              "note": f"You have used all {MAX_SEARCHES} searches for this answer. "
+                                      "Read what you have found and call recommend."}
+                else:
+                    result = await asyncio.to_thread(_run_tool, name, args, state)
             except Exception as e:  # a tool fault is a RESULT the model can react to,
                 log.warning("chat tool %s failed: %s", name, e)  # never a dead conversation
                 result = {"error": f"{type(e).__name__}: {e}"}

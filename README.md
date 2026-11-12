@@ -176,6 +176,8 @@ cp .env.example .env
 | `CHAT_MODEL` | `anthropic/claude-sonnet-5.5` | The OpenRouter model id. Must support tool calls. About $0.10-0.40 a conversation on the default; cheaper models run it for a cent and follow the interview less well. |
 | `CHAT_DAILY_CEILING` | `100` | Turns per day (Eastern) before the chat answers 503. A turn is one message; a conversation is about five. This is the spend cap. |
 | `CHAT_RATE_LIMIT` | `20/minute` | Per-address limit on both chat endpoints. |
+| `CHAT_MAX_SEARCHES` | `4` | Searches per answer. Past this the search tool refuses and the model has to read and decide. |
+| `CHAT_WARM_WAIT` | `12` | Seconds a search waits for the live job sources before answering from what is stored. The fetch finishes in the background and the next search sees it. |
 | `CHAT_CHECK_LIVE` | `1` | Ask each chosen posting whether it is still up before showing it. `0` turns it off. |
 | `CHAT_STREAM` | `1` | Stream the model's words as they are written. |
 | `CHAT_SESSION_TTL` | `7200` | Seconds a conversation is kept in memory after its last message. |

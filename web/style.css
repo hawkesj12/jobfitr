@@ -897,7 +897,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
    the sticky masthead and the logo sat on top of the text. A full-width blur behind the
    masthead, fading out at its lower edge, so text dissolves as it passes under. A solid
    band was tried first and showed as a flat stripe across a sky that is a gradient. */
-body.talking .site-header::before {
+.site-header::before {
   content: ""; position: fixed; top: 0; left: 0; right: 0; height: calc(var(--masthead) + 10px);
   z-index: -1; pointer-events: none;
   -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
