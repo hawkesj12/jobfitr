@@ -6,7 +6,7 @@
     <title>jobfitr — jobs that actually fit you</title>
     <meta
       name="description"
-      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
+      content="Talk to jobfitr about the work you want. It reads the postings, checks each one against what you asked for, and comes back with up to five jobs and why."
     />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230e1424'/><text x='50' y='70' font-size='56' font-family='Helvetica,Arial,sans-serif' font-weight='700' letter-spacing='-3' text-anchor='middle' fill='%23e6b985'>jf</text></svg>" />
 
@@ -16,7 +16,7 @@
     <meta property="og:title" content="jobfitr — jobs that actually fit you" />
     <meta
       property="og:description"
-      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
+      content="Talk to jobfitr about the work you want. It reads the postings, checks each one against what you asked for, and comes back with up to five jobs and why."
     />
     <meta property="og:url" content="https://jobfitr.app/" />
     <meta property="og:image" content="https://jobfitr.app/og.png" />
@@ -27,10 +27,10 @@
     <meta name="twitter:title" content="jobfitr — jobs that actually fit you" />
     <meta
       name="twitter:description"
-      content="Talk to jobfitr about the work you want. It reads the postings and comes back with five jobs and why — each linked straight to the employer."
+      content="Talk to jobfitr about the work you want. It reads the postings, checks each one against what you asked for, and comes back with up to five jobs and why."
     />
     <meta name="twitter:image" content="https://jobfitr.app/og.png" />
-    <link rel="stylesheet" href="style.css?v=75" />
+    <link rel="stylesheet" href="style.css?v=76" />
   </head>
   <body>
     <a class="skip-link" href="#stage">Skip to the app</a>
@@ -81,8 +81,9 @@
             <h1 class="hero-prop">Jobs that <em>actually fit you</em>.</h1>
             <p class="hero-sub">
               Tell it about the work you want. It asks what it needs to, searches sixty
-              thousand live postings, reads the ones worth reading, and comes back with
-              five jobs and why — linked to the employer. No account, no tracking, no fee.
+              thousand live postings, reads the ones worth reading, and checks each one
+              against what you asked for. You get up to five jobs, each with its reason
+              and a line quoted from the posting. No account, no tracking, no fee.
             </p>
             <p class="proof" id="proof"></p>
           </div>
@@ -101,7 +102,7 @@
                from the question being asked. Transcript, current question and input are
                one continuous block, because that is what a conversation is. -->
           <div class="transcript">
-            <div class="echo" id="echo" aria-hidden="true"></div>
+            <div class="echo" id="echo" role="log" aria-label="The conversation so far"></div>
           </div>
           <div class="sayrow">
             <span class="steps" id="steps" aria-hidden="true"></span>
@@ -133,7 +134,7 @@
         <!-- seeded starters: a bare input tells a first-time visitor nothing about
              what the assistant can do. These run a real search on one click. -->
         <div class="doorextra" id="doorextra">
-          <p class="starters-lab">or start from one of these</p>
+          <p class="starters-lab">or run one of these to see it work</p>
           <div class="starters" id="starters"></div>
 
           <div class="doornotes">
@@ -141,11 +142,22 @@
               <h2>How it works</h2>
               <p>
                 You have a conversation. It asks about the work you want, where you can do
-                it from, what you are good at and what you would turn down — as many
-                questions as that takes, not a fixed list. Then it searches, more than once,
-                changing what it looks for based on what comes back; reads the postings in
-                full; and gives you five with its reasoning, plus the ones it rejected and
-                why. There is no fit score. A number would be easier to show and harder to
+                it from, what you are good at and what you would turn down. Say
+                <em>just search</em> at any point and it does. Then it searches, more than
+                once, changing what it looks for based on what comes back, and reads the
+                postings in full.
+              </p>
+              <p>
+                Before you see anything, each job it chose is checked against what you
+                said. A posting that breaks one of your dealbreakers is removed: remote
+                only and the posting says on-site, pay that tops out under your floor, an
+                employer you ruled out. You still see it, listed as ruled out with the
+                posting's own words. Where a posting is silent, such as no salary listed,
+                the card carries a warning instead. That can leave fewer than five, or
+                none, and it says so.
+              </p>
+              <p>
+                There is no fit score. A number would be easier to show and harder to
                 trust, and it could not tell you <em>why</em>.
               </p>
             </section>
@@ -200,6 +212,6 @@
     </template>
 
     <script src="atmosphere.js?v=51"></script>
-    <script src="chat.js?v=66"></script>
+    <script src="chat.js?v=67"></script>
   </body>
 </html>

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import json
 import os
 import sqlite3
@@ -28,7 +30,10 @@ def _job(url, title, text="", **kw):
         "text": text,
         "company": "Acme",
         "location": "Remote",
-        "posted": "2026-07-10",
+        # RELATIVE, not a fixed date. It was "2026-07-10", which crossed the 60-day
+        # posted-age eviction rule in September and turned four eviction tests red for
+        # a reason that had nothing to do with eviction.
+        "posted": (date.today() - timedelta(days=5)).isoformat(),
         "salary": "",
         "source": "adzuna",
         # A REAL ROW ALWAYS CARRIES THIS. job_radar's `_coerce` fills a bool for any row with a
@@ -274,11 +279,15 @@ def test_ttl_fresh_then_stale(db):
 
 
 # ── eviction: unseen>14d, posted>60d, LRU cap ────────────────────────────────
+# A recent posting date, relative to today; a fixed one ages past the 60-day rule.
+_RECENT = (date.today() - timedelta(days=5)).isoformat()
+
+
 def test_evict_unseen_and_posted_and_cap(db, monkeypatch):
     now = time.time()
-    store.upsert_jobs([_job("fresh", "Fresh Job", posted="2026-07-13")], path=db)
+    store.upsert_jobs([_job("fresh", "Fresh Job", posted=_RECENT)], path=db)
     store.upsert_jobs([_job("oldposted", "Old Posted", posted="2020-01-01")], path=db)
-    store.upsert_jobs([_job("unseen", "Unseen Job", posted="2026-07-13")], path=db)
+    store.upsert_jobs([_job("unseen", "Unseen Job", posted=_RECENT)], path=db)
     # age "unseen"'s last_seen to 20 days ago via a direct write
     with store._conn(db) as c:
         c.execute("UPDATE jobs SET last_seen=? WHERE url='unseen'", (now - 20 * 86400,))
@@ -293,7 +302,7 @@ def test_evict_lru_cap(db, monkeypatch):
     monkeypatch.setattr(store, "MAX_ROWS", 2)
     now = time.time()
     for i in range(5):
-        store.upsert_jobs([_job(f"j{i}", "Widget Maker", posted="2026-07-13")], path=db)
+        store.upsert_jobs([_job(f"j{i}", "Widget Maker", posted=_RECENT)], path=db)
         with store._conn(db) as c:
             c.execute("UPDATE jobs SET last_seen=? WHERE url=?", (now - i, f"j{i}"))
     store.evict(now=now, path=db)

@@ -35,6 +35,14 @@ shortlist.csv
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+# Agent-skill config and the local issue tracker. Tickets can name people and open
+# weak spots, so they stay out of a public checkout for the same reason CLAUDE.md does.
+docs/agents/
+.scratch/
+# The domain glossary and decision records, kept private with the rest.
+GLOSSARY.md
+GLOSSARY-MAP.md
+docs/adr/
 
 # Local session-workflow files (not part of the product)
 KICKOFF-PROMPT.md
