@@ -80,6 +80,9 @@
   function say(text) {
     if (!sayEl) return;
     sayEl.classList.remove("working");
+    // A question is one line and reads well large. A closing note is a paragraph, and at
+    // the same size it filled a phone screen.
+    sayEl.classList.toggle("long", (text || "").length > 180);
     sayEl.innerHTML = renderReply(text);
   }
 

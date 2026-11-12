@@ -878,6 +878,7 @@ input[type="range"]::-moz-range-thumb { width: 17px; height: 17px; border-radius
 .receipt { margin: .2rem 0 1rem; font-size: var(--t-micro); opacity: .7; }
 .receipt-lab { text-transform: uppercase; letter-spacing: .05em; font-weight: 700; margin-right: .4rem; }
 
+.chat-say.long { font-size: var(--t-body); font-weight: 480; line-height: 1.55; text-wrap: pretty; }
 /* The working line, on screen the moment a message is sent. */
 .chat-say.working { font-weight: 500; opacity: .8; }
 .chat-say .dots::after { content: "…"; display: inline-block; animation: dots 1.2s steps(4, end) infinite; clip-path: inset(0 100% 0 0); }
