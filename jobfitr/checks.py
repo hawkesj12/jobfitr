@@ -6,7 +6,8 @@ was TOLD the person's dealbreakers and recommended through them. A "remote only"
 a posting whose body says onsite five days a week; a $200K floor got a job topping out at
 $135K; "no big consulting" got an Accenture subsidiary; every caveat field came back empty.
 The prompt already said "do not tell them what they want to hear". This repo has measured
-that ceiling before (HANDOFF: "PROMPT TUNING HAS A CEILING, and I hit it four times").
+that ceiling before: four rounds of prompt rewording in one morning each fixed what they
+named and broke something else.
 
 So the model no longer decides whether a constraint was met. It states the constraints
 once, as data (`brief`), and every pick is tested against them here. A pick that breaks a
@@ -132,6 +133,56 @@ def _money(n: float) -> str:
     return f"${int(round(n)):,}"
 
 
+def _structured(row: dict) -> bool:
+    return isinstance(row.get("salary_min"), (int, float)) and row["salary_min"] > 0
+
+
+def _figures(s: str) -> list[float]:
+    figs = [float(m.group(1).replace(",", "")) * 1000 for m in _K.finditer(s)]
+    return figs + [float(n.replace(",", "")) for n in _PLAIN.findall(_K.sub(" ", s))]
+
+
+def pay_estimate(row: dict) -> tuple[float, float] | None:
+    """Adzuna's PREDICTED salary as (low, high), or None when the pay is the employer's.
+
+    The engine keeps the prediction in `salary_estimated_*` and leaves `salary_min` empty,
+    but still writes the display string from it as one figure twice ("$61,630–$61,630").
+    Read as stated pay, a model's guess passed or failed a person's floor.
+    """
+    if _structured(row):
+        return None
+    lo, hi = row.get("salary_estimated_min"), row.get("salary_estimated_max")
+    if isinstance(lo, (int, float)) and lo > 0:
+        return (float(lo), float(hi) if isinstance(hi, (int, float)) and hi >= lo else float(lo))
+    # Older rows lack the estimate columns: Adzuna plus a one-figure string is the same tell.
+    figs = set(_figures(str(row.get("salary") or "")))
+    if str(row.get("source") or "").lower() == "adzuna" and len(figs) == 1:
+        return (figs.pop(),) * 2
+    return None
+
+
+# Hourly only. Weekly, monthly and other currencies stay "not stated" (`_NOT_ANNUAL_USD`).
+_HOURLY = re.compile(r"/\s*(?:hr|hour|h)\b|\b(?:per|an?)\s+hour\b|\bhourly\b", re.I)
+_RATE = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{1,2})?)(?![\d,%])")
+HOURS_A_YEAR = 2080
+
+
+def hourly_pay(row: dict) -> tuple[float, float] | None:
+    """("$18 - $20 an hour") -> (18.0, 20.0), or None when the string is not plainly hourly USD."""
+    s = str(row.get("salary") or "")
+    if not _HOURLY.search(s) or _NOT_ANNUAL_USD.search(_HOURLY.sub(" ", s)):
+        return None
+    rates = [float(x) for x in _RATE.findall(s)]
+    # Anything outside a plausible hourly wage is odd, and odd stays "not stated".
+    if not rates or not all(5 <= r <= 500 for r in rates):
+        return None
+    return (min(rates), max(rates))
+
+
+def _rate(x: float) -> str:
+    return f"${x:,.2f}".removesuffix(".00")
+
+
 def pay_range(row: dict) -> tuple[float | None, float | None]:
     """(low, high) as annual USD, or (None, None) when no trustworthy figure is stated.
 
@@ -139,7 +190,12 @@ def pay_range(row: dict) -> tuple[float | None, float | None]:
     figure can be trusted at all (currency, period). The high end rides on the same
     period, and falls back to the display string's largest figure.
     """
+    if pay_estimate(row):
+        return (None, None)
     lo = store.annual_salary(row)
+    hr = hourly_pay(row) if lo is None and not _structured(row) else None
+    if hr:
+        return (hr[0] * HOURS_A_YEAR, hr[1] * HOURS_A_YEAR)
     if lo is None:
         # THE DISPLAY STRING, when the structured figure is absent. Measured on the first
         # acceptance runs (2026-11-11): 9 of 12 picks that PRINTED a salary carried no
@@ -148,8 +204,7 @@ def pay_range(row: dict) -> tuple[float | None, float | None]:
         # Only a string that is plainly annual US dollars is read; anything hourly,
         # monthly or in another currency stays "not stated" rather than being guessed.
         raw = str(row.get("salary") or "")
-        structured = isinstance(row.get("salary_min"), (int, float)) and row["salary_min"] > 0
-        if raw and not structured and not _NOT_ANNUAL_USD.search(raw):
+        if raw and not _structured(row) and not _NOT_ANNUAL_USD.search(raw):
             first = store._first_figure(raw)
             if first and first >= store.ANNUAL_FLOOR:
                 lo = float(first)
@@ -160,10 +215,7 @@ def pay_range(row: dict) -> tuple[float | None, float | None]:
     if isinstance(raw_hi, (int, float)) and isinstance(raw_lo, (int, float)) and raw_lo > 0 and raw_hi >= raw_lo:
         hi = float(raw_hi) * (lo / float(raw_lo))
     else:
-        s = str(row.get("salary") or "")
-        figs = [float(m.group(1).replace(",", "")) * 1000 for m in _K.finditer(s)]
-        figs += [float(n.replace(",", "")) for n in _PLAIN.findall(_K.sub(" ", s))]
-        figs = [f for f in figs if f >= lo]
+        figs = [f for f in _figures(str(row.get("salary") or "")) if f >= lo]
         # Only trust a string-derived top when it is the same order of magnitude; an
         # hourly "$33–$41" beside an annualised low would otherwise read as nonsense.
         if figs and max(figs) <= lo * 4:
@@ -173,6 +225,10 @@ def pay_range(row: dict) -> tuple[float | None, float | None]:
 
 def pay_label(row: dict) -> str:
     """What the card prints. Never "$61,630–$61,630" — a range of one number is a number."""
+    est = pay_estimate(row)
+    if est:
+        fig = _money(est[0]) if round(est[0]) == round(est[1]) else f"{_money(est[0])}–{_money(est[1])}"
+        return f"about {fig} (Adzuna's estimate)"
     s = " ".join(str(row.get("salary") or "").split())
     if s:
         m = re.match(r"^(\$?[\d,.]+\s*[kK]?)\s*(?:-|–|—|to)\s*(\$?[\d,.]+\s*[kK]?)(.*)$", s)
@@ -200,15 +256,34 @@ _ONSITE = [
     re.compile(r"\bhybrid\s+(?:role|position|schedule|work\s+model)\b", re.I),
 ]
 # Phrases that contain "on-site" and are NOT a statement that the job is on-site. Without
-# these, "remote, with occasional on-site customer visits" reads as an office job.
+# these, "remote, with occasional on-site customer visits" reads as an office job. The bare
+# words "customer" and "client" are NOT here: they excused "on-site 5 days a week at our
+# client office". "visit" and "travel" carry the real excuse.
 _ONSITE_NOT = re.compile(
-    r"customer|client|visit|travel|optional|not required|no requirement|if you (?:like|prefer|want)"
+    r"visit|travel|optional|not required|no requirement|if you (?:like|prefer|want)"
     r"|welcome to|on-?site (?:gym|parking|cafeteria|childcare|interview)", re.I)
 
 _AGENCY = re.compile(
-    r"\bon behalf of (?:our|a|its) client\b|\bour client(?:'s|,| is| has| seeks| needs)\b"
+    # No `'s`: "our client's success is our success" is a vendor, not an agency. And no `\b`
+    # after the comma, which made "Our client, a leading manufacturer, needs…" never match.
+    r"\bon behalf of (?:our|a|its) client\b|\bour client(?:,|\s(?:is|has|seeks|needs)\b)"
     r"|\bstaffing (?:agency|firm|company)\b|\brecruit(?:ing|ment) (?:agency|firm)\b"
     r"|\bclient is (?:seeking|looking|hiring)\b", re.I)
+
+# Large US staffing firms, matched against the WHOLE employer name (case, punctuation and a
+# trailing Inc/LLC ignored). A posting from one often reads like any other employer's.
+STAFFING_FIRMS = frozenset((
+    "insight global", "teksystems", "robert half", "aerotek", "randstad", "adecco", "kforce",
+    "kelly services", "manpower", "manpowergroup", "jobot", "cybercoders", "actalent",
+    "apex systems", "beacon hill", "beacon hill staffing group", "collabera", "motion recruitment",
+    "aston carter", "experis", "akkodis", "addison group", "creative circle", "spherion",
+    "express employment professionals", "peopleready", "staffmark",
+))
+
+
+def staffing_firm(company: str) -> bool:
+    name = re.sub(r"[^a-z0-9]+", " ", (company or "").lower()).strip()
+    return re.sub(r"\s+(?:inc|llc)$", "", name) in STAFFING_FIRMS
 
 _YEARS = re.compile(r"\b(\d{1,2})\s*\+?\s*(?:-\s*\d{1,2}\s*\+?\s*)?(?:years?|yrs?)\b", re.I)
 
@@ -364,8 +439,14 @@ def check_pick(row: dict, brief: dict) -> dict:
     floor = brief["salary_floor"]
     lo, hi = pay_range(row)
     if floor and not reject:
-        if lo is None:
+        hr = hourly_pay(row)
+        if lo is None and pay_estimate(row):
+            flags.append(f"The pay shown is Adzuna's estimate; the employer stated none — your floor is {_money(floor)}.")
+        elif lo is None:
             flags.append(f"No salary listed — your floor is {_money(floor)}.")
+        elif hi is not None and hi < floor and hr and hi == hr[1] * HOURS_A_YEAR:
+            reject = (f"It pays up to {_rate(hr[1])} an hour, about {_money(hi)} a year, "
+                      f"under your {_money(floor)} floor.")
         elif hi is not None and hi < floor:
             reject = f"It pays up to {_money(hi)}, under your {_money(floor)} floor."
         elif lo < floor:
@@ -382,9 +463,11 @@ def check_pick(row: dict, brief: dict) -> dict:
                 # of Accenture" was the 2026-11-11 case). That removes. Any other mention
                 # ("you will work alongside Accenture teams") only warns: a partner or a
                 # customer is not the employer.
+                # "Our founders were part of Accenture teams" is history, hence the lookahead.
                 own = re.search(
                     r"(?:part of|a division of|a subsidiary of|owned by|acquired by|a member of"
-                    r"|an?)\s+(?:the\s+)?" + re.escape(term) + r"(?:\s+(?:company|group|family|business))?",
+                    r"|parent company,?(?:\s+is)?|an?)\s+(?:the\s+)?" + re.escape(term)
+                    + r"(?:\s+(?:company|group|family|business|subsidiary|division))?(?!\s+teams?\b)",
                     body, re.I)
                 if own and re.search(r"part of|division|subsidiary|owned|acquired|member|company|group|family|business",
                                      own.group(0), re.I):
@@ -396,9 +479,11 @@ def check_pick(row: dict, brief: dict) -> dict:
                 # out" on a card whose posting listed where its engineers used to work.
                 # The model apologised for the warning in its closing message.
 
-    if brief["no_agencies"]:
+    if brief["no_agencies"] and not reject:
         aq = agency_language(body)
-        if aq and not reject:
+        if staffing_firm(company):
+            reject = f"You ruled out agencies, and {company} is a staffing firm."
+        elif aq:
             reject = f"You ruled out agencies, and this reads as one: “{aq}”"
 
     text = f"{title} {body}"

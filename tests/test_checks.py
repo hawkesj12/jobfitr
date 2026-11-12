@@ -76,6 +76,11 @@ def test_a_customer_visit_is_not_an_office_job():
     assert checks.check_pick(_row(body=body), _brief(remote_only=True))["reject"] == ""
 
 
+def test_a_client_office_is_still_an_office():
+    body = "You will be on-site 5 days a week at our client office."
+    assert "remote only" in checks.check_pick(_row(body=body), _brief(remote_only=True))["reject"]
+
+
 def test_a_posting_silent_on_remote_is_a_warning_not_a_removal():
     v = checks.check_pick(_row(remote="", body="You will build things."), _brief(remote_only=True))
     assert v["reject"] == ""
@@ -113,8 +118,32 @@ def test_a_salary_that_is_only_in_the_display_string_still_counts():
                                                  _brief(salary_floor=200000))["reject"]
     assert checks.pay_range(_row(salary="$213,000 to $246,000")) == (213000.0, 246000.0)
     # Not plainly annual dollars: left as "not stated" rather than guessed.
-    for s in ("$22 an hour", "$33–$41", "£60,000 - £70,000", "$6,000 per month", "CAD 120,000"):
+    for s in ("$33–$41", "£60,000 - £70,000", "$6,000 per month", "CAD 120,000", "$900 a week"):
         assert checks.pay_range(_row(salary=s)) == (None, None), s
+
+
+def test_hourly_pay_is_read_as_a_year_of_hours():
+    assert checks.pay_range(_row(salary="$22 an hour")) == (45760.0, 45760.0)
+    assert checks.pay_range(_row(salary="$18/hr")) == (37440.0, 37440.0)
+    assert checks.pay_range(_row(salary="$18.50 per hour")) == (38480.0, 38480.0)
+    v = checks.check_pick(_row(salary="$18 - $20 an hour"), _brief(salary_floor=55000))
+    assert v["reject"] == "It pays up to $20 an hour, about $41,600 a year, under your $55,000 floor."
+    assert checks.check_pick(_row(salary="$30 an hour"), _brief(salary_floor=55000))["reject"] == ""
+
+
+def test_an_adzuna_estimate_is_not_the_employers_pay():
+    # The engine writes Adzuna's prediction as one figure twice and leaves salary_min empty.
+    est = _row(salary="$61,630–$61,630", source="adzuna",
+               salary_estimated_min=61630, salary_estimated_max=61630)
+    old = _row(salary="$61,630 - $61,630", source="adzuna")  # no estimate columns
+    for row in (est, old):
+        assert checks.pay_range(row) == (None, None)
+        assert checks.pay_label(row) == "about $61,630 (Adzuna's estimate)"
+        v = checks.check_pick(row, _brief(salary_floor=100000))
+        assert v["reject"] == "" and any("Adzuna's estimate; the employer stated none" in f for f in v["flags"])
+    # A stated figure on an Adzuna row is the employer's and still counts.
+    stated = _row(salary="$60,000 - $70,000", source="adzuna", salary_min=60000, salary_max=70000)
+    assert checks.pay_range(stated) == (60000.0, 70000.0)
 
 
 def test_a_range_of_one_number_prints_as_a_number():
@@ -136,6 +165,13 @@ def test_a_subsidiary_that_names_its_parent_is_removed():
     assert "Part of Accenture" in v["reject"]
 
 
+def test_the_other_ways_a_posting_names_its_parent():
+    b = _brief(exclude=["Accenture", "Deloitte"])
+    for body in ("Our parent company, Deloitte, backs us.", "We are an Accenture subsidiary."):
+        assert checks.check_pick(_row(body=body), b)["reject"], body
+    assert checks.check_pick(_row(body="Our founders were part of Accenture teams."), b)["reject"] == ""
+
+
 def test_a_passing_mention_of_an_excluded_name_says_nothing_about_the_employer():
     # "No crypto" became a list including Block; a posting naming where its engineers had
     # worked ("Meta, Palantir, Block, Affirm") got a warning the model then apologised for.
@@ -154,6 +190,15 @@ def test_an_agency_is_removed_only_when_agencies_were_ruled_out():
     body = "Our client is seeking a senior engineer. This role is on behalf of our client."
     assert "agencies" in checks.check_pick(_row(body=body), _brief(no_agencies=True))["reject"]
     assert checks.check_pick(_row(body=body), _brief())["reject"] == ""
+
+
+def test_a_staffing_firm_is_known_by_its_name_and_the_agency_wording_is_fixed():
+    b = _brief(no_agencies=True)
+    for name in ("Insight Global", "TEKsystems, Inc.", "robert half"):
+        assert "staffing firm" in checks.check_pick(_row(company=name), b)["reject"], name
+    assert checks.check_pick(_row(company="Global Insight Partners"), b)["reject"] == ""
+    assert checks.check_pick(_row(body="Our client, a leading manufacturer, needs a planner."), b)["reject"]
+    assert checks.check_pick(_row(body="Our client's success is our success."), b)["reject"] == ""
 
 
 # ── what the work should involve, and seniority ──────────────────────────────

@@ -633,7 +633,8 @@ def _card(row: dict, check: dict, why: str, quote: str, warning: str) -> dict:
         # five days in the office is the card contradicting itself.
         "remote": check["tag"],
         "salary": checks.pay_label(row),
-        "salary_min": store.annual_salary(row),
+        # The checks' figure: none for an Adzuna estimate, hourly pay annualised.
+        "salary_min": checks.pay_range(row)[0],
         "posted": row.get("posted", ""),
         "age_days": checks.age_days(row),
         "link": checks.link_kind(row),
