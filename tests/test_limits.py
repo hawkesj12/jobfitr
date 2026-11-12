@@ -220,11 +220,12 @@ def test_after_a_top_up_the_same_conversation_carries_on_cleanly(monkeypatch):
 
 
 def test_an_ordinary_upstream_fault_is_still_retried(monkeypatch):
-    # The account path must not swallow the transient one: a 503 is retried once.
+    # The account path must not swallow the transient one: a 503 is retried (four tries).
     monkeypatch.setattr(chat, "STREAM", False)
+    monkeypatch.setattr(chat, "RETRY_WAITS", (0, 0, 0))
     seen = _upstream(monkeypatch, 503, body=b"{}")
     d = _say(_client("203.0.113.43")).json()
-    assert len(seen) == 2 and d["error"].startswith("upstream:")
+    assert len(seen) == 4 and d["error"].startswith("upstream:")
 
 
 # ── 5. memory bound and nothing identifying ─────────────────────────────────────────

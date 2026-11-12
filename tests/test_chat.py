@@ -346,6 +346,40 @@ def test_one_dropped_connection_does_not_void_the_turn(monkeypatch):
     assert out["reply"] == "Where do you live?" and n["calls"] == 2
 
 
+def _limited(monkeypatch, fails):
+    """A provider that answers 429 `fails` times, then a normal reply."""
+    import httpx
+
+    n = {"calls": 0}
+
+    async def fake(payload):
+        n["calls"] += 1
+        if n["calls"] <= fails:
+            req = httpx.Request("POST", chat.OPENROUTER_URL)
+            raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
+        return _reply("Where do you live?")
+
+    monkeypatch.setattr(chat, "_call", fake)
+    monkeypatch.setattr(chat, "RETRY_WAITS", (0, 0, 0))
+    return n
+
+
+def test_a_short_rate_limit_burst_ends_in_a_normal_answer(monkeypatch):
+    n = _limited(monkeypatch, 2)
+    out = asyncio.run(chat.turn([{"role": "user", "content": "hi"}]))
+    assert out["reply"] == "Where do you live?" and n["calls"] == 3
+
+
+def test_four_rate_limits_end_in_the_existing_error(monkeypatch):
+    import httpx
+    import pytest
+
+    n = _limited(monkeypatch, 4)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(chat.turn([{"role": "user", "content": "hi"}]))
+    assert n["calls"] == 4
+
+
 # ── the conversation's memory ────────────────────────────────────────────────
 def test_the_server_remembers_the_conversation_so_the_page_sends_one_message(monkeypatch):
     seen_by_model = []

@@ -899,6 +899,11 @@ UNAVAILABLE = "service_unavailable"
 # OpenRouter's documented codes: 401 bad or disabled key, 402 insufficient credits.
 # Everything else (400, 403 moderation, 408, 429, 5xx) is about the request or the moment.
 ACCOUNT_CODES = (401, 402)
+# Waits before attempts 2-4 on a 429/5xx/transport fault. On 2026-11-12 the provider's 429s
+# came in bursts of about a minute and one retry after a second lost two of three
+# conversations. A `Retry-After` header wins, capped. Tests set this to zeros.
+RETRY_WAITS = (3.0, 8.0, 20.0)
+RETRY_AFTER_CAP = 30.0
 
 
 def available() -> bool:
@@ -1170,10 +1175,17 @@ def _headers() -> dict:
     }
 
 
+def _raise_for(r: httpx.Response) -> None:
+    # The body names WHICH limit was hit; on 2026-11-12 the log had only "429".
+    if r.status_code >= 400:
+        log.warning("model provider answered HTTP %d: %s", r.status_code, r.text[:300])
+    r.raise_for_status()
+
+
 async def _call(payload: dict) -> dict:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         r = await client.post(OPENROUTER_URL, headers=_headers(), json=payload)
-        r.raise_for_status()
+        _raise_for(r)
         return r.json()
 
 
@@ -1227,7 +1239,7 @@ async def _model(payload: dict):
         async with client.stream("POST", OPENROUTER_URL, headers=_headers(), json=body) as r:
             if r.status_code >= 400:
                 await r.aread()
-                r.raise_for_status()
+                _raise_for(r)
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue                  # keep-alive comments, blank lines
@@ -1417,7 +1429,7 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
     while calls <= MAX_TOOL_CALLS:
         data: dict = {}
         streamed = False
-        # ONE RETRY on a transport fault or an upstream 429/5xx. The first full run on
+        # RETRIES (RETRY_WAITS) on a transport fault or an upstream 429/5xx. The first full run on
         # sonnet (2026-11-11) searched four times, read thirteen postings, delivered, and
         # then lost the connection during the closing sentence (`httpx.ReadError`): the
         # person saw "something went wrong" under a finished answer. A turn costs a
@@ -1434,7 +1446,7 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                 _log_delivery()
             yield {"type": "done", "result": _result("", None, error=capped)}
             return
-        for attempt in (1, 2):
+        for attempt in range(1, len(RETRY_WAITS) + 2):
             try:
                 async for kind, val in _model({
                     "model": model_id, "messages": _cached(convo, model_id), "tools": TOOLS,
@@ -1474,7 +1486,7 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                     raise UpstreamUnavailable(code) from e
                 retryable = code is None or code == 429 or code >= 500
                 log.warning("model call failed (attempt %d): %s: %s", attempt, type(e).__name__, e)
-                if attempt == 2 or not retryable:
+                if attempt > len(RETRY_WAITS) or not retryable:
                     # Keep what happened so far: the picks are already on screen, and a
                     # follow-up should not find the conversation has forgotten them.
                     state["convo"] = _compact(convo[1:])
@@ -1482,7 +1494,14 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
                 if streamed:
                     streamed = False
                     yield {"type": "reset"}
-                await asyncio.sleep(1.0)
+                wait = RETRY_WAITS[attempt - 1]
+                try:
+                    after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+                    wait = min(float(after), RETRY_AFTER_CAP) if after else wait
+                except (TypeError, ValueError):
+                    pass                      # an HTTP-date or junk: keep the ladder's wait
+                yield {"type": "status", "text": "waiting on the model"}
+                await asyncio.sleep(wait)
         # A conversation is many requests; the caller wants the total for the whole loop.
         u = data.get("usage") or {}
         usage["prompt_tokens"] += u.get("prompt_tokens") or 0

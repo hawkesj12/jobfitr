@@ -443,7 +443,10 @@ def check_pick(row: dict, brief: dict) -> dict:
         if lo is None and pay_estimate(row):
             flags.append(f"The pay shown is Adzuna's estimate; the employer stated none — your floor is {_money(floor)}.")
         elif lo is None:
-            flags.append(f"No salary listed — your floor is {_money(floor)}.")
+            # Says what was read: the model's note on the same card can quote pay from the
+            # body, and "No salary listed" beside it contradicted the card (2026-11-12, 3x).
+            flags.append(f"The listing's pay field is empty — your floor is {_money(floor)}. "
+                         "Check the posting for a figure.")
         elif hi is not None and hi < floor and hr and hi == hr[1] * HOURS_A_YEAR:
             reject = (f"It pays up to {_rate(hr[1])} an hour, about {_money(hi)} a year, "
                       f"under your {_money(floor)} floor.")

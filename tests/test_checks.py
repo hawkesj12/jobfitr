@@ -104,7 +104,8 @@ def test_a_range_that_straddles_the_floor_warns():
 def test_no_salary_against_a_floor_is_said_on_the_card():
     # 5 of 10 picks in one tester's runs had no salary and the cards were silent.
     v = checks.check_pick(_row(), _brief(salary_floor=55000))
-    assert v["reject"] == "" and any("No salary listed" in f for f in v["flags"])
+    assert v["reject"] == "" and "The listing's pay field is empty — your floor is $55,000. " \
+        "Check the posting for a figure." in v["flags"]
     assert checks.check_pick(_row(), _brief())["flags"] == []
 
 
