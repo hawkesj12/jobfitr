@@ -1145,6 +1145,8 @@ _GO = re.compile(
 # ...but only when there is something to search FOR. A bare "search now" as the first
 # message carries nothing, and forcing it would make the model invent a job title.
 GO_MIN_CHARS = 60
+# Below this, a lone first message (search-now phrases removed) is too thin to search on.
+FIRST_ASK_CHARS = 200
 _GO_NOTE = ("(From jobfitr, not the person: they have told you to search now. Call "
             "`search_jobs` in this reply with what you already know. Do not ask another "
             "question and do not ask them to confirm.)")
@@ -1379,6 +1381,11 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
     t0 = time.perf_counter()
     force = told_to_search(convo)
+    # NO SEARCH BEFORE A QUESTION. One short first line ("I'm the president of a software
+    # company, curious what's out there") got `search_jobs("placeholder")` and an empty
+    # `recommend` as the first thing on screen (2026-11-12, 1 of ~25 conversations).
+    said = [m["content"] for m in convo if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    too_soon = not force and len(said) == 1 and len(_GO.sub("", said[0]).strip()) < FIRST_ASK_CHARS
     if force:
         convo.append({"role": "user", "content": _GO_NOTE})
     yield {"type": "status", "text": "thinking"}
@@ -1551,6 +1558,13 @@ async def turn_events(messages: list, model: str | None = None, state: dict | No
             yield {"type": "reset"}
         convo.append({"role": "assistant", "content": msg.get("content"), "tool_calls": tool_calls})
         for tc in tool_calls:
+            if too_soon and tc["function"]["name"] in ("search_jobs", "recommend"):
+                # Refused before it runs: no step on the page, no search counted, no banner.
+                calls += 1                    # still bounds the loop if the model insists
+                convo.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(
+                    {"error": "not yet", "note": "You have not asked the person anything yet. "
+                     "Ask your first question now, in plain text, and do not search."})})
+                continue
             calls += 1
             name = tc["function"]["name"]
             args: dict = {}

@@ -25,6 +25,9 @@ from jobfitr import chat, checks
 def _no_network_no_leftovers(monkeypatch):
     monkeypatch.setattr(checks, "dead_urls", lambda urls: set())
     monkeypatch.setattr(chat, "STREAM", False)
+    # Most tests open with "go" and a model that searches at once; the no-search-before-a-
+    # question gate is tested on its own (test_chat.py) with this set back to its value.
+    monkeypatch.setattr(chat, "FIRST_ASK_CHARS", 0)
     chat._sessions.clear()
     chat._usage["date"] = ""     # the daily caps: an empty date makes the next check roll the day
     chat._inflight.clear()

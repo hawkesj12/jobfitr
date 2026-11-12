@@ -636,3 +636,47 @@ def test_the_retired_config_vocabulary_is_gone():
     low = chat.system_prompt().lower()
     assert "boost" not in low
     assert "rank_down" not in low
+
+
+# ── no search before a question ──────────────────────────────────────────────
+PRESIDENT = "I'm the president of a software company and I'm curious what else is out there for someone like me."
+FULL_SPEC = ("I'm a warehouse supervisor in Louisville, KY, six years on nights running thirty people. "
+             "I want a day-shift supervisor job near Louisville paying at least $65,000. Search now.")
+
+
+def _first_turn(monkeypatch, text):
+    """Run one first turn against a model that searches first; return (events, searches run)."""
+    monkeypatch.setattr(chat, "FIRST_ASK_CHARS", 200)
+    ran = {"n": 0}
+
+    def search(a):
+        ran["n"] += 1
+        return {"returned": 0, "jobs": []}
+
+    async def fake(payload):
+        if payload["messages"][-1].get("role") == "tool":
+            return _reply("What kind of role are you looking for?")
+        return _tool("search_jobs", '{"titles":["placeholder"],"probes":["p"],"why":"w"}')
+
+    monkeypatch.setattr(chat, "_call", fake)
+    monkeypatch.setattr(chat, "search_jobs", search)
+
+    async def run():
+        return [ev async for ev in chat.turn_events([{"role": "user", "content": text}])]
+
+    return asyncio.run(run()), ran["n"]
+
+
+def test_a_short_first_message_gets_a_question_not_a_search(monkeypatch):
+    events, ran = _first_turn(monkeypatch, PRESIDENT)
+    kinds = [e["type"] for e in events]
+    assert ran == 0 and "tool_start" not in kinds and "tool" not in kinds and "picks" not in kinds
+    assert events[-1]["result"]["reply"] == "What kind of role are you looking for?"
+
+
+def test_a_first_message_that_states_the_whole_search_still_searches(monkeypatch):
+    assert len(FULL_SPEC) < 200      # short enough to be caught, but it says "search now"
+    events, ran = _first_turn(monkeypatch, FULL_SPEC)
+    assert ran >= 1 and any(e["type"] == "tool" for e in events)
+    events, ran = _first_turn(monkeypatch, "x" * 210 + " a long first message")
+    assert ran >= 1
