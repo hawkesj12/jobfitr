@@ -165,7 +165,7 @@ cp .env.example .env
 | ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `ADZUNA_APP_ID` / `ADZUNA_APP_KEY`  | general job market (all fields, any location)                   | [developer.adzuna.com](https://developer.adzuna.com/)              |
 | `USAJOBS_API_KEY` / `USAJOBS_EMAIL` | US federal roles                                                | [developer.usajobs.gov](https://developer.usajobs.gov/apirequest/) |
-| `OPENROUTER_API_KEY`                | the conversational front door (falls back to a form without it) | [openrouter.ai](https://openrouter.ai/)                            |
+| `OPENROUTER_API_KEY`                | the conversation; without it the page says the assistant is unavailable, and `/api/candidates` still works | [openrouter.ai](https://openrouter.ai/)                            |
 
 `.env` is gitignored — keys never land in the repo.
 
@@ -174,7 +174,12 @@ cp .env.example .env
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `CHAT_MODEL` | `anthropic/claude-sonnet-5.5` | The OpenRouter model id. Must support tool calls. About $0.10-0.40 a conversation on the default; cheaper models run it for a cent and follow the interview less well. |
-| `CHAT_DAILY_CEILING` | `100` | Turns per day (Eastern) before the chat answers 503. A turn is one message; a conversation is about five. This is the spend cap. |
+| `CHAT_DAILY_SPEND_USD` | `10` | **The spend cap.** Model dollars per day (Eastern), summed from the cost the provider reports for each model call. Once reached, new turns get a 503 and the page says the day's limit is reached. |
+| `CHAT_DAILY_CEILING` | `100` | Turns per day, site-wide, before the chat answers 503. A turn is one message; a conversation is about five. A second guard, for a model that does not report its cost. |
+| `CHAT_PER_ADDRESS_DAILY` | `50` | Turns per day from one client address. An address is often a whole office or carrier network, so this is sized for a group: ten five-turn conversations. Past it that address gets a 429 and a message that its network's limit is reached; everyone else carries on. |
+| `CHAT_PER_ADDRESS_SPEND_USD` | `4` | Model dollars per day from one client address: 12 to 26 conversations at the measured $0.15–0.32 each. It takes three addresses to spend the site's $10. |
+| `CHAT_PER_ADDRESS_CONCURRENT` | `2` | Turns one address may have running at once. A third gets a 429 and "wait a few seconds". This is what keeps parallel requests from running past the dollar caps. |
+| `CHAT_MAX_ADDRESSES` | `10000` | How many addresses the per-address counters remember (about 2.5 MB); past it the one seen longest ago is forgotten. |
 | `CHAT_RATE_LIMIT` | `20/minute` | Per-address limit on both chat endpoints. |
 | `CHAT_MAX_SEARCHES` | `4` | Searches per answer. Past this the search tool refuses and the model has to read and decide. |
 | `CHAT_WARM_WAIT` | `12` | Seconds a search waits for the live job sources before answering from what is stored. The fetch finishes in the background and the next search sees it. |
@@ -182,6 +187,25 @@ cp .env.example .env
 | `CHAT_STREAM` | `1` | Stream the model's words as they are written. |
 | `CHAT_SESSION_TTL` | `7200` | Seconds a conversation is kept in memory after its last message. |
 | `CHAT_ALLOW_CLIENT_HISTORY`, `CHAT_ALLOW_MODEL_OVERRIDE` | off | For a local measurement harness only: accept a client-supplied transcript, and let the caller pick the model. Never set these on a public box. |
+
+**What those limits are and are not.**
+
+- **Per process, per day.** Every counter above is held in the server process's memory. A
+  restart or a deploy resets them, and each of the two blue-green slots keeps its own.
+- **How far past a dollar cap a day can go.** Both dollar caps are checked when a turn
+  starts and again before every model call inside it, so the only spending that can land
+  after a cap is reached is the model calls already in flight at that moment, one per
+  running turn. With two turns per address that is at most two calls, about $0.58 at the
+  dearest turn measured. Site-wide it is one call for each turn running anywhere.
+- **What the spend total counts.** The cost the provider reports for each model call that
+  completes. A streamed call cut off before its last chunk (the visitor closed the tab
+  mid-sentence, or a dropped connection was retried) is billed by the provider but never
+  reported, so it is not in the total.
+- **Running out of credit.** If the provider refuses the account (out of credit, or the
+  key rejected), the server logs the reason at WARNING and the page says the assistant is
+  unavailable. A turn that had already delivered its picks keeps them, on screen and in the
+  conversation. A turn that delivered nothing gives back the turn it counted, so an outage
+  does not use up anyone's daily allowance.
 
 ## Commands
 
@@ -212,7 +236,7 @@ Same-origin; the front end talks to these directly.
 | Method & path        | Purpose                                                                                                                                                                                                                                                                        |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `POST /api/candidates` | Retrieval, and **no key required**. Body: `titles`, `probes` (sentences describing the work), `location`, `remote_only`, `max_age_days`, `k`. Pre-filters, runs the keyword and meaning searches, fuses them, and returns candidates with enough body text to judge from. This is the free, deterministic half of the product. |
-| `POST /api/chat`       | The conversation, one turn. `{session, message}` → `{session, reply, picks, ruled_out, brief, trace, receipt, nothing_fits}`. Send `session: null` to start; the server returns an id and holds the transcript, so the client sends only the new message. The model runs its own search loop server-side; `trace` is what it searched and why, `receipt` is what the turn cost. The **only** metered path — needs `OPENROUTER_API_KEY`, fails closed with a 503 when absent or over the daily ceiling. |
+| `POST /api/chat`       | The conversation, one turn. `{session, message}` → `{session, reply, picks, ruled_out, brief, trace, receipt, nothing_fits}`. Send `session: null` to start; the server returns an id and holds the transcript, so the client sends only the new message. The model runs its own search loop server-side; `trace` is what it searched and why, `receipt` is what the turn cost. The **only** metered path — needs `OPENROUTER_API_KEY`, fails closed with a 503 when absent or over a daily ceiling, and a 429 when one address has used its own daily share. |
 | `POST /api/chat/stream` | The same turn as Server-Sent Events: a frame as each search, read and check happens, the model's words as they are written, then the result. This is what the page uses. |
 | `GET /api/meta`      | `count` (pool size), `harvested_at`, and the `code_sha` this process is running.                                                                                                                                                                                               |
 | `GET /api/health`    | Which feeds are live, the daily fetch budget used, pool size vs. the snapshot it should be serving, and when that snapshot was last ingested.                                                                                                                                  |
@@ -220,7 +244,8 @@ Same-origin; the front end talks to these directly.
 ## What gets recorded
 
 **No account, no tracking is meant literally.** There is no login, no cookie, no
-analytics script, and nothing that follows a person between visits or between searches.
+analytics script, and nothing that follows a person between visits or between searches
+beyond the one daily usage counter described below, which holds a number and not an address.
 
 **The conversation is held in the server's memory while you are having it, and nowhere
 else.** The page sends a random session id and your new message; the server keeps the
@@ -235,6 +260,14 @@ transcript each turn, which lets anyone rewrite what the assistant "said" earlie
 
 Every response also tells you what it took: searches run, postings read, seconds, the
 model, and the model spend for that answer. It is printed under the results on purpose.
+
+**One thing is counted per address: how many chat turns, and how many model dollars, it
+has used today, and how many of its turns are running right now.** That is what lets one visitor be stopped without stopping everyone. The
+counter is kept in the server's memory only, under a salted hash of the address rather than
+the address itself, with a salt that is made new every time the server starts. It is never
+written to disk, never logged, and it is cleared at midnight Eastern and on every restart.
+The server's own request log and the rate limiter's log line have the address blanked out
+for the same reason.
 
 A self-hosted instance can optionally keep a **search-quality log** — set
 `JOBFITR_SEARCH_LOG` to a file path, and each search appends one JSON line: the query
@@ -269,15 +302,14 @@ jobfitr/
   snapshot.py         the baseline harvest → atomic jobs.json; the cached reader
   resolve.py          company → ATS board discovery, with a negative cache and an audit path
   universe.py         reads deploy/board-universe.json — the set of ATS boards known to exist
-  chat.py             THE conversation: interviews, searches repeatedly, reads, delivers five
+  chat.py             THE conversation: interviews, searches repeatedly, reads, delivers up to five
   semantic.py         the meaning-search arm (Model2Vec vectors) and the fusion with keyword search
   vectors.py          builds the vector store; incremental, keyed by a hash of the embedded text
   prompts/            every system prompt, as .md — nothing is inlined in Python
-  config_builder.py   the posted answers → a job_radar Config (the FILTER half: what you may receive)
+  config_builder.py   the posted answers → the hard filters (what you may receive)
 web/
-  index.html          the chat front door + the results board + applied rail
-  chat.js             the four-question assistant (one structured turn per message)
-  app.js              config → API → board rows, criteria bar, filters, localStorage state
+  index.html          the page: the chat front door
+  chat.js             the conversation: sends one message, shows each search as it runs, renders the checked picks
   atmosphere.js       the time-of-day sky the whole UI floats on
   style.css           the theme (time-of-day atmosphere, responsive)
 scripts/
